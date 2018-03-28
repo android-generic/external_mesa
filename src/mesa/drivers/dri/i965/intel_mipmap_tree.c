@@ -3611,6 +3611,7 @@ intel_miptree_map(struct brw_context *brw,
 {
    struct intel_miptree_map *map;
 
+   if (!mt) return;
    assert(mt->surf.samples == 1);
 
    map = intel_miptree_attach_map(mt, level, slice, x, y, w, h, mode);
@@ -3655,6 +3656,7 @@ intel_miptree_unmap(struct brw_context *brw,
                     unsigned int level,
                     unsigned int slice)
 {
+   if (!mt) return;
    struct intel_miptree_map *map = mt->level[level].slice[slice].map;
 
    assert(mt->surf.samples == 1);
