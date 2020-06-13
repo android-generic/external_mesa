@@ -370,7 +370,7 @@ radv_physical_device_init(struct radv_physical_device *device,
 	device->ws = radv_amdgpu_winsys_create(fd, instance->debug_flags,
 					       instance->perftest_flags);
 	if (!device->ws) {
-		result = vk_error(instance, VK_ERROR_INCOMPATIBLE_DRIVER);
+		result = vk_error(instance, VK_ERROR_INITIALIZATION_FAILED);
 		goto fail;
 	}
 
@@ -598,45 +598,49 @@ radv_handle_per_app_options(struct radv_instance *instance,
 			    const VkApplicationInfo *info)
 {
 	const char *name = info ? info->pApplicationName : NULL;
+	const char *engine_name = info ? info->pEngineName : NULL;
 
-	if (!name)
-		return;
+	if (name) {
+		if (!strcmp(name, "DOOM_VFR")) {
+			/* Work around a Doom VFR game bug */
+			instance->debug_flags |= RADV_DEBUG_NO_DYNAMIC_BOUNDS;
+		} else if (!strcmp(name, "MonsterHunterWorld.exe")) {
+			/* Workaround for a WaW hazard when LLVM moves/merges
+			 * load/store memory operations.
+			 * See https://reviews.llvm.org/D61313
+			 */
+			if (LLVM_VERSION_MAJOR < 9)
+				instance->debug_flags |= RADV_DEBUG_NO_LOAD_STORE_OPT;
+		} else if (!strcmp(name, "Wolfenstein: Youngblood")) {
+			if (!(instance->debug_flags & RADV_DEBUG_NO_SHADER_BALLOT) &&
+			    !(instance->perftest_flags & RADV_PERFTEST_ACO)) {
+				/* Force enable VK_AMD_shader_ballot because it looks
+				 * safe and it gives a nice boost (+20% on Vega 56 at
+				 * this time). It also prevents corruption on LLVM.
+				 */
+				instance->perftest_flags |= RADV_PERFTEST_SHADER_BALLOT;
+			}
+		} else if (!strcmp(name, "Fledge")) {
+			/*
+			 * Zero VRAM for "The Surge 2"
+			 *
+			 * This avoid a hang when when rendering any level. Likely
+			 * uninitialized data in an indirect draw.
+			 */
+			instance->debug_flags |= RADV_DEBUG_ZERO_VRAM;
+		} else if (!strcmp(name, "DOOMEternal")) {
+			/* Zero VRAM for Doom Eternal to fix rendering issues. */
+			instance->debug_flags |= RADV_DEBUG_ZERO_VRAM;
+		}
+	}
 
-	if (!strcmp(name, "Talos - Linux - 32bit") ||
-	    !strcmp(name, "Talos - Linux - 64bit")) {
-		if (!(instance->debug_flags & RADV_DEBUG_NO_SISCHED)) {
-			/* Force enable LLVM sisched for Talos because it looks
-			 * safe and it gives few more FPS.
+	if (engine_name) {
+		if (!strcmp(engine_name, "vkd3d")) {
+			/* Zero VRAM for all VKD3D (DX12->VK) games to fix
+			 * rendering issues.
 			 */
-			instance->perftest_flags |= RADV_PERFTEST_SISCHED;
+			instance->debug_flags |= RADV_DEBUG_ZERO_VRAM;
 		}
-	} else if (!strcmp(name, "DOOM_VFR")) {
-		/* Work around a Doom VFR game bug */
-		instance->debug_flags |= RADV_DEBUG_NO_DYNAMIC_BOUNDS;
-	} else if (!strcmp(name, "MonsterHunterWorld.exe")) {
-		/* Workaround for a WaW hazard when LLVM moves/merges
-		 * load/store memory operations.
-		 * See https://reviews.llvm.org/D61313
-		 */
-		if (LLVM_VERSION_MAJOR < 9)
-			instance->debug_flags |= RADV_DEBUG_NO_LOAD_STORE_OPT;
-	} else if (!strcmp(name, "Wolfenstein: Youngblood")) {
-		if (!(instance->debug_flags & RADV_DEBUG_NO_SHADER_BALLOT) &&
-		    !(instance->perftest_flags & RADV_PERFTEST_ACO)) {
-			/* Force enable VK_AMD_shader_ballot because it looks
-			 * safe and it gives a nice boost (+20% on Vega 56 at
-			 * this time). It also prevents corruption on LLVM.
-			 */
-			instance->perftest_flags |= RADV_PERFTEST_SHADER_BALLOT;
-		}
-	} else if (!strcmp(name, "Fledge")) {
-		/*
-		 * Zero VRAM for "The Surge 2"
-		 *
-		 * This avoid a hang when when rendering any level. Likely
-		 * uninitialized data in an indirect draw.
-		 */
-		instance->debug_flags |= RADV_DEBUG_ZERO_VRAM;
 	}
 }
 
@@ -800,7 +804,7 @@ radv_enumerate_devices(struct radv_instance *instance)
 {
 	/* TODO: Check for more devices ? */
 	drmDevicePtr devices[8];
-	VkResult result = VK_ERROR_INCOMPATIBLE_DRIVER;
+	VkResult result = VK_SUCCESS;
 	int max_devices;
 
 	instance->physicalDeviceCount = 0;
@@ -811,7 +815,7 @@ radv_enumerate_devices(struct radv_instance *instance)
 		radv_logi("Found %d drm nodes", max_devices);
 
 	if (max_devices < 1)
-		return vk_error(instance, VK_ERROR_INCOMPATIBLE_DRIVER);
+		return vk_error(instance, VK_SUCCESS);
 
 	for (unsigned i = 0; i < (unsigned)max_devices; i++) {
 		if (devices[i]->available_nodes & 1 << DRM_NODE_RENDER &&
@@ -822,14 +826,22 @@ radv_enumerate_devices(struct radv_instance *instance)
 			                                   instance->physicalDeviceCount,
 			                                   instance,
 			                                   devices[i]);
-			if (result == VK_SUCCESS)
-				++instance->physicalDeviceCount;
-			else if (result != VK_ERROR_INCOMPATIBLE_DRIVER)
+			/* Incompatible DRM device, skip. */
+			if (result == VK_ERROR_INCOMPATIBLE_DRIVER) {
+				result = VK_SUCCESS;
+				continue;
+			}
+
+			/* Error creating the physical device, report the error. */
+			if (result != VK_SUCCESS)
 				break;
+
+			++instance->physicalDeviceCount;
 		}
 	}
 	drmFreeDevices(devices, max_devices);
 
+	/* If we successfully enumerated any devices, call it success */
 	return result;
 }
 
@@ -843,8 +855,7 @@ VkResult radv_EnumeratePhysicalDevices(
 
 	if (instance->physicalDeviceCount < 0) {
 		result = radv_enumerate_devices(instance);
-		if (result != VK_SUCCESS &&
-		    result != VK_ERROR_INCOMPATIBLE_DRIVER)
+		if (result != VK_SUCCESS)
 			return result;
 	}
 
@@ -870,8 +881,7 @@ VkResult radv_EnumeratePhysicalDeviceGroups(
 
 	if (instance->physicalDeviceCount < 0) {
 		result = radv_enumerate_devices(instance);
-		if (result != VK_SUCCESS &&
-		    result != VK_ERROR_INCOMPATIBLE_DRIVER)
+		if (result != VK_SUCCESS)
 			return result;
 	}
 
@@ -2128,10 +2138,11 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue,
 	queue->queue_idx = idx;
 	queue->priority = radv_get_queue_global_priority(global_priority);
 	queue->flags = flags;
+	queue->hw_ctx = NULL;
 
-	queue->hw_ctx = device->ws->ctx_create(device->ws, queue->priority);
-	if (!queue->hw_ctx)
-		return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+	VkResult result = device->ws->ctx_create(device->ws, queue->priority, &queue->hw_ctx);
+	if (result != VK_SUCCESS)
+		return vk_error(device->instance, result);
 
 	list_inithead(&queue->pending_submissions);
 	pthread_mutex_init(&queue->pending_mutex, NULL);
