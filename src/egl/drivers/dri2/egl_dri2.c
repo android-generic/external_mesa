@@ -630,6 +630,18 @@ dri2_setup_screen(_EGLDisplay *disp)
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    unsigned int api_mask;
 
+   /*
+    * EGL 1.5 specification defines the default value to 1. Moreover,
+    * eglSwapInterval() is required to clamp requested value to the supported
+    * range. Since the default value is implicitly assumed to be supported,
+    * use it as both minimum and maximum for the platforms that do not allow
+    * changing the interval. Platforms, which allow it (e.g. x11, wayland)
+    * override these values already.
+    */
+   dri2_dpy->min_swap_interval = 1;
+   dri2_dpy->max_swap_interval = 1;
+   dri2_dpy->default_swap_interval = 1;
+
    if (dri2_dpy->image_driver) {
       api_mask = dri2_dpy->image_driver->getAPIMask(dri2_dpy->dri_screen);
    } else if (dri2_dpy->dri2) {
@@ -946,9 +958,12 @@ dri2_display_destroy(_EGLDisplay *disp)
           zwp_linux_dmabuf_v1_destroy(dri2_dpy->wl_dmabuf);
       if (dri2_dpy->wl_shm)
           wl_shm_destroy(dri2_dpy->wl_shm);
-      wl_registry_destroy(dri2_dpy->wl_registry);
-      wl_event_queue_destroy(dri2_dpy->wl_queue);
-      wl_proxy_wrapper_destroy(dri2_dpy->wl_dpy_wrapper);
+      if (dri2_dpy->wl_registry)
+         wl_registry_destroy(dri2_dpy->wl_registry);
+      if (dri2_dpy->wl_queue)
+         wl_event_queue_destroy(dri2_dpy->wl_queue);
+      if (dri2_dpy->wl_dpy_wrapper)
+         wl_proxy_wrapper_destroy(dri2_dpy->wl_dpy_wrapper);
       u_vector_finish(&dri2_dpy->wl_modifiers.argb8888);
       u_vector_finish(&dri2_dpy->wl_modifiers.xrgb8888);
       u_vector_finish(&dri2_dpy->wl_modifiers.rgb565);

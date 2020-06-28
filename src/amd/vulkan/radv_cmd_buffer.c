@@ -938,6 +938,11 @@ static void
 radv_emit_scissor(struct radv_cmd_buffer *cmd_buffer)
 {
 	uint32_t count = cmd_buffer->state.dynamic.scissor.count;
+
+	if (cmd_buffer->device->physical_device->rad_info.chip_class >= GFX9) {
+		cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_PS_PARTIAL_FLUSH;
+		si_emit_cache_flush(cmd_buffer);
+	}
 	si_write_scissors(cmd_buffer->cs, 0, count,
 			  cmd_buffer->state.dynamic.scissor.scissors,
 			  cmd_buffer->state.dynamic.viewport.viewports,
@@ -1984,6 +1989,7 @@ VkResult radv_BeginCommandBuffer(
 
 	memset(&cmd_buffer->state, 0, sizeof(cmd_buffer->state));
 	cmd_buffer->state.last_primitive_reset_en = -1;
+	cmd_buffer->usage_flags = pBeginInfo->flags;
 
 	/* setup initial configuration into command buffer */
 	if (cmd_buffer->level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
@@ -2251,6 +2257,8 @@ VkResult radv_EndCommandBuffer(
 			cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH | RADV_CMD_FLAG_WRITEBACK_GLOBAL_L2;
 		si_emit_cache_flush(cmd_buffer);
 	}
+
+	vk_free(&cmd_buffer->pool->alloc, cmd_buffer->state.attachments);
 
 	if (!cmd_buffer->device->ws->cs_finalize(cmd_buffer->cs) ||
 	    cmd_buffer->record_fail)
@@ -2773,6 +2781,8 @@ radv_emit_indirect_draw(struct radv_cmd_buffer *cmd_buffer,
 	if (count_buffer) {
 		count_va = cmd_buffer->device->ws->buffer_get_va(count_buffer->bo);
 		count_va += count_offset + count_buffer->offset;
+
+		cmd_buffer->device->ws->cs_add_buffer(cs, count_buffer->bo, 8);
 	}
 
 	if (!draw_count)
@@ -2788,20 +2798,30 @@ radv_emit_indirect_draw(struct radv_cmd_buffer *cmd_buffer,
 	radeon_emit(cs, indirect_va);
 	radeon_emit(cs, indirect_va >> 32);
 
-	radeon_emit(cs, PKT3(indexed ? PKT3_DRAW_INDEX_INDIRECT_MULTI :
-				       PKT3_DRAW_INDIRECT_MULTI,
-			     8, false));
-	radeon_emit(cs, 0);
-	radeon_emit(cs, (base_reg - SI_SH_REG_OFFSET) >> 2);
-	radeon_emit(cs, ((base_reg + 4) - SI_SH_REG_OFFSET) >> 2);
-	radeon_emit(cs, (((base_reg + 8) - SI_SH_REG_OFFSET) >> 2) |
-	                S_2C3_DRAW_INDEX_ENABLE(draw_id_enable) |
-	                S_2C3_COUNT_INDIRECT_ENABLE(!!count_va));
-	radeon_emit(cs, draw_count); /* count */
-	radeon_emit(cs, count_va); /* count_addr */
-	radeon_emit(cs, count_va >> 32);
-	radeon_emit(cs, stride); /* stride */
-	radeon_emit(cs, di_src_sel);
+	if (draw_count == 1 && !count_va && !draw_id_enable) {
+		radeon_emit(cs, PKT3(indexed ? PKT3_DRAW_INDEX_INDIRECT :
+				     PKT3_DRAW_INDIRECT, 3, false));
+		radeon_emit(cs, 0);
+		radeon_emit(cs, (base_reg - SI_SH_REG_OFFSET) >> 2);
+		radeon_emit(cs, ((base_reg + 4) - SI_SH_REG_OFFSET) >> 2);
+		radeon_emit(cs, di_src_sel);
+	} else {
+		radeon_emit(cs, PKT3(indexed ? PKT3_DRAW_INDEX_INDIRECT_MULTI :
+				     PKT3_DRAW_INDIRECT_MULTI,
+				     8, false));
+		radeon_emit(cs, 0);
+		radeon_emit(cs, (base_reg - SI_SH_REG_OFFSET) >> 2);
+		radeon_emit(cs, ((base_reg + 4) - SI_SH_REG_OFFSET) >> 2);
+		radeon_emit(cs, (((base_reg + 8) - SI_SH_REG_OFFSET) >> 2) |
+			    S_2C3_DRAW_INDEX_ENABLE(draw_id_enable) |
+			    S_2C3_COUNT_INDIRECT_ENABLE(!!count_va));
+		radeon_emit(cs, draw_count); /* count */
+		radeon_emit(cs, count_va); /* count_addr */
+		radeon_emit(cs, count_va >> 32);
+		radeon_emit(cs, stride); /* stride */
+		radeon_emit(cs, di_src_sel);
+	}
+
 	radv_cmd_buffer_trace_emit(cmd_buffer);
 }
 

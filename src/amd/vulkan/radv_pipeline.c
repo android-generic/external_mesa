@@ -65,6 +65,7 @@ static const struct nir_shader_compiler_options nir_options = {
 	.lower_unpack_unorm_4x8 = true,
 	.lower_extract_byte = true,
 	.lower_extract_word = true,
+	.lower_ffma = true,
 	.max_unroll_iterations = 32
 };
 
@@ -161,6 +162,7 @@ radv_optimize_nir(struct nir_shader *shader)
                 if (nir_opt_trivial_continues(shader)) {
                         progress = true;
                         NIR_PASS(progress, shader, nir_copy_prop);
+                        NIR_PASS(progress, shader, nir_opt_remove_phis);
                         NIR_PASS(progress, shader, nir_opt_dce);
                 }
                 NIR_PASS(progress, shader, nir_opt_if);
@@ -273,8 +275,32 @@ radv_shader_compile_to_nir(struct radv_device *device,
 
 	nir_shader_gather_info(nir, entry_point->impl);
 
+	/* While it would be nice not to have this flag, we are constrained
+	 * by the reality that LLVM 5.0 doesn't have working VGPR indexing
+	 * on GFX9.
+	 */
+	bool llvm_has_working_vgpr_indexing =
+		device->physical_device->rad_info.chip_class <= VI;
+
+	/* TODO: Indirect indexing of GS inputs is unimplemented.
+	 *
+	 * TCS and TES load inputs directly from LDS or offchip memory, so
+	 * indirect indexing is trivial.
+	 */
 	nir_variable_mode indirect_mask = 0;
 	indirect_mask |= nir_var_shader_in;
+
+	if (!llvm_has_working_vgpr_indexing &&
+	    nir->info.stage != MESA_SHADER_TESS_CTRL)
+		indirect_mask |= nir_var_shader_out;
+
+        /* TODO: We shouldn't need to do this, however LLVM isn't currently
+	 * smart enough to handle indirects without causing excess spilling
+	 * causing the gpu to hang.
+	 *
+	 * See the following thread for more details of the problem:
+	 * https://lists.freedesktop.org/archives/mesa-dev/2017-July/162106.html
+	 */
 	indirect_mask |= nir_var_local;
 
 	nir_lower_indirect_derefs(nir, indirect_mask);

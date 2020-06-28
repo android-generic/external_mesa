@@ -116,12 +116,13 @@ vc4_predraw_check_textures(struct pipe_context *pctx,
         struct vc4_context *vc4 = vc4_context(pctx);
 
         for (int i = 0; i < stage_tex->num_textures; i++) {
-                struct pipe_sampler_view *view = stage_tex->textures[i];
+                struct vc4_sampler_view *view =
+                        vc4_sampler_view(stage_tex->textures[i]);
                 if (!view)
                         continue;
-                struct vc4_resource *rsc = vc4_resource(view->texture);
-                if (rsc->shadow_parent)
-                        vc4_update_shadow_baselevel_texture(pctx, view);
+
+                if (view->texture != view->base.texture)
+                        vc4_update_shadow_baselevel_texture(pctx, &view->base);
 
                 vc4_flush_jobs_writing_resource(vc4, view->texture);
         }
@@ -322,6 +323,7 @@ vc4_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info)
 
         vc4_emit_state(pctx);
 
+        bool needs_drawarrays_shader_state = false;
         if ((vc4->dirty & (VC4_DIRTY_VTXBUF |
                            VC4_DIRTY_VTXSTATE |
                            VC4_DIRTY_PRIM_MODE |
@@ -333,7 +335,10 @@ vc4_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info)
                            vc4->prog.vs->uniform_dirty_bits |
                            vc4->prog.fs->uniform_dirty_bits)) ||
             vc4->last_index_bias != info->index_bias) {
-                vc4_emit_gl_shader_state(vc4, info, 0);
+                if (info->index_size)
+                        vc4_emit_gl_shader_state(vc4, info, 0);
+                else
+                        needs_drawarrays_shader_state = true;
         }
 
         vc4->dirty = 0;
@@ -383,29 +388,35 @@ vc4_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info)
                 uint32_t count = info->count;
                 uint32_t start = info->start;
                 uint32_t extra_index_bias = 0;
+                static const uint32_t max_verts = 65535;
+
+                /* GFXH-515 / SW-5891: The binner emits 16 bit indices for
+                 * drawarrays, which means that if start + count > 64k it
+                 * would truncate the top bits.  Work around this by emitting
+                 * a limited number of primitives at a time and reemitting the
+                 * shader state pointing farther down the vertex attribute
+                 * arrays.
+                 *
+                 * To do this properly for line loops or trifans, we'd need to
+                 * make a new VB containing the first vertex plus whatever
+                 * remainder.
+                 */
+                if (start + count > max_verts) {
+                        extra_index_bias = start;
+                        start = 0;
+                        needs_drawarrays_shader_state = true;
+                }
 
                 while (count) {
                         uint32_t this_count = count;
                         uint32_t step = count;
-                        static const uint32_t max_verts = 65535;
 
-                        /* GFXH-515 / SW-5891: The binner emits 16 bit indices
-                         * for drawarrays, which means that if start + count >
-                         * 64k it would truncate the top bits.  Work around
-                         * this by emitting a limited number of primitives at
-                         * a time and reemitting the shader state pointing
-                         * farther down the vertex attribute arrays.
-                         *
-                         * To do this properly for line loops or trifans, we'd
-                         * need to make a new VB containing the first vertex
-                         * plus whatever remainder.
-                         */
-                        if (extra_index_bias) {
+                        if (needs_drawarrays_shader_state) {
                                 vc4_emit_gl_shader_state(vc4, info,
                                                          extra_index_bias);
                         }
 
-                        if (start + count > max_verts) {
+                        if (count > max_verts) {
                                 switch (info->mode) {
                                 case PIPE_PRIM_POINTS:
                                         this_count = step = max_verts;
@@ -448,6 +459,7 @@ vc4_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info)
                         count -= step;
                         extra_index_bias += start + step;
                         start = 0;
+                        needs_drawarrays_shader_state = true;
                 }
         }
 
@@ -502,6 +514,37 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers,
         struct vc4_context *vc4 = vc4_context(pctx);
         struct vc4_job *job = vc4_get_job_for_fbo(vc4);
 
+        if (buffers & PIPE_CLEAR_DEPTHSTENCIL) {
+                struct vc4_resource *rsc =
+                        vc4_resource(vc4->framebuffer.zsbuf->texture);
+                unsigned zsclear = buffers & PIPE_CLEAR_DEPTHSTENCIL;
+
+                /* Clearing ZS will clear both Z and stencil, so if we're
+                 * trying to clear just one then we need to draw a quad to do
+                 * it instead.  We need to do this before setting up
+                 * tile-based clears in vc4->job, because the blitter may
+                 * submit the current job.
+                 */
+                if ((zsclear == PIPE_CLEAR_DEPTH ||
+                     zsclear == PIPE_CLEAR_STENCIL) &&
+                    (rsc->initialized_buffers & ~(zsclear | job->cleared)) &&
+                    util_format_is_depth_and_stencil(vc4->framebuffer.zsbuf->format)) {
+                        perf_debug("Partial clear of Z+stencil buffer, "
+                                   "drawing a quad instead of fast clearing\n");
+                        vc4_blitter_save(vc4);
+                        util_blitter_clear(vc4->blitter,
+                                           vc4->framebuffer.width,
+                                           vc4->framebuffer.height,
+                                           1,
+                                           zsclear,
+                                           NULL, depth, stencil);
+                        buffers &= ~zsclear;
+                        if (!buffers)
+                                return;
+                        job = vc4_get_job_for_fbo(vc4);
+                }
+        }
+
         /* We can't flag new buffers for clearing once we've queued draws.  We
          * could avoid this by using the 3d engine to clear.
          */
@@ -537,29 +580,6 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers,
         if (buffers & PIPE_CLEAR_DEPTHSTENCIL) {
                 struct vc4_resource *rsc =
                         vc4_resource(vc4->framebuffer.zsbuf->texture);
-                unsigned zsclear = buffers & PIPE_CLEAR_DEPTHSTENCIL;
-
-                /* Clearing ZS will clear both Z and stencil, so if we're
-                 * trying to clear just one then we need to draw a quad to do
-                 * it instead.
-                 */
-                if ((zsclear == PIPE_CLEAR_DEPTH ||
-                     zsclear == PIPE_CLEAR_STENCIL) &&
-                    (rsc->initialized_buffers & ~(zsclear | job->cleared)) &&
-                    util_format_is_depth_and_stencil(vc4->framebuffer.zsbuf->format)) {
-                        perf_debug("Partial clear of Z+stencil buffer, "
-                                   "drawing a quad instead of fast clearing\n");
-                        vc4_blitter_save(vc4);
-                        util_blitter_clear(vc4->blitter,
-                                           vc4->framebuffer.width,
-                                           vc4->framebuffer.height,
-                                           1,
-                                           zsclear,
-                                           NULL, depth, stencil);
-                        buffers &= ~zsclear;
-                        if (!buffers)
-                                return;
-                }
 
                 /* Though the depth buffer is stored with Z in the high 24,
                  * for this field we just need to store it in the low 24.
@@ -571,7 +591,7 @@ vc4_clear(struct pipe_context *pctx, unsigned buffers,
                 if (buffers & PIPE_CLEAR_STENCIL)
                         job->clear_stencil = stencil;
 
-                rsc->initialized_buffers |= zsclear;
+                rsc->initialized_buffers |= (buffers & PIPE_CLEAR_DEPTHSTENCIL);
         }
 
         job->draw_min_x = 0;

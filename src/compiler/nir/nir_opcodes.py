@@ -308,7 +308,7 @@ for (unsigned bit = 0; bit < 32; bit++) {
 
 unop_convert("ufind_msb", tint32, tuint32, """
 dst = -1;
-for (int bit = 31; bit > 0; bit--) {
+for (int bit = 31; bit >= 0; bit--) {
    if ((src0 >> bit) & 1) {
       dst = bit;
       break;
@@ -717,12 +717,12 @@ opcode("bitfield_insert", 0, tuint32, [0, 0, 0, 0],
 unsigned base = src0, insert = src1;
 int offset = src2, bits = src3;
 if (bits == 0) {
-   dst = 0;
+   dst = base;
 } else if (offset < 0 || bits < 0 || bits + offset > 32) {
    dst = 0;
 } else {
    unsigned mask = ((1ull << bits) - 1) << offset;
-   dst = (base & ~mask) | ((insert << bits) & mask);
+   dst = (base & ~mask) | ((insert << offset) & mask);
 }
 """)
 

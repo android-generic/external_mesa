@@ -553,15 +553,35 @@ static int gfx6_compute_surface(ADDR_HANDLE addrlib,
 	AddrSurfInfoIn.flags.noStencil = (surf->flags & RADEON_SURF_SBUFFER) == 0;
 	AddrSurfInfoIn.flags.compressZ = AddrSurfInfoIn.flags.depth;
 
-	/* noStencil = 0 can result in a depth part that is incompatible with
-	 * mipmapped texturing. So set noStencil = 1 when mipmaps are requested (in
-	 * this case, we may end up setting stencil_adjusted).
+	/* On CI/VI, the DB uses the same pitch and tile mode (except tilesplit)
+	 * for Z and stencil. This can cause a number of problems which we work
+	 * around here:
 	 *
-	 * TODO: update addrlib to a newer version, remove this, and
-	 * use flags.matchStencilTileCfg = 1 as an alternative fix.
+	 * - a depth part that is incompatible with mipmapped texturing
+	 * - at least on Stoney, entirely incompatible Z/S aspects (e.g.
+	 *   incorrect tiling applied to the stencil part, stencil buffer
+	 *   memory accesses that go out of bounds) even without mipmapping
+	 *
+	 * Some piglit tests that are prone to different types of related
+	 * failures:
+	 *  ./bin/ext_framebuffer_multisample-upsample 2 stencil
+	 *  ./bin/framebuffer-blit-levels {draw,read} stencil
+	 *  ./bin/ext_framebuffer_multisample-unaligned-blit N {depth,stencil} {msaa,upsample,downsample}
+	 *  ./bin/fbo-depth-array fs-writes-{depth,stencil} / {depth,stencil}-{clear,layered-clear,draw}
+	 *  ./bin/depthstencil-render-miplevels 1024 d=s=z24_s8
 	 */
-	if (config->info.levels > 1)
+	int stencil_tile_idx = -1;
+
+	if (AddrSurfInfoIn.flags.depth && !AddrSurfInfoIn.flags.noStencil &&
+	    (config->info.levels > 1 || info->family == CHIP_STONEY)) {
+		/* Compute stencilTileIdx that is compatible with the (depth)
+		 * tileIdx. This degrades the depth surface if necessary to
+		 * ensure that a matching stencilTileIdx exists. */
+		AddrSurfInfoIn.flags.matchStencilTileCfg = 1;
+
+		/* Keep the depth mip-tail compatible with texturing. */
 		AddrSurfInfoIn.flags.noStencil = 1;
+	}
 
 	/* Set preferred macrotile parameters. This is usually required
 	 * for shared resources. This is for 2D tiling only. */
@@ -643,12 +663,33 @@ static int gfx6_compute_surface(ADDR_HANDLE addrlib,
 			if (level > 0)
 				continue;
 
+			/* Check that we actually got a TC-compatible HTILE if
+			 * we requested it (only for level 0, since we're not
+			 * supporting HTILE on higher mip levels anyway). */
+			assert(AddrSurfInfoOut.tcCompatible ||
+			       !AddrSurfInfoIn.flags.tcCompatible ||
+			       AddrSurfInfoIn.flags.matchStencilTileCfg);
+
+			if (AddrSurfInfoIn.flags.matchStencilTileCfg) {
+				if (!AddrSurfInfoOut.tcCompatible) {
+					AddrSurfInfoIn.flags.tcCompatible = 0;
+					surf->flags &= ~RADEON_SURF_TC_COMPATIBLE_HTILE;
+				}
+
+				AddrSurfInfoIn.flags.matchStencilTileCfg = 0;
+				AddrSurfInfoIn.tileIndex = AddrSurfInfoOut.tileIndex;
+				stencil_tile_idx = AddrSurfInfoOut.stencilTileIdx;
+
+				assert(stencil_tile_idx >= 0);
+			}
+
 			gfx6_surface_settings(info, &AddrSurfInfoOut, surf);
 		}
 	}
 
 	/* Calculate texture layout information for stencil. */
 	if (surf->flags & RADEON_SURF_SBUFFER) {
+		AddrSurfInfoIn.tileIndex = stencil_tile_idx;
 		AddrSurfInfoIn.bpp = 8;
 		AddrSurfInfoIn.flags.depth = 0;
 		AddrSurfInfoIn.flags.stencil = 1;
@@ -847,9 +888,11 @@ static int gfx9_compute_miptree(ADDR_HANDLE addrlib,
 		    in->numSamples == 1) {
 			ADDR2_COMPUTE_DCCINFO_INPUT din = {0};
 			ADDR2_COMPUTE_DCCINFO_OUTPUT dout = {0};
+			ADDR2_META_MIP_INFO meta_mip_info[RADEON_SURF_MAX_LEVELS] = {};
 
 			din.size = sizeof(ADDR2_COMPUTE_DCCINFO_INPUT);
 			dout.size = sizeof(ADDR2_COMPUTE_DCCINFO_OUTPUT);
+			dout.pMipInfo = meta_mip_info;
 
 			din.dccKeyFlags.pipeAligned = 1;
 			din.dccKeyFlags.rbAligned = 1;
@@ -873,6 +916,39 @@ static int gfx9_compute_miptree(ADDR_HANDLE addrlib,
 			surf->u.gfx9.dcc_pitch_max = dout.pitch - 1;
 			surf->dcc_size = dout.dccRamSize;
 			surf->dcc_alignment = dout.dccRamBaseAlign;
+			surf->num_dcc_levels = in->numMipLevels;
+
+			/* Disable DCC for levels that are in the mip tail.
+			 *
+			 * There are two issues that this is intended to
+			 * address:
+			 *
+			 * 1. Multiple mip levels may share a cache line. This
+			 *    can lead to corruption when switching between
+			 *    rendering to different mip levels because the
+			 *    RBs don't maintain coherency.
+			 *
+			 * 2. Texturing with metadata after rendering sometimes
+			 *    fails with corruption, probably for a similar
+			 *    reason.
+			 *
+			 * Working around these issues for all levels in the
+			 * mip tail may be overly conservative, but it's what
+			 * Vulkan does.
+			 *
+			 * Alternative solutions that also work but are worse:
+			 * - Disable DCC entirely.
+			 * - Flush TC L2 after rendering.
+			 */
+			for (unsigned i = 0; i < in->numMipLevels; i++) {
+				if (meta_mip_info[i].inMiptail) {
+					surf->num_dcc_levels = i;
+					break;
+				}
+			}
+
+			if (!surf->num_dcc_levels)
+				surf->dcc_size = 0;
 		}
 
 		/* FMASK */
@@ -1026,6 +1102,7 @@ static int gfx9_compute_surface(ADDR_HANDLE addrlib,
 
 	surf->u.gfx9.resource_type = AddrSurfInfoIn.resourceType;
 
+	surf->num_dcc_levels = 0;
 	surf->surf_size = 0;
 	surf->dcc_size = 0;
 	surf->htile_size = 0;
@@ -1042,9 +1119,16 @@ static int gfx9_compute_surface(ADDR_HANDLE addrlib,
 
 	/* Calculate texture layout information for stencil. */
 	if (surf->flags & RADEON_SURF_SBUFFER) {
-		AddrSurfInfoIn.bpp = 8;
-		AddrSurfInfoIn.flags.depth = 0;
 		AddrSurfInfoIn.flags.stencil = 1;
+		AddrSurfInfoIn.bpp = 8;
+
+		if (!AddrSurfInfoIn.flags.depth) {
+			r = gfx9_get_preferred_swizzle_mode(addrlib, &AddrSurfInfoIn, false,
+							    &AddrSurfInfoIn.swizzleMode);
+			if (r)
+				return r;
+		} else
+			AddrSurfInfoIn.flags.depth = 0;
 
 		r = gfx9_compute_miptree(addrlib, surf, compressed, &AddrSurfInfoIn);
 		if (r)
@@ -1052,7 +1136,6 @@ static int gfx9_compute_surface(ADDR_HANDLE addrlib,
 	}
 
 	surf->is_linear = surf->u.gfx9.surf.swizzle_mode == ADDR_SW_LINEAR;
-	surf->num_dcc_levels = surf->dcc_size ? config->info.levels : 0;
 
 	switch (surf->u.gfx9.surf.swizzle_mode) {
 		/* S = standard. */

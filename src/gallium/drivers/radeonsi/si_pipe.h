@@ -59,7 +59,8 @@
 #define SI_CONTEXT_WRITEBACK_GLOBAL_L2	(R600_CONTEXT_PRIVATE_FLAG << 4)
 /* gaps */
 /* Framebuffer caches. */
-#define SI_CONTEXT_FLUSH_AND_INV_DB	(R600_CONTEXT_PRIVATE_FLAG << 7)
+#define SI_CONTEXT_FLUSH_AND_INV_DB	(R600_CONTEXT_PRIVATE_FLAG << 6)
+#define SI_CONTEXT_FLUSH_AND_INV_DB_META (R600_CONTEXT_PRIVATE_FLAG << 7)
 #define SI_CONTEXT_FLUSH_AND_INV_CB	(R600_CONTEXT_PRIVATE_FLAG << 8)
 /* Engine synchronization. */
 #define SI_CONTEXT_VS_PARTIAL_FLUSH	(R600_CONTEXT_PRIVATE_FLAG << 9)
@@ -149,6 +150,7 @@ struct si_sampler_state {
 	unsigned			magic;
 #endif
 	uint32_t			val[4];
+	uint32_t			upgraded_depth_val[4];
 };
 
 struct si_cs_shader_state {
@@ -387,7 +389,6 @@ struct si_context {
 	unsigned		last_sc_line_stipple;
 	unsigned		current_vs_state;
 	unsigned		last_vs_state;
-	enum pipe_prim_type	current_rast_prim; /* primitive type after TES, GS */
 
 	/* Scratch buffer */
 	struct r600_atom	scratch_state;

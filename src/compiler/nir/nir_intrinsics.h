@@ -121,9 +121,9 @@ BARRIER(memory_barrier_shared)
 INTRINSIC(discard_if, 1, ARR(1), false, 0, 0, 0, xx, xx, xx, 0)
 
 /** ARB_shader_group_vote intrinsics */
-INTRINSIC(vote_any, 1, ARR(1), true, 1, 1, 0, xx, xx, xx, NIR_INTRINSIC_CAN_ELIMINATE)
-INTRINSIC(vote_all, 1, ARR(1), true, 1, 1, 0, xx, xx, xx, NIR_INTRINSIC_CAN_ELIMINATE)
-INTRINSIC(vote_eq,  1, ARR(1), true, 1, 1, 0, xx, xx, xx, NIR_INTRINSIC_CAN_ELIMINATE)
+INTRINSIC(vote_any, 1, ARR(1), true, 1, 0, 0, xx, xx, xx, NIR_INTRINSIC_CAN_ELIMINATE)
+INTRINSIC(vote_all, 1, ARR(1), true, 1, 0, 0, xx, xx, xx, NIR_INTRINSIC_CAN_ELIMINATE)
+INTRINSIC(vote_eq,  1, ARR(1), true, 1, 0, 0, xx, xx, xx, NIR_INTRINSIC_CAN_ELIMINATE)
 
 /**
  * Basic Geometry Shader intrinsics.
@@ -433,7 +433,7 @@ INTRINSIC(load_interpolated_input, 2, ARR(2, 1), true, 0, 0,
 /* src[] = { buffer_index, offset }. No const_index */
 LOAD(ssbo, 2, 0, xx, xx, xx, NIR_INTRINSIC_CAN_ELIMINATE)
 /* src[] = { offset }. const_index[] = { base, component } */
-LOAD(output, 1, 1, BASE, COMPONENT, xx, NIR_INTRINSIC_CAN_ELIMINATE)
+LOAD(output, 1, 2, BASE, COMPONENT, xx, NIR_INTRINSIC_CAN_ELIMINATE)
 /* src[] = { vertex, offset }. const_index[] = { base, component } */
 LOAD(per_vertex_output, 2, 1, BASE, COMPONENT, xx, NIR_INTRINSIC_CAN_ELIMINATE)
 /* src[] = { offset }. const_index[] = { base } */

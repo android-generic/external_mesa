@@ -266,7 +266,7 @@ struct radv_physical_device {
 	struct radeon_winsys *ws;
 	struct radeon_info rad_info;
 	char                                        path[20];
-	const char *                                name;
+	char                                        name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
 	uint8_t                                     uuid[VK_UUID_SIZE];
 	uint8_t                                     device_uuid[VK_UUID_SIZE];
 
@@ -276,6 +276,9 @@ struct radv_physical_device {
 
 	bool has_rbplus; /* if RB+ register exist */
 	bool rbplus_allowed; /* if RB+ is allowed */
+
+	VkPhysicalDeviceMemoryProperties memory_properties;
+	enum radv_mem_type mem_type_indices[RADV_MEM_TYPE_COUNT];
 };
 
 struct radv_instance {
@@ -1213,14 +1216,14 @@ struct radv_image {
 	/* Set when bound */
 	struct radeon_winsys_bo *bo;
 	VkDeviceSize offset;
-	uint32_t dcc_offset;
-	uint32_t htile_offset;
+	uint64_t dcc_offset;
+	uint64_t htile_offset;
 	struct radeon_surf surface;
 
 	struct radv_fmask_info fmask;
 	struct radv_cmask_info cmask;
-	uint32_t clear_value_offset;
-	uint32_t dcc_pred_offset;
+	uint64_t clear_value_offset;
+	uint64_t dcc_pred_offset;
 };
 
 /* Whether the image has a htile that is known consistent with the contents of

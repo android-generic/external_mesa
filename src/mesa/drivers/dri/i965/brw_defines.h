@@ -1428,7 +1428,7 @@ enum brw_pixel_shader_coverage_mask_mode {
 #define MI_LOAD_REGISTER_IMM		(CMD_MI | (0x22 << 23))
 #define MI_LOAD_REGISTER_REG		(CMD_MI | (0x2A << 23))
 
-#define MI_FLUSH_DW			(CMD_MI | (0x26 << 23) | 2)
+#define MI_FLUSH_DW			(CMD_MI | (0x26 << 23))
 
 #define MI_STORE_REGISTER_MEM		(CMD_MI | (0x24 << 23))
 # define MI_STORE_REGISTER_MEM_USE_GGTT		(1 << 22)
@@ -1616,6 +1616,13 @@ enum brw_pixel_shader_coverage_mask_mode {
 # define GEN9_PARTIAL_RESOLVE_DISABLE_IN_VC (1 << 1)
 # define GEN8_HIZ_PMA_MASK_BITS \
    REG_MASK(GEN8_HIZ_NP_PMA_FIX_ENABLE | GEN8_HIZ_NP_EARLY_Z_FAILS_DISABLE)
+
+#define GEN7_GT_MODE                    0x7008
+# define GEN9_SUBSLICE_HASHING_8x8      (0 << 8)
+# define GEN9_SUBSLICE_HASHING_16x4     (1 << 8)
+# define GEN9_SUBSLICE_HASHING_8x4      (2 << 8)
+# define GEN9_SUBSLICE_HASHING_16x16    (3 << 8)
+# define GEN9_SUBSLICE_HASHING_MASK_BITS REG_MASK(3 << 8)
 
 /* Predicate registers */
 #define MI_PREDICATE_SRC0               0x2400
