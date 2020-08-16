@@ -45,6 +45,14 @@ ifeq ($(strip $(MESA_ENABLE_ASM)),true)
 	LOCAL_SRC_FILES_x86_64 += $(filter-out %.h,$(X86_64_FILES))
 endif # MESA_ENABLE_ASM
 
+ifeq ($(ARCH_X86_HAVE_SSE4_1),true)
+LOCAL_WHOLE_STATIC_LIBRARIES := \
+	libmesa_sse41
+LOCAL_CFLAGS := \
+	-msse4.1 -mstackrealign \
+       -DUSE_SSE41
+endif
+
 LOCAL_C_INCLUDES := \
 	$(MESA_TOP)/src/mapi \
 	$(MESA_TOP)/src/mesa/main \
