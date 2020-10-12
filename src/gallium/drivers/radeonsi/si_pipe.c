@@ -907,7 +907,7 @@ static void si_disk_cache_create(struct si_screen *sscreen)
    disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
 
 /* These flags affect shader compilation. */
-#define ALL_FLAGS (DBG(GISEL) | DBG(KILL_PS_INF_INTERP))
+#define ALL_FLAGS (DBG(GISEL) | DBG(KILL_PS_INF_INTERP) | DBG(CLAMP_DIV_BY_ZERO))
    uint64_t shader_debug_flags = sscreen->debug_flags & ALL_FLAGS;
 
    /* Add the high bits of 32-bit addresses, which affects
@@ -1030,9 +1030,10 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
 #include "si_debug_options.h"
    }
 
-   if (sscreen->options.no_infinite_interp) {
+   if (sscreen->options.no_infinite_interp)
       sscreen->debug_flags |= DBG(KILL_PS_INF_INTERP);
-   }
+   if (sscreen->options.clamp_div_by_zero)
+      sscreen->debug_flags |= DBG(CLAMP_DIV_BY_ZERO);
 
    si_disk_cache_create(sscreen);
 
@@ -1151,6 +1152,11 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    sscreen->commutative_blend_add =
       driQueryOptionb(config->options, "radeonsi_commutative_blend_add") ||
       driQueryOptionb(config->options, "allow_draw_out_of_order");
+
+   /* TODO: Find out why NGG culling hangs on gfx10.3 */
+   if (sscreen->info.chip_class == GFX10_3 &&
+       !(sscreen->debug_flags & (DBG(ALWAYS_NGG_CULLING_ALL) | DBG(ALWAYS_NGG_CULLING_TESS))))
+      sscreen->debug_flags |= DBG(NO_NGG_CULLING);
 
    sscreen->use_ngg = sscreen->info.chip_class >= GFX10 && sscreen->info.family != CHIP_NAVI14 &&
                       !(sscreen->debug_flags & DBG(NO_NGG));
