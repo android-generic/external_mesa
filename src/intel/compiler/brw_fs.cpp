@@ -4754,7 +4754,8 @@ lower_sampler_logical_send_gen4(const fs_builder &bld, fs_inst *inst, opcode op,
    if (coord_components > 0 &&
        (has_lod || shadow_c.file != BAD_FILE ||
         (op == SHADER_OPCODE_TEX && bld.dispatch_width() == 8))) {
-      for (unsigned i = coord_components; i < 3; i++)
+      assert(coord_components <= 3);
+      for (unsigned i = 0; i < 3 - coord_components; i++)
          bld.MOV(offset(msg_end, bld, i), brw_imm_f(0.0f));
 
       msg_end = offset(msg_end, bld, 3 - coord_components);
@@ -5461,7 +5462,10 @@ lower_surface_logical_send(const fs_builder &bld, fs_inst *inst)
    const fs_reg &surface_handle = inst->src[SURFACE_LOGICAL_SRC_SURFACE_HANDLE];
    const UNUSED fs_reg &dims = inst->src[SURFACE_LOGICAL_SRC_IMM_DIMS];
    const fs_reg &arg = inst->src[SURFACE_LOGICAL_SRC_IMM_ARG];
+   const fs_reg &allow_sample_mask =
+      inst->src[SURFACE_LOGICAL_SRC_ALLOW_SAMPLE_MASK];
    assert(arg.file == IMM);
+   assert(allow_sample_mask.file == IMM);
 
    /* We must have exactly one of surface and surface_handle */
    assert((surface.file == BAD_FILE) != (surface_handle.file == BAD_FILE));
@@ -5485,8 +5489,9 @@ lower_surface_logical_send(const fs_builder &bld, fs_inst *inst)
                               surface.ud == GEN8_BTI_STATELESS_NON_COHERENT);
 
    const bool has_side_effects = inst->has_side_effects();
-   fs_reg sample_mask = has_side_effects ? sample_mask_reg(bld) :
-                                           fs_reg(brw_imm_d(0xffff));
+
+   fs_reg sample_mask = allow_sample_mask.ud ? sample_mask_reg(bld) :
+                                               fs_reg(brw_imm_d(0xffff));
 
    /* From the BDW PRM Volume 7, page 147:
     *

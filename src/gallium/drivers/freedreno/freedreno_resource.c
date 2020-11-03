@@ -216,6 +216,9 @@ do_blit(struct fd_context *ctx, const struct pipe_blit_info *blit, bool fallback
 	}
 }
 
+static void
+flush_resource(struct fd_context *ctx, struct fd_resource *rsc, unsigned usage);
+
 /**
  * @rsc: the resource to shadow
  * @level: the level to discard (if box != NULL, otherwise ignored)
@@ -232,6 +235,21 @@ fd_try_shadow_resource(struct fd_context *ctx, struct fd_resource *rsc,
 
 	if (prsc->next)
 		return false;
+
+	/* If you have a sequence where there is a single rsc associated
+	 * with the current render target, and then you end up shadowing
+	 * that same rsc on the 3d pipe (u_blitter), because of how we
+	 * swap the new shadow and rsc before the back-blit, you could end
+	 * up confusing things into thinking that u_blitter's framebuffer
+	 * state is the same as the current framebuffer state, which has
+	 * the result of blitting to rsc rather than shadow.
+	 *
+	 * Normally we wouldn't want to unconditionally trigger a flush,
+	 * since that defeats the purpose of shadowing, but this is a
+	 * case where we'd have to flush anyways.
+	 */
+	if (rsc->write_batch == ctx->batch)
+		flush_resource(ctx, rsc, 0);
 
 	/* TODO: somehow munge dimensions and format to copy unsupported
 	 * render target format to something that is supported?
@@ -1090,6 +1108,10 @@ fd_resource_from_handle(struct pipe_screen *pscreen,
 {
 	struct fd_screen *screen = fd_screen(pscreen);
 	struct fd_resource *rsc = CALLOC_STRUCT(fd_resource);
+
+	if (!rsc)
+		return NULL;
+
 	struct fdl_slice *slice = fd_resource_slice(rsc, 0);
 	struct pipe_resource *prsc = &rsc->base;
 
@@ -1099,9 +1121,6 @@ fd_resource_from_handle(struct pipe_screen *pscreen,
 			tmpl->width0, tmpl->height0, tmpl->depth0,
 			tmpl->array_size, tmpl->last_level, tmpl->nr_samples,
 			tmpl->usage, tmpl->bind, tmpl->flags);
-
-	if (!rsc)
-		return NULL;
 
 	*prsc = *tmpl;
 	fd_resource_layout_init(prsc);
@@ -1244,6 +1263,12 @@ fd_layout_resource_for_modifier(struct fd_resource *rsc, uint64_t modifier)
 {
 	switch (modifier) {
 	case DRM_FORMAT_MOD_LINEAR:
+		/* The dri gallium frontend will pass DRM_FORMAT_MOD_INVALID to us
+		 * when it's called through any of the non-modifier BO create entry
+		 * points.  Other drivers will determine tiling from the kernel or
+		 * other legacy backchannels, but for freedreno it just means
+		 * LINEAR. */
+	case DRM_FORMAT_MOD_INVALID:
 		return 0;
 	default:
 		return -1;

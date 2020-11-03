@@ -443,12 +443,14 @@ The integer capabilities:
 * ``PIPE_CAP_FRAMEBUFFER_MSAA_CONSTRAINTS``: This determines limitations
   on the number of samples that framebuffer attachments can have.
   Possible values:
-    0: color.nr_samples == zs.nr_samples == color.nr_storage_samples
+
+    0. color.nr_samples == zs.nr_samples == color.nr_storage_samples
        (standard MSAA quality)
-    1: color.nr_samples >= zs.nr_samples == color.nr_storage_samples
+    1. color.nr_samples >= zs.nr_samples == color.nr_storage_samples
        (enhanced MSAA quality)
-    2: color.nr_samples >= zs.nr_samples >= color.nr_storage_samples
+    2. color.nr_samples >= zs.nr_samples >= color.nr_storage_samples
        (full flexibility in tuning MSAA quality and performance)
+
   All color attachments must have the same number of samples and the same
   number of storage samples.
 * ``PIPE_CAP_SIGNED_VERTEX_BUFFER_OFFSET``:
@@ -579,6 +581,7 @@ The integer capabilities:
 * ``PIPE_CAP_SYSTEM_SVM``: True if all application memory can be shared with the GPU without explicit mapping.
 * ``PIPE_CAP_VIEWPORT_MASK``: Whether ``TGSI_SEMANTIC_VIEWPORT_MASK`` and ``TGSI_PROPERTY_LAYER_VIEWPORT_RELATIVE`` are supported (see GL_NV_viewport_array2).
 * ``PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE``: Whether mapping a buffer as unsynchronized from any thread is safe.
+* ``PIPE_CAP_NO_CLIP_ON_COPY_TEX``: Driver doesn't want x/y/width/height clipped based on src size when doing a copy texture operation (eg: may want out-of-bounds reads that produce 0 instead of leaving the texture content undefined)
 
 .. _pipe_capf:
 
@@ -928,6 +931,7 @@ If there are not enough slots to store all sample colors, some samples will
 have an undefined color (called "undefined samples").
 
 The resolve blit behavior is driver-specific, but can be one of these two:
+
 1. Only defined samples will be averaged. Undefined samples will be ignored.
 2. Undefined samples will be approximated by looking at surrounding defined
    samples (even in different pixels).

@@ -396,7 +396,7 @@ std::pair<PhysReg, bool> get_reg_simple(ra_ctx& ctx,
    }
 
    if (stride == 1) {
-
+      info.rc = RegClass(rc.type(), size);
       for (unsigned stride = 8; stride > 1; stride /= 2) {
          if (size % stride)
             continue;
@@ -1861,10 +1861,8 @@ void register_allocation(Program *program, std::vector<TempSet>& live_out_per_bl
 
             if (!definition.isFixed()) {
                Temp tmp = definition.getTemp();
-               /* subdword instructions before RDNA write full registers */
                if (tmp.regClass().is_subdword() &&
-                   !instr_can_access_subdword(instr) &&
-                   ctx.program->chip_class <= GFX9) {
+                   !instr_can_access_subdword(instr)) {
                   assert(tmp.bytes() <= 4);
                   tmp = Temp(definition.tempId(), v1);
                }
@@ -1907,11 +1905,11 @@ void register_allocation(Program *program, std::vector<TempSet>& live_out_per_bl
                   if (!sgpr_operands_alias_defs) {
                      unsigned reg = parallelcopy[i].first.physReg().reg();
                      unsigned size = parallelcopy[i].first.getTemp().size();
-                     sgpr_operands[reg / 64u] |= ((1u << size) - 1) << (reg % 64u);
+                     sgpr_operands[reg / 64u] |= u_bit_consecutive64(reg % 64u, size);
 
                      reg = parallelcopy[i].second.physReg().reg();
                      size = parallelcopy[i].second.getTemp().size();
-                     if (sgpr_operands[reg / 64u] & ((1u << size) - 1) << (reg % 64u))
+                     if (sgpr_operands[reg / 64u] & u_bit_consecutive64(reg % 64u, size))
                         sgpr_operands_alias_defs = true;
                   }
                }

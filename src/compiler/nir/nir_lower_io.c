@@ -649,6 +649,37 @@ nir_lower_io_block(nir_block *block,
                                 mode == nir_var_shader_out ||
                                 var->data.bindless;
 
+     if (nir_deref_instr_is_known_out_of_bounds(deref)) {
+        /* Section 5.11 (Out-of-Bounds Accesses) of the GLSL 4.60 spec says:
+         *
+         *    In the subsections described above for array, vector, matrix and
+         *    structure accesses, any out-of-bounds access produced undefined
+         *    behavior....
+         *    Out-of-bounds reads return undefined values, which
+         *    include values from other variables of the active program or zero.
+         *    Out-of-bounds writes may be discarded or overwrite
+         *    other variables of the active program.
+         *
+         * GL_KHR_robustness and GL_ARB_robustness encourage us to return zero
+         * for reads.
+         *
+         * Otherwise get_io_offset would return out-of-bound offset which may
+         * result in out-of-bound loading/storing of inputs/outputs,
+         * that could cause issues in drivers down the line.
+         */
+         if (intrin->intrinsic != nir_intrinsic_store_deref) {
+            nir_ssa_def *zero =
+               nir_imm_zero(b, intrin->dest.ssa.num_components,
+                             intrin->dest.ssa.bit_size);
+            nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
+                                  nir_src_for_ssa(zero));
+         }
+
+         nir_instr_remove(&intrin->instr);
+         progress = true;
+         continue;
+      }
+
       offset = get_io_offset(b, deref, per_vertex ? &vertex_index : NULL,
                              state->type_size, &component_offset,
                              bindless_type_size);
@@ -911,7 +942,7 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
       load->src[1] = nir_src_for_ssa(addr_to_offset(b, addr, addr_format));
    }
 
-   if (mode != nir_var_mem_ubo && mode != nir_var_shader_in && mode != nir_var_mem_shared)
+   if (mode != nir_var_shader_in && mode != nir_var_mem_shared)
       nir_intrinsic_set_access(load, nir_intrinsic_access(intrin));
 
    unsigned bit_size = intrin->dest.ssa.bit_size;

@@ -392,7 +392,7 @@ if with_egl and not (with_platform_drm or with_platform_surfaceless or with_plat
 endif
 
 # Android uses emutls for versions <= P/28. For USE_ELF_TLS we need ELF TLS.
-if host_machine.system() != 'windows' and (not with_platform_android or get_option('platform-sdk-version') >= 29)
+if not ['windows', 'freebsd'].contains(host_machine.system()) and (not with_platform_android or get_option('platform-sdk-version') >= 29)
   pre_args += '-DUSE_ELF_TLS'
 endif
 
@@ -705,7 +705,6 @@ if get_option('power8') != 'false'
 endif
 
 _opencl = get_option('gallium-opencl')
-clover_cpp_std = []
 if _opencl != 'disabled'
   if not with_gallium
     error('OpenCL Clover implementation requires at least one gallium driver.')
@@ -723,14 +722,6 @@ if _opencl != 'disabled'
   else
     dep_spirv_tools = null_dep
     dep_llvmspirvlib = null_dep
-  endif
-
-  if host_machine.cpu_family().startswith('ppc') and cpp.compiles('''
-      #if !defined(__VEC__) || !defined(__ALTIVEC__)
-      #error "AltiVec not enabled"
-      #endif''',
-      name : 'Altivec')
-    clover_cpp_std += ['cpp_std=gnu++11']
   endif
 else
   dep_clc = null_dep
@@ -834,9 +825,6 @@ if _shader_cache != 'false'
     with_shader_cache = true
   endif
 endif
-if with_amd_vk and not with_shader_cache
-  error('Radv requires shader cache support')
-endif
 
 # Check for GCC style builtins
 foreach b : ['bswap32', 'bswap64', 'clz', 'clzll', 'ctz', 'expect', 'ffs',
@@ -910,6 +898,8 @@ elif host_machine.system() == 'windows'
   else
     pre_args += ['-D__MSVCRT_VERSION__=0x0700']
   endif
+elif host_machine.system() == 'openbsd'
+  pre_args += '-D_ISOC11_SOURCE'
 endif
 
 # Check for generic C arguments
@@ -1162,7 +1152,14 @@ if (cc.has_header_symbol('sys/mkdev.h', 'major') and
   pre_args += '-DMAJOR_IN_MKDEV'
 endif
 
-foreach h : ['xlocale.h', 'sys/sysctl.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h', 'cet.h']
+if not ['linux'].contains(host_machine.system())
+  # Deprecated on Linux and requires <sys/types.h> on FreeBSD and OpenBSD
+  if cc.compiles('#include <sys/types.h>\n#include <sys/sysctl.h>', name : 'sys/sysctl.h')
+    pre_args += '-DHAVE_SYS_SYSCTL_H'
+  endif
+endif
+
+foreach h : ['xlocale.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h', 'cet.h', 'pthread_np.h']
   if cc.compiles('#include <@0@>'.format(h), name : '@0@'.format(h))
     pre_args += '-DHAVE_@0@'.format(h.to_upper().underscorify())
   endif
@@ -1293,12 +1290,6 @@ if dep_thread.found() and host_machine.system() != 'windows'
       prefix : '#include <pthread.h>',
       args : '-D_GNU_SOURCE')
     pre_args += '-DHAVE_PTHREAD_SETAFFINITY'
-  endif
-  if cc.has_function(
-      'pthread_setaffinity_np',
-      dependencies : dep_thread,
-      prefix : '#include <pthread_np.h>')
-    pre_args += '-DPTHREAD_SETAFFINITY_IN_NP_HEADER'
   endif
 endif
 if host_machine.system() != 'windows'
@@ -1724,6 +1715,12 @@ if dep_m.found()
 endif
 if dep_dl.found()
   gl_priv_libs += '-ldl'
+endif
+
+# FIXME: autotools lists this as incomplete
+gbm_priv_libs = []
+if dep_dl.found()
+  gbm_priv_libs += '-ldl'
 endif
 
 pkg = import('pkgconfig')

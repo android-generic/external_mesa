@@ -327,10 +327,14 @@ optimizations.extend([
    (('fne', ('fneg', a), -1.0), ('fne', 1.0, a)),
    (('feq', -1.0, ('fneg', a)), ('feq', a, 1.0)),
 
-   (('flt', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('flt', a, b)),
+   # flt(fsat(a), b > 0 && b < 1) is inexact if a is NaN (fsat(NaN) is 0)
+   # because it returns True while flt(a, b) always returns False.
+   (('~flt', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('flt', a, b)),
    (('flt', '#b(is_gt_0_and_lt_1)', ('fsat(is_used_once)', a)), ('flt', b, a)),
    (('fge', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('fge', a, b)),
-   (('fge', '#b(is_gt_0_and_lt_1)', ('fsat(is_used_once)', a)), ('fge', b, a)),
+   # fge(b > 0 && b < 1, fsat(a)) is inexact if a is NaN (fsat(NaN) is 0)
+   # because it returns True while fge(b, a) always returns False.
+   (('~fge', '#b(is_gt_0_and_lt_1)', ('fsat(is_used_once)', a)), ('fge', b, a)),
    (('feq', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('feq', a, b)),
    (('fne', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('fne', a, b)),
 
@@ -1767,7 +1771,9 @@ late_optimizations = [
    (('fne', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('fne', a, b)),
 
    (('fge', ('fsat(is_used_once)', a), 1.0), ('fge', a, 1.0)),
-   (('flt', ('fsat(is_used_once)', a), 1.0), ('flt', a, 1.0)),
+   # flt(fsat(a), 1.0) is inexact because it returns True if a is NaN
+   # (fsat(NaN) is 0), while flt(a, 1.0) always returns FALSE.
+   (('~flt', ('fsat(is_used_once)', a), 1.0), ('flt', a, 1.0)),
 
    (('~fge', ('fmin(is_used_once)', ('fadd(is_used_once)', a, b), ('fadd', c, d)), 0.0), ('iand', ('fge', a, ('fneg', b)), ('fge', c, ('fneg', d)))),
 
@@ -1899,6 +1905,9 @@ distribute_src_mods = [
    (('fdot_replicated4', ('fneg', a), ('fneg', b)), ('fdot_replicated4', a, b)),
    (('fneg', ('fneg', a)), a),
 
+   (('fneg', ('fmul(is_used_once)', a, b)), ('fmul', ('fneg', a), b)),
+   (('fabs', ('fmul(is_used_once)', a, b)), ('fmul', ('fabs', a), ('fabs', b))),
+
    (('fneg', ('ffma(is_used_once)', a, b, c)), ('ffma', ('fneg', a), b, ('fneg', c))),
    (('fneg', ('flrp(is_used_once)', a, b, c)), ('flrp', ('fneg', a), ('fneg', b), c)),
    (('fneg', ('fadd(is_used_once)', a, b)), ('fadd', ('fneg', a), ('fneg', b))),
@@ -1908,20 +1917,17 @@ distribute_src_mods = [
    (('fneg', ('fmin(is_used_once)', a, b)), ('fmax', ('fneg', a), ('fneg', b))),
    (('fneg', ('fmax(is_used_once)', a, b)), ('fmin', ('fneg', a), ('fneg', b))),
 
+   (('fneg', ('fdot_replicated2(is_used_once)', a, b)), ('fdot_replicated2', ('fneg', a), b)),
+   (('fneg', ('fdot_replicated3(is_used_once)', a, b)), ('fdot_replicated3', ('fneg', a), b)),
+   (('fneg', ('fdot_replicated4(is_used_once)', a, b)), ('fdot_replicated4', ('fneg', a), b)),
+
    # fdph works mostly like fdot, but to get the correct result, the negation
    # must be applied to the second source.
    (('fneg', ('fdph_replicated(is_used_once)', a, b)), ('fdph_replicated', a, ('fneg', b))),
-   (('fabs', ('fdph_replicated(is_used_once)', a, b)), ('fdph_replicated', ('fabs', a), ('fabs', b))),
 
    (('fneg', ('fsign(is_used_once)', a)), ('fsign', ('fneg', a))),
    (('fabs', ('fsign(is_used_once)', a)), ('fsign', ('fabs', a))),
 ]
-
-for op in ['fmul', 'fdot_replicated2', 'fdot_replicated3', 'fdot_replicated4']:
-   distribute_src_mods.extend([
-       (('fneg', (op + '(is_used_once)', a, b)), (op, ('fneg', a), b)),
-       (('fabs', (op + '(is_used_once)', a, b)), (op, ('fabs', a), ('fabs', b))),
-   ])
 
 print(nir_algebraic.AlgebraicPass("nir_opt_algebraic", optimizations).render())
 print(nir_algebraic.AlgebraicPass("nir_opt_algebraic_before_ffma",

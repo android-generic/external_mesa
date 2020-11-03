@@ -568,7 +568,7 @@ transition_depth_buffer(struct anv_cmd_buffer *cmd_buffer,
        cmd_buffer->device->physical->has_implicit_ccs &&
        cmd_buffer->device->info.has_aux_map) {
       anv_image_init_aux_tt(cmd_buffer, image, VK_IMAGE_ASPECT_DEPTH_BIT,
-                            0, 1, 0, 1);
+                            0, 1, base_layer, layer_count);
    }
 #endif
 
@@ -3346,7 +3346,7 @@ genX(cmd_buffer_flush_state)(struct anv_cmd_buffer *cmd_buffer)
                sob.SurfaceBaseAddress = anv_address_add(xfb->buffer->address,
                                                         xfb->offset);
                /* Size is in DWords - 1 */
-               sob.SurfaceSize = xfb->size / 4 - 1;
+               sob.SurfaceSize = DIV_ROUND_UP(xfb->size, 4) - 1;
             }
          }
       }
@@ -4557,7 +4557,8 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
 
    anv_batch_emit(&cmd_buffer->batch, GENX(PIPELINE_SELECT), ps) {
 #if GEN_GEN >= 9
-      ps.MaskBits = 3;
+      ps.MaskBits = GEN_GEN >= 12 ? 0x13 : 3;
+      ps.MediaSamplerDOPClockGateEnable = GEN_GEN >= 12;
 #endif
       ps.PipelineSelection = pipeline;
    }

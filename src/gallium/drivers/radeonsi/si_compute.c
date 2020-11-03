@@ -332,10 +332,22 @@ void si_emit_initial_compute_regs(struct si_context *sctx, struct radeon_cmdbuf 
       radeon_set_sh_reg_seq(cs, R_00B864_COMPUTE_STATIC_THREAD_MGMT_SE2, 2);
       radeon_emit(cs, S_00B858_SH0_CU_EN(0xffff) | S_00B858_SH1_CU_EN(0xffff));
       radeon_emit(cs, S_00B858_SH0_CU_EN(0xffff) | S_00B858_SH1_CU_EN(0xffff));
+
+      /* Disable profiling on compute queues. */
+      if (cs != sctx->gfx_cs || !sctx->screen->info.has_graphics) {
+         radeon_set_sh_reg(cs, R_00B82C_COMPUTE_PERFCOUNT_ENABLE, 0);
+         radeon_set_sh_reg(cs, R_00B878_COMPUTE_THREAD_TRACE_ENABLE, 0);
+      }
    }
 
-   if (sctx->chip_class >= GFX10)
+   if (sctx->chip_class >= GFX10) {
+      radeon_set_sh_reg(cs, R_00B890_COMPUTE_USER_ACCUM_0, 0);
+      radeon_set_sh_reg(cs, R_00B894_COMPUTE_USER_ACCUM_1, 0);
+      radeon_set_sh_reg(cs, R_00B898_COMPUTE_USER_ACCUM_2, 0);
+      radeon_set_sh_reg(cs, R_00B89C_COMPUTE_USER_ACCUM_3, 0);
       radeon_set_sh_reg(cs, R_00B8A0_COMPUTE_PGM_RSRC3, 0);
+      radeon_set_sh_reg(cs, R_00B9F4_COMPUTE_DISPATCH_TUNNEL, 0);
+   }
 
    /* This register has been moved to R_00CD20_COMPUTE_MAX_WAVE_ID
     * and is now per pipe, so it should be handled in the
@@ -360,6 +372,15 @@ void si_emit_initial_compute_regs(struct si_context *sctx, struct radeon_cmdbuf 
       if (sctx->screen->info.si_TA_CS_BC_BASE_ADDR_allowed) {
          radeon_set_config_reg(cs, R_00950C_TA_CS_BC_BASE_ADDR, bc_va >> 8);
       }
+   }
+
+   /* cs_preamble_state initializes this for the gfx queue, so only do this
+    * if we are on a compute queue.
+    */
+   if (sctx->chip_class >= GFX9 &&
+       (cs != sctx->gfx_cs || !sctx->screen->info.has_graphics)) {
+      radeon_set_uconfig_reg(cs, R_0301EC_CP_COHER_START_DELAY,
+                             sctx->chip_class >= GFX10 ? 0x20 : 0);
    }
 }
 
@@ -656,27 +677,26 @@ static void si_setup_nir_user_data(struct si_context *sctx, const struct pipe_gr
                              12 * sel->info.uses_grid_size;
    unsigned cs_user_data_reg = block_size_reg + 12 * program->reads_variable_block_size;
 
-   if (info->indirect) {
-      if (sel->info.uses_grid_size) {
+   if (sel->info.uses_grid_size) {
+      if (info->indirect) {
          for (unsigned i = 0; i < 3; ++i) {
             si_cp_copy_data(sctx, sctx->gfx_cs, COPY_DATA_REG, NULL, (grid_size_reg >> 2) + i,
                             COPY_DATA_SRC_MEM, si_resource(info->indirect),
                             info->indirect_offset + 4 * i);
          }
-      }
-   } else {
-      if (sel->info.uses_grid_size) {
+      } else {
          radeon_set_sh_reg_seq(cs, grid_size_reg, 3);
          radeon_emit(cs, info->grid[0]);
          radeon_emit(cs, info->grid[1]);
          radeon_emit(cs, info->grid[2]);
       }
-      if (program->reads_variable_block_size) {
-         radeon_set_sh_reg_seq(cs, block_size_reg, 3);
-         radeon_emit(cs, info->block[0]);
-         radeon_emit(cs, info->block[1]);
-         radeon_emit(cs, info->block[2]);
-      }
+   }
+
+   if (program->reads_variable_block_size) {
+      radeon_set_sh_reg_seq(cs, block_size_reg, 3);
+      radeon_emit(cs, info->block[0]);
+      radeon_emit(cs, info->block[1]);
+      radeon_emit(cs, info->block[2]);
    }
 
    if (program->num_cs_user_data_dwords) {

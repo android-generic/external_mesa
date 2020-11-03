@@ -570,9 +570,8 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
         assert((alu.type != BI_SPECIAL) || !(ctx->quirks & BIFROST_NO_FAST_OP));
 
         unsigned comps = nir_dest_num_components(instr->dest.dest);
-
-        if (alu.type != BI_COMBINE)
-                assert(comps <= MAX2(1, 32 / comps));
+        bool vector = comps > MAX2(1, 32 / nir_dest_bit_size(instr->dest.dest));
+        assert(!vector || alu.type == BI_COMBINE || alu.type == BI_MOV);
 
         if (!instr->dest.dest.is_ssa) {
                 for (unsigned i = 0; i < comps; ++i)
@@ -666,6 +665,15 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
                 break;
         default:
                 break;
+        }
+
+        if (alu.type == BI_MOV && vector) {
+                alu.type = BI_COMBINE;
+
+                for (unsigned i = 0; i < comps; ++i) {
+                        alu.src[i] = alu.src[0];
+                        alu.swizzle[i][0] = instr->src[0].swizzle[i];
+                }
         }
 
         if (alu.type == BI_CSEL) {
@@ -891,18 +899,17 @@ emit_if(bi_context *ctx, nir_if *nif)
                 /* The else block is empty, so don't emit an exit jump */
                 bi_remove_instruction(then_exit);
                 then_branch->branch.target = ctx->after_block;
+                pan_block_add_successor(&end_then_block->base, &ctx->after_block->base); /* fallthrough */
         } else {
                 then_branch->branch.target = else_block;
                 then_exit->branch.target = ctx->after_block;
                 pan_block_add_successor(&end_then_block->base, &then_exit->branch.target->base);
+                pan_block_add_successor(&end_else_block->base, &ctx->after_block->base); /* fallthrough */
         }
-
-        /* Wire up the successors */
 
         pan_block_add_successor(&before_block->base, &then_branch->branch.target->base); /* then_branch */
 
         pan_block_add_successor(&before_block->base, &then_block->base); /* fallthrough */
-        pan_block_add_successor(&end_else_block->base, &ctx->after_block->base); /* fallthrough */
 }
 
 static void
@@ -1077,7 +1084,7 @@ bifrost_compile_shader_nir(nir_shader *nir, panfrost_program *program, unsigned 
         bi_optimize_nir(nir);
         nir_print_shader(nir, stdout);
 
-        panfrost_nir_assign_sysvals(&ctx->sysvals, nir);
+        panfrost_nir_assign_sysvals(&ctx->sysvals, ctx, nir);
         program->sysval_count = ctx->sysvals.sysval_count;
         memcpy(program->sysvals, ctx->sysvals.sysvals, sizeof(ctx->sysvals.sysvals[0]) * ctx->sysvals.sysval_count);
         ctx->blend_types = program->blend_types;

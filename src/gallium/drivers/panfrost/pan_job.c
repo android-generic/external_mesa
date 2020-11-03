@@ -178,6 +178,8 @@ panfrost_free_batch(struct panfrost_batch *batch)
                 panfrost_batch_fence_unreference(*dep);
         }
 
+        util_dynarray_fini(&batch->dependencies);
+
         /* The out_sync fence lifetime is different from the the batch one
          * since other batches might want to wait on a fence of already
          * submitted/signaled batch. All we need to do here is make sure the
@@ -452,6 +454,9 @@ panfrost_batch_update_bo_access(struct panfrost_batch *batch,
                         panfrost_batch_add_dep(batch, *reader);
                 }
                 panfrost_batch_fence_reference(batch->out_sync);
+
+                if (access->writer)
+                        panfrost_batch_fence_unreference(access->writer);
 
                 /* We now are the new writer. */
                 access->writer = batch->out_sync;
@@ -981,6 +986,7 @@ static void
 panfrost_batch_submit(struct panfrost_batch *batch)
 {
         assert(batch);
+        struct panfrost_device *dev = pan_device(batch->ctx->base.screen);
 
         /* Submit the dependencies first. */
         util_dynarray_foreach(&batch->dependencies,
@@ -993,6 +999,9 @@ panfrost_batch_submit(struct panfrost_batch *batch)
 
         /* Nothing to do! */
         if (!batch->first_job && !batch->clear) {
+                if (batch->out_sync->syncobj)
+                        drmSyncobjSignal(dev->fd, &batch->out_sync->syncobj, 1);
+
                 /* Mark the fence as signaled so the fence logic does not try
                  * to wait on it.
                  */

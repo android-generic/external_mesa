@@ -531,6 +531,7 @@ iris_screen_destroy(struct iris_screen *screen)
    u_transfer_helper_destroy(screen->base.transfer_helper);
    iris_bufmgr_unref(screen->bufmgr);
    disk_cache_destroy(screen->disk_cache);
+   close(screen->winsys_fd);
    ralloc_free(screen);
 }
 
@@ -647,7 +648,7 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
     *
     * Checking the last feature availability will include all previous ones.
     */
-   if (!iris_getparam_integer(fd, I915_PARAM_HAS_CONTEXT_ISOLATION)) {
+   if (iris_getparam_integer(fd, I915_PARAM_HAS_CONTEXT_ISOLATION) <= 0) {
       debug_error("Kernel is too old for Iris. Consider upgrading to kernel v4.16.\n");
       return NULL;
    }
@@ -681,6 +682,7 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
       return NULL;
 
    screen->fd = iris_bufmgr_get_fd(screen->bufmgr);
+   screen->winsys_fd = fd;
 
    screen->aperture_bytes = get_aperture_size(fd);
 

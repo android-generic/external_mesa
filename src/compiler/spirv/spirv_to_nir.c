@@ -256,7 +256,8 @@ vtn_const_ssa_value(struct vtn_builder *b, nir_constant *constant,
       break;
    }
 
-   case GLSL_TYPE_STRUCT: {
+   case GLSL_TYPE_STRUCT:
+   case GLSL_TYPE_INTERFACE: {
       unsigned elems = glsl_get_length(val->type);
       val->elems = ralloc_array(b, struct vtn_ssa_value *, elems);
       for (unsigned i = 0; i < elems; i++) {
@@ -859,6 +860,7 @@ struct_member_decoration_cb(struct vtn_builder *b,
       break;
 
    case SpvDecorationUserSemantic:
+   case SpvDecorationUserTypeGOOGLE:
       /* User semantic decorations can safely be ignored by the driver. */
       break;
 
@@ -1038,6 +1040,10 @@ type_decoration_cb(struct vtn_builder *b,
    case SpvDecorationAlignment:
       vtn_warn("Decoration only allowed for CL-style kernels: %s",
                spirv_decoration_to_string(dec->decoration));
+      break;
+
+   case SpvDecorationUserTypeGOOGLE:
+      /* User semantic decorations can safely be ignored by the driver. */
       break;
 
    default:
@@ -2215,10 +2221,23 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
       struct vtn_value *val =
          vtn_push_value(b, w[2], vtn_value_type_sampled_image);
       val->sampled_image = ralloc(b, struct vtn_sampled_image);
-      val->sampled_image->image =
-         vtn_value(b, w[3], vtn_value_type_pointer)->pointer;
-      val->sampled_image->sampler =
-         vtn_value(b, w[4], vtn_value_type_pointer)->pointer;
+
+      /* It seems valid to use OpSampledImage with OpUndef instead of
+       * OpTypeImage or OpTypeSampler.
+       */
+      if (vtn_untyped_value(b, w[3])->value_type == vtn_value_type_undef) {
+         val->sampled_image->image = NULL;
+      } else {
+         val->sampled_image->image =
+            vtn_value(b, w[3], vtn_value_type_pointer)->pointer;
+      }
+
+      if (vtn_untyped_value(b, w[4])->value_type == vtn_value_type_undef) {
+         val->sampled_image->sampler = NULL;
+      } else {
+         val->sampled_image->sampler =
+            vtn_value(b, w[4], vtn_value_type_pointer)->pointer;
+      }
       return;
    } else if (opcode == SpvOpImage) {
       struct vtn_value *src_val = vtn_untyped_value(b, w[3]);
@@ -2241,6 +2260,11 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    } else {
       vtn_assert(sampled_val->value_type == vtn_value_type_pointer);
       image = sampled_val->pointer;
+   }
+
+   if (!image) {
+      vtn_push_value(b, w[2], vtn_value_type_undef);
+      return;
    }
 
    nir_deref_instr *image_deref = vtn_pointer_to_deref(b, image);
@@ -3779,6 +3803,8 @@ vtn_handle_preamble_instruction(struct vtn_builder *b, SpvOp opcode,
          (count > 3) ? vtn_value(b, w[3], vtn_value_type_string)->str : "";
 
       vtn_info("Parsing SPIR-V from %s %u source file %s", lang, version, file);
+
+      b->source_lang = w[1];
       break;
    }
 
@@ -4033,6 +4059,7 @@ vtn_handle_preamble_instruction(struct vtn_builder *b, SpvOp opcode,
 
       case SpvCapabilityDemoteToHelperInvocationEXT:
          spv_check_supported(demote_to_helper_invocation, cap);
+         b->uses_demote_to_helper_invocation = true;
          break;
 
       case SpvCapabilityShaderClockKHR:
@@ -5088,21 +5115,23 @@ vtn_create_builder(const uint32_t *words, size_t word_count,
       goto fail;
    }
 
-   uint16_t generator_id = words[2] >> 16;
+   b->generator_id = words[2] >> 16;
    uint16_t generator_version = words[2];
 
    /* The first GLSLang version bump actually 1.5 years after #179 was fixed
     * but this should at least let us shut the workaround off for modern
     * versions of GLSLang.
     */
-   b->wa_glslang_179 = (generator_id == 8 && generator_version == 1);
+   b->wa_glslang_179 = (b->generator_id == 8 && generator_version == 1);
 
    /* In GLSLang commit 8297936dd6eb3, their handling of barrier() was fixed
     * to provide correct memory semantics on compute shader barrier()
     * commands.  Prior to that, we need to fix them up ourselves.  This
     * GLSLang fix caused them to bump to generator version 3.
     */
-   b->wa_glslang_cs_barrier = (generator_id == 8 && generator_version < 3);
+   b->wa_glslang_cs_barrier =
+      (b->generator_id == vtn_generator_glslang_reference_front_end &&
+       generator_version < 3);
 
    /* words[2] == generator magic */
    unsigned value_id_bound = words[3];
@@ -5213,6 +5242,20 @@ spirv_to_nir(const uint32_t *words, size_t word_count,
    /* Handle all the preamble instructions */
    words = vtn_foreach_instruction(b, words, word_end,
                                    vtn_handle_preamble_instruction);
+
+   /* DirectXShaderCompiler and glslang/shaderc both create OpKill from HLSL's
+    * discard/clip, which uses demote semantics. DirectXShaderCompiler will use
+    * demote if the extension is enabled, so we disable this workaround in that
+    * case.
+    *
+    * Related glslang issue: https://github.com/KhronosGroup/glslang/issues/2416
+    */
+   bool glslang = b->generator_id == vtn_generator_glslang_reference_front_end ||
+                  b->generator_id == vtn_generator_shaderc_over_glslang;
+   bool dxsc = b->generator_id == vtn_generator_spiregg;
+   b->convert_discard_to_demote = ((dxsc && !b->uses_demote_to_helper_invocation) ||
+                                   (glslang && b->source_lang == SpvSourceLanguageHLSL)) &&
+                                  options->caps.demote_to_helper_invocation;
 
    if (b->entry_point == NULL) {
       vtn_fail("Entry point not found");

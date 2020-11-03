@@ -343,6 +343,7 @@ get_fb0_attachment(struct gl_context *ctx, struct gl_framebuffer *fb,
    }
 
    switch (attachment) {
+   case GL_FRONT:
    case GL_FRONT_LEFT:
       /* Front buffers can be allocated on the first use, but
        * glGetFramebufferAttachmentParameteriv must work even if that
@@ -4814,7 +4815,11 @@ _mesa_GetFramebufferParameterivEXT(GLuint framebuffer, GLenum pname,
          *param = fb->ColorReadBuffer;
       }
       else if (GL_DRAW_BUFFER0 <= pname && pname <= GL_DRAW_BUFFER15) {
-         *param = fb->ColorDrawBuffer[pname - GL_DRAW_BUFFER0];
+         unsigned buffer = pname - GL_DRAW_BUFFER0;
+         if (buffer < ARRAY_SIZE(fb->ColorDrawBuffer))
+            *param = fb->ColorDrawBuffer[buffer];
+         else
+            _mesa_error(ctx, GL_INVALID_ENUM, "glGetFramebufferParameterivEXT(pname)");
       }
       else {
          _mesa_error(ctx, GL_INVALID_ENUM, "glGetFramebufferParameterivEXT(pname)");
