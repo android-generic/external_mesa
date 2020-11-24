@@ -83,7 +83,6 @@ anv_gem_mmap(struct anv_device *device, uint32_t gem_handle,
    if (ret != 0)
       return MAP_FAILED;
 
-   VG(VALGRIND_MALLOCLIKE_BLOCK(gem_mmap.addr_ptr, gem_mmap.size, 0, 1));
    return (void *)(uintptr_t) gem_mmap.addr_ptr;
 }
 
