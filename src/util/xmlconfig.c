@@ -1118,11 +1118,11 @@ parseConfigDir(struct OptConfData *data, const char *dirname)
 }
 
 #ifndef SYSCONFDIR
-#define SYSCONFDIR "/etc"
+#define SYSCONFDIR "/system/etc"
 #endif
 
 #ifndef DATADIR
-#define DATADIR "/usr/share"
+#define DATADIR "/system/usr/share"
 #endif
 
 void
