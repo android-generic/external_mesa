@@ -31,6 +31,8 @@ struct nouveau_screen {
    struct nouveau_pushbuf *pushbuf;
    mtx_t push_lock;
 
+   char chipset_name[8];
+
    int refcount;
 
    unsigned transfer_pushbuf_threshold;
