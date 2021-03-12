@@ -315,9 +315,9 @@ handle_handle_slot(struct ntv_context *ctx, struct nir_variable *var, bool outpu
    if (var->data.patch) {
       assert(var->data.location >= VARYING_SLOT_PATCH0);
       return var->data.location - VARYING_SLOT_PATCH0;
-   } else if ((output && ctx->stage == MESA_SHADER_TESS_CTRL) ||
-              (!output && ctx->stage == MESA_SHADER_TESS_EVAL)) {
-      assert(var->data.location >= VARYING_SLOT_VAR0);
+   } else if (var->data.location >= VARYING_SLOT_VAR0 &&
+              ((output && ctx->stage == MESA_SHADER_TESS_CTRL) ||
+              (!output && ctx->stage == MESA_SHADER_TESS_EVAL))) {
       return var->data.location - VARYING_SLOT_VAR0;
    }
    return handle_slot(ctx, var->data.location);
@@ -1039,12 +1039,18 @@ emit_so_outputs(struct ntv_context *ctx,
               * and re-pack them into the desired output type
               */
              for (unsigned c = 0; c < so_output.num_components; c++) {
-                uint32_t member[] = { so_output.start_component + c };
-                SpvId base_type = get_glsl_type(ctx, glsl_without_array(out_type));
+                uint32_t member[2];
+                unsigned member_idx = 0;
+                if (glsl_type_is_matrix(out_type)) {
+                   member_idx = 1;
+                   member[0] = so_output.register_index;
+                }
+                member[member_idx] = so_output.start_component + c;
+                SpvId base_type = get_glsl_basetype(ctx, glsl_get_base_type(glsl_without_array_or_matrix(out_type)));
 
                 if (slot == VARYING_SLOT_CLIP_DIST1)
-                   member[0] += 4;
-                components[c] = spirv_builder_emit_composite_extract(&ctx->builder, base_type, src, member, 1);
+                   member[member_idx] += 4;
+                components[c] = spirv_builder_emit_composite_extract(&ctx->builder, base_type, src, member, 1 + member_idx);
              }
              result = spirv_builder_emit_composite_construct(&ctx->builder, type, components, so_output.num_components);
          }
@@ -2080,8 +2086,9 @@ emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 static void
 emit_undef(struct ntv_context *ctx, nir_ssa_undef_instr *undef)
 {
-   SpvId type = get_uvec_type(ctx, undef->def.bit_size,
-                              undef->def.num_components);
+   SpvId type = undef->def.bit_size == 1 ? get_bvec_type(ctx, undef->def.num_components) :
+                                           get_uvec_type(ctx, undef->def.bit_size,
+                                                         undef->def.num_components);
 
    store_ssa_def(ctx, &undef->def,
                  spirv_builder_emit_undef(&ctx->builder, type));
@@ -2677,6 +2684,24 @@ get_output_prim_type_mode(uint16_t type)
    return 0;
 }
 
+static SpvExecutionMode
+get_depth_layout_mode(enum gl_frag_depth_layout depth_layout)
+{
+   switch (depth_layout) {
+   case FRAG_DEPTH_LAYOUT_NONE:
+   case FRAG_DEPTH_LAYOUT_ANY:
+      return SpvExecutionModeDepthReplacing;
+   case FRAG_DEPTH_LAYOUT_GREATER:
+      return SpvExecutionModeDepthGreater;
+   case FRAG_DEPTH_LAYOUT_LESS:
+      return SpvExecutionModeDepthLess;
+   case FRAG_DEPTH_LAYOUT_UNCHANGED:
+      return SpvExecutionModeDepthUnchanged;
+   default:
+      unreachable("unexpected depth layout");
+   }
+}
+
 struct spirv_shader *
 nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info,
              unsigned char *shader_slot_map, unsigned char *shader_slots_reserved)
@@ -2814,7 +2839,7 @@ nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info,
                                    SpvExecutionModeOriginUpperLeft);
       if (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH))
          spirv_builder_emit_exec_mode(&ctx.builder, entry_point,
-                                      SpvExecutionModeDepthReplacing);
+                                      get_depth_layout_mode(s->info.fs.depth_layout));
       break;
    case MESA_SHADER_TESS_CTRL:
       spirv_builder_emit_exec_mode_literal(&ctx.builder, entry_point, SpvExecutionModeOutputVertices, s->info.tess.tcs_vertices_out);
@@ -2913,8 +2938,8 @@ nir_to_spirv(struct nir_shader *s, const struct zink_so_info *so_info,
 
    emit_cf_list(&ctx, &entry->body);
 
-   /* vertex shader emits copied xfb outputs at the end of the shader */
-   if (so_info && ctx.stage == MESA_SHADER_VERTEX)
+   /* vertex/tess shader emits copied xfb outputs at the end of the shader */
+   if (so_info && (ctx.stage == MESA_SHADER_VERTEX || ctx.stage == MESA_SHADER_TESS_EVAL))
       emit_so_outputs(&ctx, so_info);
 
    spirv_builder_return(&ctx.builder); // doesn't belong here, but whatevz

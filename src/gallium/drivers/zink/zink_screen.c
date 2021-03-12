@@ -107,6 +107,8 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_MULTI_DRAW_INDIRECT:
+      return screen->info.feats.features.multiDrawIndirect;
+
    case PIPE_CAP_MULTI_DRAW_INDIRECT_PARAMS:
       return screen->vk_CmdDrawIndirectCount &&
              screen->vk_CmdDrawIndexedIndirectCount;
@@ -144,8 +146,10 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return screen->timestamp_valid_bits > 0;
 
    case PIPE_CAP_TEXTURE_MULTISAMPLE:
-   case PIPE_CAP_SAMPLE_SHADING:
       return 1;
+
+   case PIPE_CAP_SAMPLE_SHADING:
+      return screen->info.feats.features.sampleRateShading;
 
    case PIPE_CAP_TEXTURE_SWIZZLE:
       return 1;
@@ -157,21 +161,21 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
       return 1 + util_logbase2(screen->info.props.limits.maxImageDimensionCube);
 
-   case PIPE_CAP_BLEND_EQUATION_SEPARATE:
    case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
    case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
    case PIPE_CAP_VERTEX_SHADER_SATURATE:
       return 1;
 
+   case PIPE_CAP_BLEND_EQUATION_SEPARATE:
    case PIPE_CAP_INDEP_BLEND_ENABLE:
    case PIPE_CAP_INDEP_BLEND_FUNC:
-      return 1;
+      return screen->info.feats.features.independentBlend;
 
    case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
       return screen->info.have_EXT_transform_feedback ? screen->info.tf_props.maxTransformFeedbackBuffers : 0;
    case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
    case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
-      return 1;
+      return screen->info.have_EXT_transform_feedback;
 
    case PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS:
       return screen->info.props.limits.maxImageArrayLayers;
@@ -405,7 +409,8 @@ zink_get_shader_param(struct pipe_screen *pscreen,
          return INT_MAX;
       case PIPE_SHADER_TESS_CTRL:
       case PIPE_SHADER_TESS_EVAL:
-         if (screen->info.feats.features.tessellationShader &&
+         if (screen->info.have_KHR_vulkan_memory_model &&
+             screen->info.feats.features.tessellationShader &&
              (screen->instance_info.have_KHR_maintenance2 ||
               VK_MAKE_VERSION(1,1,0) <= screen->loader_version))
             return INT_MAX;
@@ -699,7 +704,7 @@ static VkPhysicalDevice
 choose_pdev(const VkInstance instance)
 {
    uint32_t i, pdev_count;
-   VkPhysicalDevice *pdevs, pdev;
+   VkPhysicalDevice *pdevs, pdev = NULL;
    vkEnumeratePhysicalDevices(instance, &pdev_count, NULL);
    assert(pdev_count > 0);
 
@@ -707,11 +712,10 @@ choose_pdev(const VkInstance instance)
    vkEnumeratePhysicalDevices(instance, &pdev_count, pdevs);
    assert(pdev_count > 0);
 
-   pdev = pdevs[0];
    for (i = 0; i < pdev_count; ++i) {
       VkPhysicalDeviceProperties props;
       vkGetPhysicalDeviceProperties(pdevs[i], &props);
-      if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+      if (props.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
          pdev = pdevs[i];
          break;
       }
@@ -856,17 +860,6 @@ load_instance_extensions(struct zink_screen *screen)
       GET_PROC_ADDR_INSTANCE(GetPhysicalDeviceProperties2);
    }
 
-   if (screen->instance_info.have_KHR_draw_indirect_count) {
-      GET_PROC_ADDR_INSTANCE_LOCAL(screen->instance, CmdDrawIndirectCountKHR);
-      GET_PROC_ADDR_INSTANCE_LOCAL(screen->instance, CmdDrawIndexedIndirectCountKHR);
-      screen->vk_CmdDrawIndirectCount = vk_CmdDrawIndirectCountKHR;
-      screen->vk_CmdDrawIndexedIndirectCount = vk_CmdDrawIndexedIndirectCountKHR;
-   } else if (VK_MAKE_VERSION(1,2,0) <= screen->loader_version) {
-      // Get Vk 1.1+ Instance functions
-      GET_PROC_ADDR_INSTANCE(CmdDrawIndirectCount);
-      GET_PROC_ADDR_INSTANCE(CmdDrawIndexedIndirectCount);
-   }
-
    return true;
 }
 
@@ -887,6 +880,11 @@ load_device_extensions(struct zink_screen *screen)
    if (screen->info.have_EXT_conditional_rendering) {
       GET_PROC_ADDR(CmdBeginConditionalRenderingEXT);
       GET_PROC_ADDR(CmdEndConditionalRenderingEXT);
+   }
+
+   if (screen->info.have_KHR_draw_indirect_count) {
+      GET_PROC_ADDR(CmdDrawIndexedIndirectCount);
+      GET_PROC_ADDR(CmdDrawIndirectCount);
    }
 
    if (screen->info.have_EXT_calibrated_timestamps) {
@@ -1109,6 +1107,9 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
       debug_printf("ZINK: failed to setup debug utils\n");
 
    screen->pdev = choose_pdev(screen->instance);
+   if (!screen->pdev)
+      goto fail;
+
    update_queue_props(screen);
 
    screen->have_X8_D24_UNORM_PACK32 = zink_is_depth_format_supported(screen,

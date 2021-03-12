@@ -1271,6 +1271,8 @@ struct si_context {
    struct list_head shader_query_buffers;
    unsigned num_active_shader_queries;
 
+   bool force_cb_shader_coherent;
+
    /* Statistics gathering for the DCC enablement heuristic. It can't be
     * in si_texture because si_texture can be shared by multiple
     * contexts. This is for back buffers only. We shouldn't get too many
@@ -1491,6 +1493,7 @@ void si_init_compiler(struct si_screen *sscreen, struct ac_llvm_compiler *compil
 /* si_perfcounters.c */
 void si_init_perfcounters(struct si_screen *screen);
 void si_destroy_perfcounters(struct si_screen *screen);
+void si_inhibit_clockgating(struct si_context *sctx, struct radeon_cmdbuf *cs, bool inhibit);
 
 /* si_query.c */
 void si_init_screen_query_functions(struct si_screen *sscreen);
@@ -1738,6 +1741,7 @@ static inline void si_make_CB_shader_coherent(struct si_context *sctx, unsigned 
                                               bool shaders_read_metadata, bool dcc_pipe_aligned)
 {
    sctx->flags |= SI_CONTEXT_FLUSH_AND_INV_CB | SI_CONTEXT_INV_VCACHE;
+   sctx->force_cb_shader_coherent = false;
 
    if (sctx->chip_class >= GFX10) {
       if (sctx->screen->info.tcc_harvested)

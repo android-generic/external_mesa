@@ -2309,7 +2309,7 @@ ntt_optimize_nir(struct nir_shader *s, struct pipe_screen *screen)
          .robust_modes = 0,
       };
       NIR_PASS(progress, s, nir_opt_load_store_vectorize, &vectorize_opts);
-      NIR_PASS(progress, s, nir_opt_shrink_vectors);
+      NIR_PASS(progress, s, nir_opt_shrink_vectors, true);
       NIR_PASS(progress, s, nir_opt_trivial_continues);
       NIR_PASS(progress, s, nir_opt_vectorize, ntt_should_vectorize_instr, NULL);
       NIR_PASS(progress, s, nir_opt_undef);
@@ -2668,7 +2668,7 @@ nir_to_tgsi(struct nir_shader *s,
        * gl-2.1-polygon-stipple-fs on softpipe.
        */
       if ((s->info.inputs_read & VARYING_BIT_POS) ||
-          (s->info.system_values_read & (1ull << SYSTEM_VALUE_FRAG_COORD))) {
+          BITSET_TEST(s->info.system_values_read, SYSTEM_VALUE_FRAG_COORD)) {
          ureg_property(c->ureg, TGSI_PROPERTY_FS_COORD_ORIGIN,
                        s->info.fs.origin_upper_left ?
                        TGSI_FS_COORD_ORIGIN_UPPER_LEFT :

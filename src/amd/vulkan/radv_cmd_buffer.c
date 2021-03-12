@@ -1234,10 +1234,8 @@ radv_emit_rbplus_state(struct radv_cmd_buffer *cmd_buffer)
 			break;
 
 		case V_028C70_COLOR_10_11_11:
-			if (spi_format == V_028714_SPI_SHADER_FP16_ABGR) {
+			if (spi_format == V_028714_SPI_SHADER_FP16_ABGR)
 				sx_ps_downconvert |= V_028754_SX_RT_EXPORT_10_11_11 << (i * 4);
-				sx_blend_opt_epsilon |= V_028758_11BIT_FORMAT << (i * 4);
-			}
 			break;
 
 		case V_028C70_COLOR_2_10_10_10:
@@ -1466,16 +1464,14 @@ radv_emit_depth_bias(struct radv_cmd_buffer *cmd_buffer)
 {
 	struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
 	unsigned slope = fui(d->depth_bias.slope * 16.0f);
-	unsigned bias = fui(d->depth_bias.bias * cmd_buffer->state.offset_scale);
-
 
 	radeon_set_context_reg_seq(cmd_buffer->cs,
 				   R_028B7C_PA_SU_POLY_OFFSET_CLAMP, 5);
 	radeon_emit(cmd_buffer->cs, fui(d->depth_bias.clamp)); /* CLAMP */
 	radeon_emit(cmd_buffer->cs, slope); /* FRONT SCALE */
-	radeon_emit(cmd_buffer->cs, bias); /* FRONT OFFSET */
+	radeon_emit(cmd_buffer->cs, fui(d->depth_bias.bias)); /* FRONT OFFSET */
 	radeon_emit(cmd_buffer->cs, slope); /* BACK SCALE */
-	radeon_emit(cmd_buffer->cs, bias); /* BACK OFFSET */
+	radeon_emit(cmd_buffer->cs, fui(d->depth_bias.bias)); /* BACK OFFSET */
 }
 
 static void
@@ -2414,11 +2410,6 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
 
 		radv_emit_fb_ds_state(cmd_buffer, &cmd_buffer->state.attachments[idx].ds, iview, layout, in_render_loop);
 
-		if (cmd_buffer->state.attachments[idx].ds.offset_scale != cmd_buffer->state.offset_scale) {
-			cmd_buffer->state.dirty |= RADV_CMD_DIRTY_DYNAMIC_DEPTH_BIAS;
-			cmd_buffer->state.offset_scale = cmd_buffer->state.attachments[idx].ds.offset_scale;
-		}
-
 		if (radv_layout_is_htile_compressed(cmd_buffer->device, iview->image, layout, in_render_loop,
 						    radv_image_queue_family_mask(iview->image,
 										 cmd_buffer->queue_family_index,
@@ -2880,7 +2871,7 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer,
 			}
 
 			if (cmd_buffer->device->physical_device->rad_info.chip_class != GFX8 && stride)
-				num_records /= stride;
+				num_records = DIV_ROUND_UP(num_records, stride);
 
 			uint32_t rsrc_word3 = S_008F0C_DST_SEL_X(V_008F0C_SQ_SEL_X) |
 					      S_008F0C_DST_SEL_Y(V_008F0C_SQ_SEL_Y) |
@@ -3267,11 +3258,66 @@ static void radv_stage_flush(struct radv_cmd_buffer *cmd_buffer,
 	}
 }
 
+/* Determine if the image is affected by the pipe misaligned metadata issue
+ * which requires to invalidate L2.
+ */
+static bool
+radv_image_is_pipe_misaligned(const struct radv_device *device,
+			      const struct radv_image *image)
+{
+	struct radeon_info *rad_info = &device->physical_device->rad_info;
+	unsigned log2_samples = util_logbase2(image->info.samples);
+
+	assert(rad_info->chip_class >= GFX10);
+
+	for (unsigned i = 0; i < image->plane_count; ++i) {
+		VkFormat fmt = vk_format_get_plane_format(image->vk_format, i);
+		unsigned log2_bpp = util_logbase2(vk_format_get_blocksize(fmt));
+		unsigned log2_bpp_and_samples;
+
+		if (rad_info->chip_class >= GFX10_3) {
+			log2_bpp_and_samples = log2_bpp + log2_samples;
+		} else {
+			if (vk_format_is_depth(image->vk_format) &&
+			    image->info.array_size >= 8) {
+				log2_bpp = 2;
+			}
+
+			log2_bpp_and_samples = MIN2(6, log2_bpp + log2_samples);
+		}
+
+		unsigned num_pipes = G_0098F8_NUM_PIPES(rad_info->gb_addr_config);
+		int overlap = MAX2(0, log2_bpp_and_samples + num_pipes - 8);
+
+		if (vk_format_is_depth(image->vk_format)) {
+			if (radv_image_is_tc_compat_htile(image) && overlap) {
+				return true;
+			}
+		} else {
+			unsigned max_compressed_frags = G_0098F8_MAX_COMPRESSED_FRAGS(rad_info->gb_addr_config);
+			int log2_samples_frag_diff = MAX2(0, log2_samples - max_compressed_frags);
+			int samples_overlap = MIN2(log2_samples, overlap);
+
+			/* TODO: It shouldn't be necessary if the image has DCC but
+			 * not readable by shader.
+			 */
+			if ((radv_image_has_dcc(image) ||
+			     radv_image_is_tc_compat_cmask(image)) &&
+			    (samples_overlap > log2_samples_frag_diff)) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 static bool
 radv_image_is_l2_coherent(const struct radv_device *device, const struct radv_image *image)
 {
 	if (device->physical_device->rad_info.chip_class >= GFX10) {
-		return !device->physical_device->rad_info.tcc_harvested;
+		return !device->physical_device->rad_info.tcc_harvested &&
+			(image && !radv_image_is_pipe_misaligned(device, image));
 	} else if (device->physical_device->rad_info.chip_class == GFX9 && image) {
 		if (image->info.samples == 1 &&
 		    (image->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -3461,11 +3507,28 @@ radv_dst_access_flush(struct radv_cmd_buffer *cmd_buffer,
 void radv_subpass_barrier(struct radv_cmd_buffer *cmd_buffer,
 			  const struct radv_subpass_barrier *barrier)
 {
-	cmd_buffer->state.flush_bits |= radv_src_access_flush(cmd_buffer, barrier->src_access_mask,
-							      NULL);
+	struct radv_framebuffer *fb = cmd_buffer->state.framebuffer;
+	if (fb && !fb->imageless) {
+		for (int i = 0; i < fb->attachment_count; ++i) {
+			cmd_buffer->state.flush_bits |= radv_src_access_flush(cmd_buffer, barrier->src_access_mask,
+									      fb->attachments[i]->image);
+		}
+	} else {
+		cmd_buffer->state.flush_bits |= radv_src_access_flush(cmd_buffer, barrier->src_access_mask,
+								      NULL);
+	}
+
 	radv_stage_flush(cmd_buffer, barrier->src_stage_mask);
-	cmd_buffer->state.flush_bits |= radv_dst_access_flush(cmd_buffer, barrier->dst_access_mask,
-	                                                      NULL);
+
+	if (fb && !fb->imageless) {
+		for (int i = 0; i < fb->attachment_count; ++i) {
+			cmd_buffer->state.flush_bits |= radv_dst_access_flush(cmd_buffer, barrier->dst_access_mask,
+									      fb->attachments[i]->image);
+		}
+	} else {
+		cmd_buffer->state.flush_bits |= radv_dst_access_flush(cmd_buffer, barrier->dst_access_mask,
+		                                                      NULL);
+	}
 }
 
 uint32_t

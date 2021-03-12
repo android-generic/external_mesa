@@ -653,8 +653,8 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
          load = nir_swizzle(b, load, SWIZ(X, Y, Z, Z), 4);
 
       src = nir_src_for_ssa(load);
-      b->shader->info.system_values_read |=
-         (1ull << nir_system_value_from_intrinsic(op));
+      BITSET_SET(b->shader->info.system_values_read,
+                 nir_system_value_from_intrinsic(op));
 
       break;
    }
@@ -739,7 +739,7 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
          nir_intrinsic_set_base(load, index);
          if (indirect) {
             offset = ttn_src_for_indirect(c, indirect);
-            nir_intrinsic_set_range(load, c->ubo_sizes[0] - index);
+            nir_intrinsic_set_range(load, c->build.shader->num_uniforms * 16 - index);
          } else {
             offset = nir_imm_int(b, 0);
             nir_intrinsic_set_range(load, 1);

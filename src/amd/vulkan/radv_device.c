@@ -153,7 +153,8 @@ radv_get_visible_vram_size(struct radv_physical_device *device)
 static uint64_t
 radv_get_vram_size(struct radv_physical_device *device)
 {
-	return radv_get_adjusted_vram_size(device) - device->rad_info.vram_vis_size;
+	uint64_t total_size = radv_get_adjusted_vram_size(device);
+	return total_size - MIN2(total_size, device->rad_info.vram_vis_size);
 }
 
 enum radv_heap {
@@ -639,6 +640,10 @@ radv_handle_per_app_options(struct radv_instance *instance,
 		driQueryOptionb(&instance->dri_options,
 				"radv_enable_mrt_output_nan_fixup");
 
+	instance->disable_shrink_image_store =
+		driQueryOptionb(&instance->dri_options,
+				"radv_disable_shrink_image_store");
+
 	if (driQueryOptionb(&instance->dri_options, "radv_no_dynamic_bounds"))
 		instance->debug_flags |= RADV_DEBUG_NO_DYNAMIC_BOUNDS;
 }
@@ -651,6 +656,7 @@ static const driOptionDescription radv_dri_options[] = {
 		DRI_CONF_VK_X11_ENSURE_MIN_IMAGE_COUNT(false)
 		DRI_CONF_RADV_REPORT_LLVM9_VERSION_STRING(false)
 		DRI_CONF_RADV_ENABLE_MRT_OUTPUT_NAN_FIXUP(false)
+		DRI_CONF_RADV_DISABLE_SHRINK_IMAGE_STORE(false)
 		DRI_CONF_RADV_NO_DYNAMIC_BOUNDS(false)
 		DRI_CONF_RADV_OVERRIDE_UNIFORM_OFFSET_ALIGNMENT(0)
 	DRI_CONF_SECTION_END
@@ -1016,9 +1022,9 @@ void radv_GetPhysicalDeviceFeatures(
 		.shaderInt64                              = true,
 		.shaderInt16                              = true,
 		.sparseBinding                            = true,
-		.sparseResidencyBuffer                    = pdevice->rad_info.chip_class >= GFX8,
-		.sparseResidencyImage2D                   = pdevice->rad_info.chip_class >= GFX8,
-		.sparseResidencyAliased                   = pdevice->rad_info.chip_class >= GFX8,
+		.sparseResidencyBuffer                    = pdevice->rad_info.family >= CHIP_POLARIS10,
+		.sparseResidencyImage2D                   = pdevice->rad_info.family >= CHIP_POLARIS10,
+		.sparseResidencyAliased                   = pdevice->rad_info.family >= CHIP_POLARIS10,
 		.variableMultisampleRate                  = true,
 		.shaderResourceMinLod                     = true,
 		.shaderResourceResidency                  = true,
@@ -1665,8 +1671,8 @@ void radv_GetPhysicalDeviceProperties(
 		.deviceType = pdevice->rad_info.has_dedicated_vram ? VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU : VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 		.limits = limits,
 		.sparseProperties = {
-			.residencyNonResidentStrict = pdevice->rad_info.chip_class >= GFX8,
-			.residencyStandard2DBlockShape = pdevice->rad_info.chip_class >= GFX8,
+			.residencyNonResidentStrict = pdevice->rad_info.family >= CHIP_POLARIS10,
+			.residencyStandard2DBlockShape = pdevice->rad_info.family >= CHIP_POLARIS10,
 		},
 	};
 
@@ -1768,7 +1774,7 @@ radv_get_physical_device_properties_1_2(struct radv_physical_device *pdevice,
 	p->shaderStorageBufferArrayNonUniformIndexingNative = false;
 	p->shaderStorageImageArrayNonUniformIndexingNative = false;
 	p->shaderInputAttachmentArrayNonUniformIndexingNative = false;
-	p->robustBufferAccessUpdateAfterBind = false;
+	p->robustBufferAccessUpdateAfterBind = true;
 	p->quadDivergentImplicitLod = false;
 
 	size_t max_descriptor_set_size = ((1ull << 31) - 16 * MAX_DYNAMIC_BUFFERS -
@@ -2414,24 +2420,28 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue,
 		VkDeviceQueueCreateFlags flags,
 		const VkDeviceQueueGlobalPriorityCreateInfoEXT *global_priority)
 {
-	queue->_loader_data.loaderMagic = ICD_LOADER_MAGIC;
 	queue->device = device;
 	queue->queue_family_index = queue_family_index;
 	queue->queue_idx = idx;
 	queue->priority = radv_get_queue_global_priority(global_priority);
 	queue->flags = flags;
 
+	vk_object_base_init(&device->vk, &queue->base, VK_OBJECT_TYPE_QUEUE);
+
 	VkResult result = device->ws->ctx_create(device->ws, queue->priority, &queue->hw_ctx);
-	if (result != VK_SUCCESS)
+	if (result != VK_SUCCESS) {
+		vk_object_base_finish(&queue->base);
 		return vk_error(device->instance, result);
+	}
 
 	list_inithead(&queue->pending_submissions);
 	mtx_init(&queue->pending_mutex, mtx_plain);
 
 	mtx_init(&queue->thread_mutex, mtx_plain);
 	if (u_cnd_monotonic_init(&queue->thread_cond)) {
-		result = VK_ERROR_INITIALIZATION_FAILED;
-		return vk_error(device->instance, result);
+		device->ws->ctx_destroy(queue->hw_ctx);
+		vk_object_base_finish(&queue->base);
+		return vk_error(device->instance, VK_ERROR_INITIALIZATION_FAILED);
 	}
 	queue->cond_created = true;
 
@@ -2480,6 +2490,8 @@ radv_queue_finish(struct radv_queue *queue)
 		queue->device->ws->buffer_destroy(queue->gds_oa_bo);
 	if (queue->compute_scratch_bo)
 		queue->device->ws->buffer_destroy(queue->compute_scratch_bo);
+
+	vk_object_base_finish(&queue->base);
 }
 
 static void
@@ -2709,6 +2721,7 @@ VkResult radv_CreateDevice(
 
 	bool keep_shader_info = false;
 	bool robust_buffer_access = false;
+	bool robust_buffer_access2 = false;
 	bool overallocation_disallowed = false;
 	bool custom_border_colors = false;
 	bool vrs_enabled = false;
@@ -2755,6 +2768,12 @@ VkResult radv_CreateDevice(
 				      vrs->attachmentFragmentShadingRate;
 			break;
 		}
+		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT: {
+			const VkPhysicalDeviceRobustness2FeaturesEXT *features = (const void *)ext;
+			if (features->robustBufferAccess2)
+				robust_buffer_access2 = true;
+			break;
+		}
 		default:
 			break;
 		}
@@ -2798,7 +2817,8 @@ VkResult radv_CreateDevice(
 		device->enabled_extensions.EXT_buffer_device_address ||
 		device->enabled_extensions.KHR_buffer_device_address;
 
-	device->robust_buffer_access = robust_buffer_access;
+	device->robust_buffer_access = robust_buffer_access || robust_buffer_access2;
+	device->robust_buffer_access2 = robust_buffer_access2;
 
 	device->adjust_frag_coord_z = (vrs_enabled ||
 				       device->enabled_extensions.KHR_fragment_shading_rate) &&
@@ -3358,7 +3378,7 @@ radv_get_hs_offchip_param(struct radv_device *device, uint32_t *max_offchip_buff
 	 * Follow AMDVLK here.
 	 */
 	if (device->physical_device->rad_info.chip_class >= GFX10) {
-		max_offchip_buffers_per_se = 256;
+		max_offchip_buffers_per_se = 128;
 	} else if (device->physical_device->rad_info.family == CHIP_VEGA10 ||
 		   device->physical_device->rad_info.chip_class == GFX7 ||
 		   device->physical_device->rad_info.chip_class == GFX6)
@@ -5488,7 +5508,7 @@ static VkResult radv_alloc_memory(struct radv_device *device,
 		domain = device->physical_device->memory_domains[pAllocateInfo->memoryTypeIndex];
 		flags |= device->physical_device->memory_flags[pAllocateInfo->memoryTypeIndex];
 
-		if (!dedicate_info && !import_info && (!export_info || !export_info->handleTypes)) {
+		if (!import_info && (!export_info || !export_info->handleTypes)) {
 			flags |= RADEON_FLAG_NO_INTERPROCESS_SHARING;
 			if (device->use_global_bo_list) {
 				flags |= RADEON_FLAG_PREFER_LOCAL_BO;
@@ -7135,18 +7155,15 @@ radv_initialise_ds_surface(struct radv_device *device,
 	case VK_FORMAT_D24_UNORM_S8_UINT:
 	case VK_FORMAT_X8_D24_UNORM_PACK32:
 		ds->pa_su_poly_offset_db_fmt_cntl = S_028B78_POLY_OFFSET_NEG_NUM_DB_BITS(-24);
-		ds->offset_scale = 2.0f;
 		break;
 	case VK_FORMAT_D16_UNORM:
 	case VK_FORMAT_D16_UNORM_S8_UINT:
 		ds->pa_su_poly_offset_db_fmt_cntl = S_028B78_POLY_OFFSET_NEG_NUM_DB_BITS(-16);
-		ds->offset_scale = 4.0f;
 		break;
 	case VK_FORMAT_D32_SFLOAT:
 	case VK_FORMAT_D32_SFLOAT_S8_UINT:
 		ds->pa_su_poly_offset_db_fmt_cntl = S_028B78_POLY_OFFSET_NEG_NUM_DB_BITS(-23) |
 			S_028B78_POLY_OFFSET_DB_IS_FLOAT_FMT(1);
-		ds->offset_scale = 1.0f;
 		break;
 	case VK_FORMAT_S8_UINT:
 		stencil_only = true;
@@ -7331,6 +7348,8 @@ VkResult radv_CreateFramebuffer(
 	framebuffer->width = pCreateInfo->width;
 	framebuffer->height = pCreateInfo->height;
 	framebuffer->layers = pCreateInfo->layers;
+	framebuffer->imageless = !!imageless_create_info;
+
 	if (imageless_create_info) {
 		for (unsigned i = 0; i < imageless_create_info->attachmentImageInfoCount; ++i) {
 			const VkFramebufferAttachmentImageInfo *attachment =
@@ -7779,6 +7798,11 @@ static uint32_t radv_compute_valid_memory_types(struct radv_physical_device *dev
 {
 	enum radeon_bo_flag ignore_flags = ~(RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_GTT_WC);
 	uint32_t bits = radv_compute_valid_memory_types_attempt(dev, domains, flags, ignore_flags);
+
+	if (!bits) {
+		ignore_flags |= RADEON_FLAG_GTT_WC;
+		bits = radv_compute_valid_memory_types_attempt(dev, domains, flags, ignore_flags);
+	}
 
 	if (!bits) {
 		ignore_flags |= RADEON_FLAG_NO_CPU_ACCESS;

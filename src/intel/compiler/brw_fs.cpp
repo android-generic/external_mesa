@@ -4185,11 +4185,19 @@ fs_visitor::lower_minmax()
 
       if (inst->opcode == BRW_OPCODE_SEL &&
           inst->predicate == BRW_PREDICATE_NONE) {
-         /* FIXME: Using CMP doesn't preserve the NaN propagation semantics of
-          *        the original SEL.L/GE instruction
+         /* If src1 is an immediate value that is not NaN, then it can't be
+          * NaN.  In that case, emit CMP because it is much better for cmod
+          * propagation.  Likewise if src1 is not float.  Gen4 and Gen5 don't
+          * support HF or DF, so it is not necessary to check for those.
           */
-         ibld.CMP(ibld.null_reg_d(), inst->src[0], inst->src[1],
-                  inst->conditional_mod);
+         if (inst->src[1].type != BRW_REGISTER_TYPE_F ||
+             (inst->src[1].file == IMM && !isnan(inst->src[1].f))) {
+            ibld.CMP(ibld.null_reg_d(), inst->src[0], inst->src[1],
+                     inst->conditional_mod);
+         } else {
+            ibld.CMPN(ibld.null_reg_d(), inst->src[0], inst->src[1],
+                      inst->conditional_mod);
+         }
          inst->predicate = BRW_PREDICATE_NORMAL;
          inst->conditional_mod = BRW_CONDITIONAL_NONE;
 
@@ -8505,7 +8513,7 @@ fs_visitor::run_fs(bool allow_spilling, bool do_rep_send)
          emit_shader_time_begin();
 
       if (nir->info.inputs_read > 0 ||
-          (nir->info.system_values_read & (1ull << SYSTEM_VALUE_FRAG_COORD)) ||
+          BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_COORD) ||
           (nir->info.outputs_read > 0 && !wm_key->coherent_fb_fetch)) {
          if (devinfo->gen < 6)
             emit_interpolation_setup_gen4();
@@ -8886,7 +8894,7 @@ brw_nir_populate_wm_prog_data(const nir_shader *shader,
                               struct brw_wm_prog_data *prog_data)
 {
    prog_data->uses_src_depth = prog_data->uses_src_w =
-      shader->info.system_values_read & BITFIELD64_BIT(SYSTEM_VALUE_FRAG_COORD);
+      BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_FRAG_COORD);
 
    /* key->alpha_test_func means simulating alpha testing via discards,
     * so the shader definitely kills pixels.
@@ -8902,14 +8910,14 @@ brw_nir_populate_wm_prog_data(const nir_shader *shader,
    prog_data->persample_dispatch =
       key->multisample_fbo &&
       (key->persample_interp ||
-       (shader->info.system_values_read & (SYSTEM_BIT_SAMPLE_ID |
-                                            SYSTEM_BIT_SAMPLE_POS)) ||
+       BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_SAMPLE_ID) ||
+       BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_SAMPLE_POS) ||
        shader->info.fs.uses_sample_qualifier ||
        shader->info.outputs_read);
 
    if (devinfo->gen >= 6) {
       prog_data->uses_sample_mask =
-         shader->info.system_values_read & SYSTEM_BIT_SAMPLE_MASK_IN;
+         BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_SAMPLE_MASK_IN);
 
       /* From the Ivy Bridge PRM documentation for 3DSTATE_PS:
        *
@@ -8921,7 +8929,7 @@ brw_nir_populate_wm_prog_data(const nir_shader *shader,
        * persample dispatch, we hard-code it to 0.5.
        */
       prog_data->uses_pos_offset = prog_data->persample_dispatch &&
-         (shader->info.system_values_read & SYSTEM_BIT_SAMPLE_POS);
+         BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_SAMPLE_POS);
    }
 
    prog_data->has_render_target_reads = shader->info.outputs_read != 0ull;

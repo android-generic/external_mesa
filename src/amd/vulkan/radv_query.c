@@ -1317,9 +1317,11 @@ void radv_CmdCopyQueryPoolResults(
 	switch (pool->type) {
 	case VK_QUERY_TYPE_OCCLUSION:
 		if (flags & VK_QUERY_RESULT_WAIT_BIT) {
+			unsigned enabled_rb_mask = cmd_buffer->device->physical_device->rad_info.enabled_rb_mask;
+			uint32_t rb_avail_offset = 16 * util_last_bit(enabled_rb_mask) - 4;
 			for(unsigned i = 0; i < queryCount; ++i, dest_va += stride) {
 				unsigned query = firstQuery + i;
-				uint64_t src_va = va + query * pool->stride + pool->stride - 4;
+				uint64_t src_va = va + query * pool->stride + rb_avail_offset;
 
 				radeon_check_space(cmd_buffer->device->ws, cs, 7);
 
@@ -1542,13 +1544,14 @@ static void emit_begin_query(struct radv_cmd_buffer *cmd_buffer,
 
 			va += 8 * idx;
 
-			si_cs_emit_write_event_eop(cs,
-						   cmd_buffer->device->physical_device->rad_info.chip_class,
-						   radv_cmd_buffer_uses_mec(cmd_buffer),
-						   V_028A90_PS_DONE, 0,
-						   EOP_DST_SEL_TC_L2,
-						   EOP_DATA_SEL_GDS,
-						   va, EOP_DATA_GDS(0, 1), 0);
+			radeon_emit(cs, PKT3(PKT3_COPY_DATA, 4, 0));
+			radeon_emit(cs, COPY_DATA_SRC_SEL(COPY_DATA_GDS) |
+					COPY_DATA_DST_SEL(COPY_DATA_DST_MEM) |
+					COPY_DATA_WR_CONFIRM);
+			radeon_emit(cs, 0);
+			radeon_emit(cs, 0);
+			radeon_emit(cs, va);
+			radeon_emit(cs, va >> 32);
 
 			/* Record that the command buffer needs GDS. */
 			cmd_buffer->gds_needed = true;
@@ -1632,13 +1635,14 @@ static void emit_end_query(struct radv_cmd_buffer *cmd_buffer,
 
 			va += 8 * idx;
 
-			si_cs_emit_write_event_eop(cs,
-						   cmd_buffer->device->physical_device->rad_info.chip_class,
-						   radv_cmd_buffer_uses_mec(cmd_buffer),
-						   V_028A90_PS_DONE, 0,
-						   EOP_DST_SEL_TC_L2,
-						   EOP_DATA_SEL_GDS,
-						   va, EOP_DATA_GDS(0, 1), 0);
+			radeon_emit(cs, PKT3(PKT3_COPY_DATA, 4, 0));
+			radeon_emit(cs, COPY_DATA_SRC_SEL(COPY_DATA_GDS) |
+					COPY_DATA_DST_SEL(COPY_DATA_DST_MEM) |
+					COPY_DATA_WR_CONFIRM);
+			radeon_emit(cs, 0);
+			radeon_emit(cs, 0);
+			radeon_emit(cs, va);
+			radeon_emit(cs, va >> 32);
 
 			cmd_buffer->state.active_pipeline_gds_queries--;
 		}

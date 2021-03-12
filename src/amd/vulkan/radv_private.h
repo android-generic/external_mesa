@@ -361,6 +361,7 @@ struct radv_instance {
 	 */
 	bool enable_mrt_output_nan_fixup;
 	bool disable_tc_compat_htile_in_general;
+	bool disable_shrink_image_store;
 };
 
 VkResult radv_init_wsi(struct radv_physical_device *physical_device);
@@ -699,7 +700,7 @@ struct radv_deferred_queue_submission;
 enum ring_type radv_queue_family_to_ring(int f);
 
 struct radv_queue {
-	VK_LOADER_DATA                              _loader_data;
+	struct vk_object_base                       base;
 	struct radv_device *                         device;
 	struct radeon_winsys_ctx                    *hw_ctx;
 	enum radeon_ctx_priority                     priority;
@@ -826,8 +827,9 @@ struct radv_device {
 	struct radv_device_extension_table enabled_extensions;
 	struct radv_device_dispatch_table dispatch;
 
-	/* Whether the app has enabled the robustBufferAccess feature. */
+	/* Whether the app has enabled the robustBufferAccess/robustBufferAccess2 features. */
 	bool robust_buffer_access;
+	bool robust_buffer_access2;
 
 	/* Whether gl_FragCoord.z should be adjusted for VRS due to a hw bug
 	 * on some GFX10.3 chips.
@@ -1268,7 +1270,6 @@ struct radv_ds_buffer_info {
 	uint32_t pa_su_poly_offset_db_fmt_cntl;
 	uint32_t db_z_info2; /* GFX9 only */
 	uint32_t db_stencil_info2; /* GFX9 only */
-	float offset_scale;
 };
 
 void
@@ -1375,7 +1376,6 @@ struct radv_cmd_state {
 	bool                                         perfect_occlusion_queries_enabled;
 	unsigned                                     active_pipeline_queries;
 	unsigned                                     active_pipeline_gds_queries;
-	float					     offset_scale;
 	uint32_t                                      trace_id;
 	uint32_t                                      last_ia_multi_vgt_param;
 
@@ -2325,6 +2325,8 @@ struct radv_framebuffer {
 	uint32_t                                     width;
 	uint32_t                                     height;
 	uint32_t                                     layers;
+
+	bool                                         imageless;
 
 	uint32_t                                     attachment_count;
 	struct radv_image_view                       *attachments[0];

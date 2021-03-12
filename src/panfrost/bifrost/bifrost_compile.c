@@ -419,7 +419,12 @@ bi_emit_fragment_out(bi_builder *b, nir_intrinsic_instr *instr)
                 /* Explicit copy since BLEND inputs are precoloured to R0-R3,
                  * TODO: maybe schedule around this or implement in RA as a
                  * spill */
-                if (rt > 0) {
+                bool has_mrt = false;
+
+                nir_foreach_shader_out_variable(var, b->shader->nir)
+                        has_mrt |= (var->data.location > FRAG_RESULT_DATA0);
+
+                if (has_mrt) {
                         bi_index srcs[4] = { color, color, color, color };
                         unsigned channels[4] = { 0, 1, 2, 3 };
                         color = bi_temp(b->shader);
@@ -509,7 +514,7 @@ bi_emit_load_ubo(bi_builder *b, nir_intrinsic_instr *instr)
                 }
         }
 
-        bi_load_to(b, instr->num_components * 32,
+        bi_load_to(b, instr->num_components * nir_dest_bit_size(instr->dest),
                         bi_dest_index(&instr->dest), offset_is_const ?
                         bi_imm_u32(const_offset) : dyn_offset,
                         bi_src_index(&instr->src[0]),
@@ -632,7 +637,7 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
                 break;
 
         case nir_intrinsic_load_ssbo_address:
-                bi_load_sysval(b, &instr->instr, 1, 0);
+                bi_load_sysval(b, &instr->instr, 2, 0);
                 break;
 
         case nir_intrinsic_get_ssbo_size:
@@ -2135,7 +2140,7 @@ bifrost_nir_lower_i8_fragout_impl(struct nir_builder *b,
         nir_alu_type type =
                 nir_alu_type_get_base_type(nir_intrinsic_src_type(intr));
 
-        assert(type == nir_type_int || nir_type_uint);
+        assert(type == nir_type_int || type == nir_type_uint);
 
         b->cursor = nir_before_instr(instr);
         nir_ssa_def *cast = type == nir_type_int ?
@@ -2267,9 +2272,13 @@ bifrost_compile_shader_nir(void *mem_ctx, nir_shader *nir,
                                 bifrost_debug & BIFROST_DBG_VERBOSE);
         }
 
-        /* Pad the shader with enough zero bytes to trick the prefetcher */
-        memset(util_dynarray_grow(&program->compiled, uint8_t, BIFROST_SHADER_PREFETCH),
-               0, BIFROST_SHADER_PREFETCH);
+        /* Pad the shader with enough zero bytes to trick the prefetcher,
+         * unless we're compiling an empty shader (in which case we don't pad
+         * so the size remains 0) */
+        if (program->compiled.size) {
+                memset(util_dynarray_grow(&program->compiled, uint8_t, BIFROST_SHADER_PREFETCH),
+                       0, BIFROST_SHADER_PREFETCH);
+        }
 
         program->tls_size = ctx->tls_size;
 

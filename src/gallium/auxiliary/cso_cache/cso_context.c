@@ -341,10 +341,13 @@ void cso_destroy_context( struct cso_context *ctx )
                                                 PIPE_SHADER_CAP_MAX_SHADER_BUFFERS);
             int maxcb = scr->get_shader_param(scr, sh,
                                               PIPE_SHADER_CAP_MAX_CONST_BUFFERS);
+            int maximg = scr->get_shader_param(scr, sh,
+                                              PIPE_SHADER_CAP_MAX_SHADER_IMAGES);
             assert(maxsam <= PIPE_MAX_SAMPLERS);
             assert(maxview <= PIPE_MAX_SHADER_SAMPLER_VIEWS);
             assert(maxssbo <= PIPE_MAX_SHADER_BUFFERS);
             assert(maxcb <= PIPE_MAX_CONSTANT_BUFFERS);
+            assert(maximg <= PIPE_MAX_SHADER_IMAGES);
             if (maxsam > 0) {
                ctx->pipe->bind_sampler_states(ctx->pipe, sh, 0, maxsam, zeros);
             }
@@ -353,6 +356,9 @@ void cso_destroy_context( struct cso_context *ctx )
             }
             if (maxssbo > 0) {
                ctx->pipe->set_shader_buffers(ctx->pipe, sh, 0, maxssbo, ssbos, 0);
+            }
+            if (maximg > 0) {
+               ctx->pipe->set_shader_images(ctx->pipe, sh, 0, maximg, NULL);
             }
             for (int i = 0; i < maxcb; i++) {
                ctx->pipe->set_constant_buffer(ctx->pipe, sh, i, NULL);
@@ -1718,6 +1724,7 @@ cso_draw_arrays(struct cso_context *cso, uint mode, uint start, uint count)
    util_draw_init_info(&info);
 
    info.mode = mode;
+   info.index_bounds_valid = true;
    info.min_index = start;
    info.max_index = start + count - 1;
 
@@ -1738,6 +1745,7 @@ cso_draw_arrays_instanced(struct cso_context *cso, uint mode,
    util_draw_init_info(&info);
 
    info.mode = mode;
+   info.index_bounds_valid = true;
    info.min_index = start;
    info.max_index = start + count - 1;
    info.start_instance = start_instance;

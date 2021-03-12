@@ -3390,6 +3390,7 @@ typedef struct nir_shader_compiler_options {
    bool support_16bit_alu;
 
    unsigned max_unroll_iterations;
+   unsigned max_unroll_iterations_aggressive;
 
    /* For the non-zero value of the enum corresponds multiplier when
     * calling lower_uniforms_to_ubo */
@@ -4299,9 +4300,6 @@ nir_gather_explicit_io_initializers(nir_shader *shader,
                                     void *dst, size_t dst_size,
                                     nir_variable_mode mode);
 
-bool nir_lower_mem_constant_vars(nir_shader *shader,
-                                 glsl_type_size_align_func type_info);
-
 bool nir_lower_vec3_to_vec4(nir_shader *shader, nir_variable_mode modes);
 
 typedef enum {
@@ -4467,8 +4465,15 @@ bool nir_lower_vars_to_ssa(nir_shader *shader);
 
 bool nir_remove_dead_derefs(nir_shader *shader);
 bool nir_remove_dead_derefs_impl(nir_function_impl *impl);
+
+typedef struct nir_remove_dead_variables_options {
+   bool (*can_remove_var)(nir_variable *var, void *data);
+   void *can_remove_var_data;
+} nir_remove_dead_variables_options;
+
 bool nir_remove_dead_variables(nir_shader *shader, nir_variable_mode modes,
-                               bool (*can_remove_var)(nir_variable *var));
+                               const nir_remove_dead_variables_options *options);
+
 bool nir_lower_variable_initializers(nir_shader *shader,
                                      nir_variable_mode modes);
 
@@ -5007,7 +5012,7 @@ bool nir_opt_rematerialize_compares(nir_shader *shader);
 bool nir_opt_remove_phis(nir_shader *shader);
 bool nir_opt_remove_phis_block(nir_block *block);
 
-bool nir_opt_shrink_vectors(nir_shader *shader);
+bool nir_opt_shrink_vectors(nir_shader *shader, bool shrink_image_store);
 
 bool nir_opt_trivial_continues(nir_shader *shader);
 
