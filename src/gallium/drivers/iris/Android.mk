@@ -158,26 +158,25 @@ LOCAL_C_INCLUDES := \
 LOCAL_SHARED_LIBRARIES := libdrm_intel
 
 LOCAL_STATIC_LIBRARIES := \
-	libmesa_intel_common \
-	libmesa_nir
-
-LOCAL_WHOLE_STATIC_LIBRARIES := \
-	libmesa_genxml \
 	libmesa_blorp \
+	libmesa_genxml \
 	libmesa_intel_common \
 	libmesa_intel_compiler \
 	libmesa_intel_perf \
-	libmesa_iris_gfx8 \
-	libmesa_iris_gfx9 \
-	libmesa_iris_gfx11 \
-	libmesa_iris_gfx12 \
-	libmesa_iris_gfx125
+	libmesa_nir
+
+LOCAL_WHOLE_STATIC_LIBRARIES := \
+	libmesa_iris_gen8 \
+	libmesa_iris_gen9 \
+	libmesa_iris_gen11 \
+	libmesa_iris_gen12 \
+	libmesa_iris_gen125
 
 include $(GALLIUM_COMMON_MK)
 include $(BUILD_STATIC_LIBRARY)
 
 ifneq ($(HAVE_GALLIUM_IRIS),)
 GALLIUM_TARGET_DRIVERS += iris
-$(eval GALLIUM_LIBS += $(LOCAL_MODULE) libmesa_winsys_iris)
+$(eval GALLIUM_LIBS += $(LOCAL_MODULE) libmesa_winsys_iris $(filter-out libmesa_nir, $(LOCAL_STATIC_LIBRARIES)))
 $(eval GALLIUM_SHARED_LIBS += $(LOCAL_SHARED_LIBRARIES))
 endif

@@ -651,7 +651,7 @@ iris_resource_configure_main(const struct iris_screen *screen,
       iris_format_for_usage(&screen->devinfo, templ->format, usage).fmt;
 
    const struct isl_surf_init_info init_info = {
-      .dim = target_to_isl_surf_dim(templ->target),
+      .dim = iris_target_to_isl_surf_dim(templ->target),
       .format = format,
       .width = templ->width0,
       .height = templ->height0,
