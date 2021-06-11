@@ -41,6 +41,7 @@
 #include "pan_pool.h"
 
 #include <midgard_pack.h>
+#include <pthread.h>
 
 #if defined(__cplusplus)
 extern "C" {
