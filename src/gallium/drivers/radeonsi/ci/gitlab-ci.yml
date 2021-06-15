@@ -7,9 +7,11 @@
     GPU_VERSION: radeonsi-stoney
     BOOT_METHOD: depthcharge
     KERNEL_IMAGE_TYPE: ""
+    HWCI_KERNEL_MODULES: amdgpu
     DRIVER_NAME: radeonsi
     DEQP_PARALLEL: 4
     DEQP_EXPECTED_RENDERER: STONEY
+    HWCI_FREQ_MAX: "true"
   tags:
     - mesa-ci-x86-64-lava-hp-11A-G6-EE-grunt
 
@@ -70,4 +72,4 @@ radeonsi-stoney-piglit-gl:amd64:
     PIGLIT_PLATFORM: mixed_glx_egl
     PIGLIT_PROFILES: quick_gl
     PIGLIT_JUNIT_RESULTS: 1
-    LAVA_START_XORG: 1
+    HWCI_START_XORG: 1

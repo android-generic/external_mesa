@@ -366,7 +366,8 @@ struct si_texture {
    /* Depth buffer compression and fast clear. */
    float depth_clear_value[RADEON_SURF_MAX_LEVELS];
    uint8_t stencil_clear_value[RADEON_SURF_MAX_LEVELS];
-   uint16_t depth_cleared_level_mask;   /* if it was cleared at least once */
+   uint16_t depth_cleared_level_mask_once; /* if it was cleared at least once */
+   uint16_t depth_cleared_level_mask;     /* track if it was cleared (not 100% accurate) */
    uint16_t stencil_cleared_level_mask; /* if it was cleared at least once */
    uint16_t dirty_level_mask;         /* each bit says if that mipmap is compressed */
    uint16_t stencil_dirty_level_mask; /* each bit says if that mipmap is compressed */
@@ -1285,6 +1286,8 @@ struct si_context {
    struct hash_table *dirty_implicit_resources;
 
    pipe_draw_vbo_func draw_vbo[NUM_GFX_VERSIONS - GFX6][2][2][2][2];
+   /* When b.draw_vbo is a wrapper, real_draw_vbo is the real draw_vbo function */
+   pipe_draw_vbo_func real_draw_vbo;
 
    /* SQTT */
    struct ac_thread_trace_data *thread_trace;
@@ -1322,6 +1325,9 @@ void si_resource_copy_region(struct pipe_context *ctx, struct pipe_resource *dst
 void si_decompress_dcc(struct si_context *sctx, struct si_texture *tex);
 void si_flush_implicit_resources(struct si_context *sctx);
 
+/* si_nir_optim.c */
+bool si_nir_is_output_const_if_tex_is_const(nir_shader *shader, float *in, float *out, int *texunit);
+
 /* si_buffer.c */
 bool si_cs_is_buffer_referenced(struct si_context *sctx, struct pb_buffer *buf,
                                 enum radeon_bo_usage usage);
@@ -1335,9 +1341,15 @@ struct pipe_resource *pipe_aligned_buffer_create(struct pipe_screen *screen, uns
 struct si_resource *si_aligned_buffer_create(struct pipe_screen *screen, unsigned flags,
                                              unsigned usage, unsigned size, unsigned alignment);
 void si_replace_buffer_storage(struct pipe_context *ctx, struct pipe_resource *dst,
-                               struct pipe_resource *src, uint32_t delete_buffer_id);
+                               struct pipe_resource *src, unsigned num_rebinds,
+                               uint32_t rebind_mask, uint32_t delete_buffer_id);
 void si_init_screen_buffer_functions(struct si_screen *sscreen);
 void si_init_buffer_functions(struct si_context *sctx);
+
+/* Replace the sctx->b.draw_vbo function with a wrapper. This can be use to implement
+ * optimizations without affecting the normal draw_vbo functions perf.
+ */
+void si_install_draw_wrapper(struct si_context *sctx, pipe_draw_vbo_func wrapper);
 
 /* si_clear.c */
 #define SI_CLEAR_TYPE_CMASK  (1 << 0)
@@ -2008,12 +2020,16 @@ static inline unsigned si_get_shader_wave_size(struct si_shader *shader)
 
 static inline void si_select_draw_vbo(struct si_context *sctx)
 {
-   sctx->b.draw_vbo = sctx->draw_vbo[sctx->chip_class - GFX6]
-                                    [!!sctx->shader.tes.cso]
-                                    [!!sctx->shader.gs.cso]
-                                    [sctx->ngg]
-                                    [si_compute_prim_discard_enabled(sctx)];
-   assert(sctx->b.draw_vbo);
+   pipe_draw_vbo_func draw_vbo = sctx->draw_vbo[sctx->chip_class - GFX6]
+                                               [!!sctx->shader.tes.cso]
+                                               [!!sctx->shader.gs.cso]
+                                               [sctx->ngg]
+                                               [si_compute_prim_discard_enabled(sctx)];
+   assert(draw_vbo);
+   if (unlikely(sctx->real_draw_vbo))
+      sctx->real_draw_vbo = draw_vbo;
+   else
+      sctx->b.draw_vbo = draw_vbo;
 }
 
 /* Return the number of samples that the rasterizer uses. */

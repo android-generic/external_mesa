@@ -5,9 +5,10 @@ rootfs_dst=$1
 mkdir -p $rootfs_dst/results
 
 # Set up the init script that brings up the system.
-cp $BM/init.sh $rootfs_dst/init
+cp $BM/bm-init.sh $rootfs_dst/init
+cp $CI_COMMON/init*.sh $rootfs_dst/
 
-cp $BM/capture-devcoredump.sh $rootfs_dst/
+cp $CI_COMMON/capture-devcoredump.sh $rootfs_dst/
 
 set +x
 # Pass through relevant env vars from the gitlab job to the baremetal init script
@@ -21,4 +22,3 @@ set -x
 # Add the Mesa drivers we built, and make a consistent symlink to them.
 mkdir -p $rootfs_dst/$CI_PROJECT_DIR
 rsync -aH --delete $CI_PROJECT_DIR/install/ $rootfs_dst/$CI_PROJECT_DIR/install/
-ln -sf $CI_PROJECT_DIR/install $rootfs_dst/install

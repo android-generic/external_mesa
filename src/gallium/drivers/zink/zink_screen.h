@@ -26,7 +26,7 @@
 
 #include "zink_device_info.h"
 #include "zink_instance.h"
-#include "zink_dispatch_table.h"
+#include "vk_dispatch_table.h"
 
 #include "util/u_idalloc.h"
 #include "pipe/p_screen.h"
@@ -265,4 +265,7 @@ zink_screen_update_pipeline_cache(struct zink_screen *screen);
 
 void
 zink_screen_init_descriptor_funcs(struct zink_screen *screen, bool fallback);
+
+void
+zink_stub_function_not_loaded(void);
 #endif
