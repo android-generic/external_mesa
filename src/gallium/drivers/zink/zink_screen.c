@@ -31,6 +31,7 @@
 #include "zink_format.h"
 #include "zink_framebuffer.h"
 #include "zink_instance.h"
+#include "zink_program.h"
 #include "zink_public.h"
 #include "zink_resource.h"
 #include "nir_to_spirv/nir_to_spirv.h" // for SPIRV_VERSION
@@ -63,6 +64,17 @@ DEBUG_GET_ONCE_FLAGS_OPTION(zink_debug, "ZINK_DEBUG", zink_debug_options, 0)
 
 uint32_t
 zink_debug;
+
+
+static const struct debug_named_value
+zink_descriptor_options[] = {
+   { "auto", ZINK_DESCRIPTOR_MODE_AUTO, "Automatically detect best mode" },
+   { "lazy", ZINK_DESCRIPTOR_MODE_LAZY, "Don't cache, do least amount of updates" },
+   { "notemplates", ZINK_DESCRIPTOR_MODE_NOTEMPLATES, "Cache, but disable templated updates" },
+   DEBUG_NAMED_VALUE_END
+};
+
+DEBUG_GET_ONCE_FLAGS_OPTION(zink_descriptor_mode, "ZINK_DESCRIPTORS", zink_descriptor_options, ZINK_DESCRIPTOR_MODE_AUTO)
 
 static const char *
 zink_get_vendor(struct pipe_screen *pscreen)
@@ -1001,6 +1013,8 @@ zink_destroy_screen(struct pipe_screen *pscreen)
    simple_mtx_destroy(&screen->mem_cache_mtx);
    vkDestroyPipelineCache(screen->dev, screen->pipeline_cache, NULL);
 
+   util_live_shader_cache_deinit(&screen->shaders);
+
    if (screen->sem)
       vkDestroySemaphore(screen->dev, screen->sem, NULL);
    if (screen->prev_sem)
@@ -1193,7 +1207,7 @@ zink_screen_init_descriptor_funcs(struct zink_screen *screen, bool fallback)
 {
    if (screen->info.have_KHR_descriptor_update_template &&
        !fallback &&
-       !getenv("ZINK_CACHE_DESCRIPTORS")) {
+       screen->descriptor_mode == ZINK_DESCRIPTOR_MODE_LAZY) {
 #define LAZY(FUNC) screen->FUNC = zink_##FUNC##_lazy
       LAZY(descriptor_program_init);
       LAZY(descriptor_program_deinit);
@@ -1204,7 +1218,6 @@ zink_screen_init_descriptor_funcs(struct zink_screen *screen, bool fallback)
       LAZY(descriptors_init);
       LAZY(descriptors_deinit);
       LAZY(descriptors_update);
-      screen->lazy_descriptors = true;
 #undef LAZY
    } else {
 #define DEFAULT(FUNC) screen->FUNC = zink_##FUNC
@@ -1217,7 +1230,6 @@ zink_screen_init_descriptor_funcs(struct zink_screen *screen, bool fallback)
       DEFAULT(descriptors_init);
       DEFAULT(descriptors_deinit);
       DEFAULT(descriptors_update);
-      screen->lazy_descriptors = false;
 #undef DEFAULT
    }
 }
@@ -1576,6 +1588,11 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
    screen->threaded = util_get_cpu_caps()->nr_cpus > 1 && debug_get_bool_option("GALLIUM_THREAD", util_get_cpu_caps()->nr_cpus > 1);
 
    zink_debug = debug_get_option_zink_debug();
+   screen->descriptor_mode = debug_get_option_zink_descriptor_mode();
+   if (util_bitcount(screen->descriptor_mode) > 1) {
+      printf("Specify exactly one descriptor mode.\n");
+      abort();
+   }
 
    screen->instance_info.loader_version = zink_get_loader_version();
    screen->instance = zink_create_instance(&screen->instance_info);
@@ -1640,6 +1657,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
 #endif // VK_EXTX_PORTABILITY_SUBSET_EXTENSION_NAME
 
    check_base_requirements(screen);
+   util_live_shader_cache_init(&screen->shaders, zink_create_gfx_shader_state, zink_delete_shader_state);
 
    screen->base.get_name = zink_get_name;
    screen->base.get_vendor = zink_get_vendor;

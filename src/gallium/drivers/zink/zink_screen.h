@@ -35,6 +35,7 @@
 #include "util/disk_cache.h"
 #include "util/log.h"
 #include "util/simple_mtx.h"
+#include "util/u_live_shader_cache.h"
 
 #include <vulkan/vulkan.h>
 
@@ -57,6 +58,12 @@ enum zink_descriptor_type;
 #define ZINK_DEBUG_SPIRV 0x2
 #define ZINK_DEBUG_TGSI 0x4
 #define ZINK_DEBUG_VALIDATION 0x8
+
+enum zink_descriptor_mode {
+   ZINK_DESCRIPTOR_MODE_AUTO,
+   ZINK_DESCRIPTOR_MODE_LAZY,
+   ZINK_DESCRIPTOR_MODE_NOTEMPLATES,
+};
 
 struct zink_screen {
    struct pipe_screen base;
@@ -81,6 +88,8 @@ struct zink_screen {
    size_t pipeline_cache_size;
    struct disk_cache *disk_cache;
    cache_key disk_cache_key;
+
+   struct util_live_shader_cache shaders;
 
    simple_mtx_t mem_cache_mtx;
    struct hash_table *resource_mem_cache;
@@ -129,7 +138,7 @@ struct zink_screen {
    void (*batch_descriptor_deinit)(struct zink_screen *screen, struct zink_batch_state *bs);
    bool (*descriptors_init)(struct zink_context *ctx);
    void (*descriptors_deinit)(struct zink_context *ctx);
-   bool lazy_descriptors;
+   enum zink_descriptor_mode descriptor_mode;
 
 #if defined(MVK_VERSION)
    PFN_vkGetMoltenVKConfigurationMVK vk_GetMoltenVKConfigurationMVK;

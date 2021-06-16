@@ -78,11 +78,11 @@ struct zink_buffer_view {
    VkBufferView buffer_view;
    uint32_t hash;
    struct zink_batch_usage batch_uses;
+   struct zink_descriptor_refs desc_set_refs;
 };
 
 struct zink_sampler_view {
    struct pipe_sampler_view base;
-   struct zink_descriptor_refs desc_set_refs;
    union {
       struct zink_surface *image_view;
       struct zink_buffer_view *buffer_view;
@@ -91,7 +91,6 @@ struct zink_sampler_view {
 
 struct zink_image_view {
    struct pipe_image_view base;
-   struct zink_descriptor_refs desc_set_refs;
    union {
       struct zink_surface *surface;
       struct zink_buffer_view *buffer_view;
@@ -125,9 +124,12 @@ struct zink_viewport_state {
 };
 
 
-union zink_descriptor_surface {
-   struct zink_surface *surface;
-   struct zink_buffer_view *bufferview;
+struct zink_descriptor_surface {
+   union {
+      struct zink_surface *surface;
+      struct zink_buffer_view *bufferview;
+   };
+   bool is_buffer;
 };
 
 struct zink_context {
@@ -257,8 +259,8 @@ struct zink_context {
       uint8_t num_images[PIPE_SHADER_TYPES];
 
       struct zink_resource *descriptor_res[ZINK_DESCRIPTOR_TYPES][PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
-      union zink_descriptor_surface sampler_surfaces[PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
-      union zink_descriptor_surface image_surfaces[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_IMAGES];
+      struct zink_descriptor_surface sampler_surfaces[PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
+      struct zink_descriptor_surface image_surfaces[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_IMAGES];
    } di;
    bool descriptor_refs_dirty[2];
    struct set *need_barriers[2]; //gfx, compute

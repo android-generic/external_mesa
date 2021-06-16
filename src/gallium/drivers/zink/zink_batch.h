@@ -56,20 +56,20 @@ batch_ptr_add_usage(struct zink_batch *batch, struct set *s, void *ptr, struct z
 struct zink_batch_state {
    struct zink_fence fence;
    struct pipe_reference reference;
+   unsigned draw_count;
+
    struct zink_context *ctx;
    VkCommandPool cmdpool;
    VkCommandBuffer cmdbuf;
    VkCommandBuffer barrier_cmdbuf;
-   bool has_barriers;
 
    VkQueue queue; //duplicated from batch for threading
    VkSemaphore sem;
 
    struct util_queue_fence flush_completed;
+   unsigned compute_count;
 
    struct zink_resource *flush_res;
-
-   unsigned short descs_used; //number of descriptors currently allocated
 
    struct set *fbs;
    struct set *programs;
@@ -88,7 +88,7 @@ struct zink_batch_state {
 
    bool is_device_lost;
    bool have_timelines;
-   unsigned work_count[2];
+   bool has_barriers;
 };
 
 struct zink_batch {
@@ -174,16 +174,29 @@ zink_batch_state_reference(struct zink_screen *screen,
    if (dst) *dst = src;
 }
 
-void
-zink_batch_usage_set(struct zink_batch_usage *u, uint32_t batch_id);
-bool
-zink_batch_usage_matches(struct zink_batch_usage *u, uint32_t batch_id);
-bool
-zink_batch_usage_exists(struct zink_batch_usage *u);
+static inline void
+zink_batch_usage_unset(struct zink_batch_usage *u, struct zink_batch_state *bs)
+{
+   p_atomic_cmpxchg(&u->usage, bs->fence.batch_id, 0);
+}
 
 static inline void
-zink_batch_usage_unset(struct zink_batch_usage *u, uint32_t batch_id)
+zink_batch_usage_set(struct zink_batch_usage *u, struct zink_batch_state *bs)
 {
-   p_atomic_cmpxchg(&u->usage, batch_id, 0);
+   u->usage = bs->fence.batch_id;
 }
+
+static inline bool
+zink_batch_usage_matches(const struct zink_batch_usage *u, const struct zink_batch_state *bs)
+{
+   return u->usage == bs->fence.batch_id;
+}
+
+static inline bool
+zink_batch_usage_exists(struct zink_batch_usage *u)
+{
+   uint32_t usage = p_atomic_read(&u->usage);
+   return !!usage;
+}
+
 #endif
