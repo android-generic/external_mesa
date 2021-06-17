@@ -1102,6 +1102,16 @@ update_queue_props(struct zink_screen *screen)
 }
 
 static void
+init_queue(struct zink_screen *screen)
+{
+   vkGetDeviceQueue(screen->dev, screen->gfx_queue, 0, &screen->queue);
+   if (screen->threaded && screen->max_queues > 1)
+      vkGetDeviceQueue(screen->dev, screen->gfx_queue, 1, &screen->thread_queue);
+   else
+      screen->thread_queue = screen->queue;
+}
+
+static void
 zink_flush_frontbuffer(struct pipe_screen *pscreen,
                        struct pipe_context *pcontext,
                        struct pipe_resource *pres,
@@ -1132,11 +1142,7 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
       winsys->displaytarget_unmap(winsys, res->dt);
    }
 
-   winsys->displaytarget_unmap(winsys, res->dt);
-
-   assert(res->dt);
-   if (res->dt)
-      winsys->displaytarget_display(winsys, res->dt, winsys_drawable_handle, sub_box);
+   winsys->displaytarget_display(winsys, res->dt, winsys_drawable_handle, sub_box);
 }
 
 bool
@@ -1159,6 +1165,10 @@ emulate_x8(enum pipe_format format)
    case PIPE_FORMAT_B8G8R8X8_SRGB:
       return PIPE_FORMAT_B8G8R8A8_SRGB;
 
+   case PIPE_FORMAT_R8G8B8X8_SINT:
+      return PIPE_FORMAT_R8G8B8A8_SINT;
+   case PIPE_FORMAT_R8G8B8X8_SNORM:
+      return PIPE_FORMAT_R8G8B8A8_SNORM;
    case PIPE_FORMAT_R8G8B8X8_UNORM:
       return PIPE_FORMAT_R8G8B8A8_UNORM;
 
@@ -1636,6 +1646,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
    if (!screen->dev)
       goto fail;
 
+   init_queue(screen);
    if (screen->info.driver_props.driverID == VK_DRIVER_ID_MESA_RADV ||
        screen->info.driver_props.driverID == VK_DRIVER_ID_AMD_OPEN_SOURCE ||
        screen->info.driver_props.driverID == VK_DRIVER_ID_AMD_PROPRIETARY)

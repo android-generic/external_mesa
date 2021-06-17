@@ -166,6 +166,9 @@ struct zink_context {
    struct zink_vertex_elements_state *element_state;
    struct zink_rasterizer_state *rast_state;
    struct zink_depth_stencil_alpha_state *dsa_state;
+   bool rast_state_changed : 1;
+   bool dsa_state_changed : 1;
+   bool stencil_ref_changed : 1;
 
    struct hash_table desc_set_layouts[ZINK_DESCRIPTOR_TYPES];
    bool pipeline_changed[2]; //gfx, compute
@@ -315,7 +318,8 @@ zink_resource_access_is_write(VkAccessFlags flags);
 
 void
 zink_resource_buffer_barrier(struct zink_context *ctx, struct zink_batch *batch, struct zink_resource *res, VkAccessFlags flags, VkPipelineStageFlags pipeline);
-
+void
+zink_fake_buffer_barrier(struct zink_resource *res, VkAccessFlags flags, VkPipelineStageFlags pipeline);
 bool
 zink_resource_image_needs_barrier(struct zink_resource *res, VkImageLayout new_layout, VkAccessFlags flags, VkPipelineStageFlags pipeline);
 bool

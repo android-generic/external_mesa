@@ -22,15 +22,27 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "ac_debug.h"
 #include "ac_sqtt.h"
 #include "si_build_pm4.h"
-#include "sid.h"
 #include "util/u_index_modify.h"
-#include "util/u_log.h"
 #include "util/u_prim.h"
-#include "util/u_suballoc.h"
 #include "util/u_upload_mgr.h"
+
+#if (GFX_VER == 6)
+#define GFX(name) name##GFX6
+#elif (GFX_VER == 7)
+#define GFX(name) name##GFX7
+#elif (GFX_VER == 8)
+#define GFX(name) name##GFX8
+#elif (GFX_VER == 9)
+#define GFX(name) name##GFX9
+#elif (GFX_VER == 10)
+#define GFX(name) name##GFX10
+#elif (GFX_VER == 103)
+#define GFX(name) name##GFX10_3
+#else
+#error "Unknown gfx version"
+#endif
 
 /* special primitive types */
 #define SI_PRIM_RECTANGLE_LIST PIPE_PRIM_MAX
@@ -1357,32 +1369,6 @@ static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw
    EMIT_SQTT_END_DRAW;
 }
 
-extern "C"
-void si_prim_discard_signal_next_compute_ib_start(struct si_context *sctx)
-{
-   if (!si_compute_prim_discard_enabled(sctx))
-      return;
-
-   if (!sctx->barrier_buf) {
-      u_suballocator_alloc(&sctx->allocator_zeroed_memory, 4, 4, &sctx->barrier_buf_offset,
-                           (struct pipe_resource **)&sctx->barrier_buf);
-   }
-
-   /* Emit a placeholder to signal the next compute IB to start.
-    * See si_compute_prim_discard.c for explanation.
-    */
-   uint32_t signal = 1;
-   si_cp_write_data(sctx, sctx->barrier_buf, sctx->barrier_buf_offset, 4, V_370_MEM, V_370_ME,
-                    &signal);
-
-   sctx->last_pkt3_write_data = &sctx->gfx_cs.current.buf[sctx->gfx_cs.current.cdw - 5];
-
-   /* Only the last occurrence of WRITE_DATA will be executed.
-    * The packet will be enabled in si_flush_gfx_cs.
-    */
-   *sctx->last_pkt3_write_data = PKT3(PKT3_NOP, 3, 0);
-}
-
 template <chip_class GFX_VERSION, si_has_tess HAS_TESS, si_has_gs HAS_GS, si_has_ngg NGG> ALWAYS_INLINE
 static bool si_upload_and_prefetch_VB_descriptors(struct si_context *sctx)
 {
@@ -2324,23 +2310,6 @@ static void si_draw_rectangle(struct blitter_context *blitter, void *vertex_elem
    pipe->draw_vbo(pipe, &info, 0, NULL, &draw, 1);
 }
 
-extern "C"
-void si_trace_emit(struct si_context *sctx)
-{
-   struct radeon_cmdbuf *cs = &sctx->gfx_cs;
-   uint32_t trace_id = ++sctx->current_saved_cs->trace_id;
-
-   si_cp_write_data(sctx, sctx->current_saved_cs->trace_buf, 0, 4, V_370_MEM, V_370_ME, &trace_id);
-
-   radeon_begin(cs);
-   radeon_emit(cs, PKT3(PKT3_NOP, 0, 0));
-   radeon_emit(cs, AC_ENCODE_TRACE_POINT(trace_id));
-   radeon_end();
-
-   if (sctx->log)
-      u_log_flush(sctx->log);
-}
-
 template <chip_class GFX_VERSION, si_has_tess HAS_TESS, si_has_gs HAS_GS,
           si_has_ngg NGG, si_has_prim_discard_cs ALLOW_PRIM_DISCARD_CS>
 static void si_init_draw_vbo(struct si_context *sctx)
@@ -2352,7 +2321,7 @@ static void si_init_draw_vbo(struct si_context *sctx)
    if (NGG && GFX_VERSION < GFX10)
       return;
 
-   sctx->draw_vbo[GFX_VERSION - GFX6][HAS_TESS][HAS_GS][NGG][ALLOW_PRIM_DISCARD_CS] =
+   sctx->draw_vbo[HAS_TESS][HAS_GS][NGG][ALLOW_PRIM_DISCARD_CS] =
       si_draw_vbo<GFX_VERSION, HAS_TESS, HAS_GS, NGG, ALLOW_PRIM_DISCARD_CS>;
 }
 
@@ -2374,16 +2343,6 @@ static void si_init_draw_vbo_all_pipeline_options(struct si_context *sctx)
    si_init_draw_vbo_all_internal_options<GFX_VERSION, TESS_ON, GS_ON>(sctx);
 }
 
-static void si_init_draw_vbo_all_families(struct si_context *sctx)
-{
-   si_init_draw_vbo_all_pipeline_options<GFX6>(sctx);
-   si_init_draw_vbo_all_pipeline_options<GFX7>(sctx);
-   si_init_draw_vbo_all_pipeline_options<GFX8>(sctx);
-   si_init_draw_vbo_all_pipeline_options<GFX9>(sctx);
-   si_init_draw_vbo_all_pipeline_options<GFX10>(sctx);
-   si_init_draw_vbo_all_pipeline_options<GFX10_3>(sctx);
-}
-
 static void si_invalid_draw_vbo(struct pipe_context *pipe,
                                 const struct pipe_draw_info *info,
                                 unsigned drawid_offset,
@@ -2395,9 +2354,11 @@ static void si_invalid_draw_vbo(struct pipe_context *pipe,
 }
 
 extern "C"
-void si_init_draw_functions(struct si_context *sctx)
+void GFX(si_init_draw_functions_)(struct si_context *sctx)
 {
-   si_init_draw_vbo_all_families(sctx);
+   assert(sctx->chip_class == GFX());
+
+   si_init_draw_vbo_all_pipeline_options<GFX()>(sctx);
 
    /* Bind a fake draw_vbo, so that draw_vbo isn't NULL, which would skip
     * initialization of callbacks in upper layers (such as u_threaded_context).
@@ -2406,19 +2367,4 @@ void si_init_draw_functions(struct si_context *sctx)
    sctx->blitter->draw_rectangle = si_draw_rectangle;
 
    si_init_ia_multi_vgt_param_table(sctx);
-}
-
-extern "C"
-void si_install_draw_wrapper(struct si_context *sctx, pipe_draw_vbo_func wrapper)
-{
-   if (wrapper) {
-      if (wrapper != sctx->b.draw_vbo) {
-         assert (!sctx->real_draw_vbo);
-         sctx->real_draw_vbo = sctx->b.draw_vbo;
-         sctx->b.draw_vbo = wrapper;
-      }
-   } else if (sctx->real_draw_vbo) {
-      sctx->real_draw_vbo = NULL;
-      si_select_draw_vbo(sctx);
-   }
 }

@@ -339,7 +339,7 @@ descriptor_layout_create(struct zink_screen *screen, enum zink_descriptor_type t
    dcslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
    dcslci.pNext = NULL;
    VkDescriptorSetLayoutBindingFlagsCreateInfo fci = {0};
-   VkDescriptorBindingFlags flags[num_bindings];
+   VkDescriptorBindingFlags flags[ZINK_MAX_DESCRIPTORS_PER_TYPE];
    if (screen->descriptor_mode == ZINK_DESCRIPTOR_MODE_LAZY) {
       dcslci.pNext = &fci;
       if (t == ZINK_DESCRIPTOR_TYPES)
@@ -545,7 +545,7 @@ bool
 zink_descriptor_util_alloc_sets(struct zink_screen *screen, VkDescriptorSetLayout dsl, VkDescriptorPool pool, VkDescriptorSet *sets, unsigned num_sets)
 {
    VkDescriptorSetAllocateInfo dsai;
-   VkDescriptorSetLayout layouts[num_sets];
+   VkDescriptorSetLayout *layouts = alloca(sizeof(*layouts) * num_sets);
    memset((void *)&dsai, 0, sizeof(dsai));
    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
    dsai.pNext = NULL;
@@ -593,7 +593,7 @@ allocate_desc_set(struct zink_context *ctx, struct zink_program *pg, enum zink_d
       for (unsigned desc_factor = DESC_BUCKET_FACTOR; desc_factor < descs_used; desc_factor *= DESC_BUCKET_FACTOR)
          bucket_size = desc_factor;
    }
-   VkDescriptorSet desc_set[bucket_size];
+   VkDescriptorSet *desc_set = alloca(sizeof(*desc_set) * bucket_size);
    if (!zink_descriptor_util_alloc_sets(screen, push_set ? ctx->dd->push_dsl[is_compute]->layout : pg->dsl[type + 1], pool->descpool, desc_set, bucket_size))
       return VK_NULL_HANDLE;
 
@@ -1235,9 +1235,8 @@ update_descriptors_internal(struct zink_context *ctx, struct zink_descriptor_set
       }
 
       unsigned num_resources = 0;
-      unsigned num_descriptors = zds[h]->pool->key.layout->num_descriptors;
       ASSERTED unsigned num_bindings = zds[h]->pool->num_resources;
-      VkWriteDescriptorSet wds[num_descriptors];
+      VkWriteDescriptorSet wds[ZINK_MAX_DESCRIPTORS_PER_TYPE];
       unsigned num_wds = 0;
 
       for (int i = 0; i < num_stages; i++) {
