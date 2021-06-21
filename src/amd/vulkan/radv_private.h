@@ -615,7 +615,7 @@ struct radv_meta_state {
 
    struct {
       VkPipelineLayout p_layout;
-      VkPipeline decompress_pipeline[NUM_DEPTH_DECOMPRESS_PIPELINES];
+      VkPipeline decompress_pipeline;
       VkPipeline resummarize_pipeline;
       VkRenderPass pass;
    } depth_decomp[MAX_SAMPLES_LOG2];
@@ -661,6 +661,13 @@ struct radv_meta_state {
       VkPipelineLayout p_layout;
       VkPipeline pipeline;
    } dcc_retile;
+
+   struct {
+      VkPipelineLayout leaf_p_layout;
+      VkPipeline leaf_pipeline;
+      VkPipelineLayout internal_p_layout;
+      VkPipeline internal_pipeline;
+   } accel_struct_build;
 };
 
 /* queue types */
@@ -1856,6 +1863,7 @@ struct radv_image {
    unsigned queue_family_mask;
    bool exclusive;
    bool shareable;
+   bool l2_coherent;
 
    /* Set when bound */
    struct radeon_winsys_bo *bo;
@@ -2696,6 +2704,20 @@ radv_use_llvm_for_stage(struct radv_device *device, UNUSED gl_shader_stage stage
    return device->physical_device->use_llvm;
 }
 
+struct radv_acceleration_structure {
+   struct vk_object_base base;
+
+   struct radeon_winsys_bo *bo;
+   uint64_t mem_offset;
+   uint64_t size;
+};
+
+static inline uint64_t
+radv_accel_struct_get_va(const struct radv_acceleration_structure *accel)
+{
+   return radv_buffer_get_va(accel->bo) + accel->mem_offset;
+}
+
 #define RADV_DEFINE_HANDLE_CASTS(__radv_type, __VkType)                                            \
                                                                                                    \
    static inline struct __radv_type *__radv_type##_from_handle(__VkType _handle)                   \
@@ -2729,6 +2751,7 @@ RADV_DEFINE_HANDLE_CASTS(radv_instance, VkInstance)
 RADV_DEFINE_HANDLE_CASTS(radv_physical_device, VkPhysicalDevice)
 RADV_DEFINE_HANDLE_CASTS(radv_queue, VkQueue)
 
+RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_acceleration_structure, VkAccelerationStructureKHR)
 RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_cmd_pool, VkCommandPool)
 RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_buffer, VkBuffer)
 RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_buffer_view, VkBufferView)

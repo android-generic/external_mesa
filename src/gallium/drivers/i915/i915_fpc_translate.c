@@ -961,11 +961,12 @@ static void i915_translate_token(struct i915_fp_compile *p,
    struct i915_fragment_shader *ifs = p->shader;
    switch( token->Token.Type ) {
    case TGSI_TOKEN_TYPE_PROPERTY:
-      /*
-       * We only support one cbuf, but we still need to ignore the property
-       * correctly so we don't hit the assert at the end of the switch case.
-       */
+      /* Ignore properties where we only support one value. */
       assert(token->FullProperty.Property.PropertyName ==
+             TGSI_PROPERTY_FS_COORD_ORIGIN ||
+             token->FullProperty.Property.PropertyName ==
+             TGSI_PROPERTY_FS_COORD_PIXEL_CENTER ||
+             token->FullProperty.Property.PropertyName ==
              TGSI_PROPERTY_FS_COLOR0_WRITES_ALL_CBUFS);
       break;
 
@@ -976,7 +977,6 @@ static void i915_translate_token(struct i915_fp_compile *p,
          for (i = token->FullDeclaration.Range.First;
               i <= MIN2(token->FullDeclaration.Range.Last, I915_MAX_CONSTANT - 1);
               i++) {
-            assert(ifs->constant_flags[i] == 0x0);
             ifs->constant_flags[i] = I915_CONSTFLAG_USER;
             ifs->num_constants = MAX2(ifs->num_constants, i + 1);
          }
@@ -1186,8 +1186,10 @@ i915_fini_compile(struct i915_context *i915, struct i915_fp_compile *p)
 static void
 i915_fixup_depth_write(struct i915_fp_compile *p)
 {
-   /* XXX assuming pos/depth is always in output[0] */
-   if (p->shader->info.num_outputs != 0 && p->shader->info.output_semantic_name[0] == TGSI_SEMANTIC_POSITION) {
+   for (int i = 0; i < p->shader->info.num_outputs; i++) {
+      if (p->shader->info.output_semantic_name[i] != TGSI_SEMANTIC_POSITION)
+         continue;
+
       const uint depth = UREG(REG_TYPE_OD, 0);
 
       i915_emit_arith(p,

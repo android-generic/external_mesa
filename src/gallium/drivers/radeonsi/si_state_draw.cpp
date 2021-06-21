@@ -1195,7 +1195,7 @@ static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw
             radeon_end();
 
             for (unsigned i = 0; i < num_draws; i++) {
-               uint64_t va = index_va + draws[0].start * original_index_size;
+               uint64_t va = index_va + draws[i].start * original_index_size;
 
                si_dispatch_prim_discard_cs_and_draw(sctx, info, draws[i].count,
                                                     original_index_size, base_vertex,
@@ -1800,8 +1800,10 @@ static void si_draw_vbo(struct pipe_context *ctx,
    /* GFX6-GFX7 treat instance_count==0 as instance_count==1. There is
     * no workaround for indirect draws, but we can at least skip
     * direct draws.
+    * 'instance_count == 0' seems to be problematic on Renoir chips (#4866),
+    * so simplify the condition and drop these draws for all <= GFX9 chips.
     */
-   if (GFX_VERSION <= GFX7 && unlikely(!indirect && !instance_count))
+   if (GFX_VERSION <= GFX9 && unlikely(!indirect && !instance_count))
       return;
 
    struct si_shader_selector *vs = sctx->shader.vs.cso;
@@ -1952,12 +1954,12 @@ static void si_draw_vbo(struct pipe_context *ctx,
        (!sctx->shader.ps.cso->info.uses_primid || pd_msg("PS uses PrimID")) &&
        !rs->polygon_mode_enabled &&
 #if SI_PRIM_DISCARD_DEBUG /* same as cso->prim_discard_cs_allowed */
-       (!sctx->vs_shader.cso->info.uses_bindless_images || pd_msg("uses bindless images")) &&
-       (!sctx->vs_shader.cso->info.uses_bindless_samplers || pd_msg("uses bindless samplers")) &&
-       (!sctx->vs_shader.cso->info.writes_memory || pd_msg("writes memory")) &&
-       (!sctx->vs_shader.cso->info.writes_viewport_index || pd_msg("writes viewport index")) &&
-       !sctx->vs_shader.cso->info.base.vs.window_space_position &&
-       !sctx->vs_shader.cso->so.num_outputs &&
+       (!sctx->shader.vs.cso->info.uses_bindless_images || pd_msg("uses bindless images")) &&
+       (!sctx->shader.vs.cso->info.uses_bindless_samplers || pd_msg("uses bindless samplers")) &&
+       (!sctx->shader.vs.cso->info.base.writes_memory || pd_msg("writes memory")) &&
+       (!sctx->shader.vs.cso->info.writes_viewport_index || pd_msg("writes viewport index")) &&
+       !sctx->shader.vs.cso->info.base.vs.window_space_position &&
+       !sctx->shader.vs.cso->so.num_outputs &&
 #else
        (sctx->shader.vs.cso->prim_discard_cs_allowed ||
         pd_msg("VS shader uses unsupported features")) &&
@@ -1984,9 +1986,8 @@ static void si_draw_vbo(struct pipe_context *ctx,
       case SI_PRIM_DISCARD_DISABLED:
          break;
       case SI_PRIM_DISCARD_DRAW_SPLIT:
-         sctx->compute_num_verts_rejected -= total_direct_count;
-         FALLTHROUGH;
       case SI_PRIM_DISCARD_MULTI_DRAW_SPLIT:
+         sctx->compute_num_verts_rejected -= total_direct_count;
          /* The multi draw was split into multiple ones and executed. Return. */
          DRAW_CLEANUP;
          return;

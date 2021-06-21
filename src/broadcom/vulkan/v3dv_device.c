@@ -108,6 +108,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
 {
    *ext = (struct vk_device_extension_table) {
       .KHR_bind_memory2                    = true,
+      .KHR_copy_commands2                  = true,
       .KHR_dedicated_allocation            = true,
       .KHR_device_group                    = true,
       .KHR_descriptor_update_template      = true,
@@ -133,6 +134,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
 #endif
       .KHR_variable_pointers               = true,
       .EXT_external_memory_dma_buf         = true,
+      .EXT_index_type_uint8                = true,
       .EXT_private_data                    = true,
    };
 }
@@ -964,7 +966,7 @@ v3dv_GetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice,
       .multiViewport = false,
       .samplerAnisotropy = true,
       .textureCompressionETC2 = true,
-      .textureCompressionASTC_LDR = false,
+      .textureCompressionASTC_LDR = true,
       /* Note that textureCompressionBC requires that the driver support all
        * the BC formats. V3D 4.2 only support the BC1-3, so we can't claim
        * that we support it.
@@ -1040,6 +1042,13 @@ v3dv_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
          VkPhysicalDevicePrivateDataFeaturesEXT *features =
             (VkPhysicalDevicePrivateDataFeaturesEXT *)ext;
          features->privateData = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT: {
+         VkPhysicalDeviceIndexTypeUint8FeaturesEXT *features =
+            (VkPhysicalDeviceIndexTypeUint8FeaturesEXT *)ext;
+         features->indexTypeUint8 = true;
          break;
       }
 

@@ -123,6 +123,7 @@ static const struct v3dv_format format_table[] = {
    FORMAT(R32_UINT,                R32UI,        R32UI,         SWIZ_X001, 32, false),
 
    /* Color, packed */
+   FORMAT(R4G4B4A4_UNORM_PACK16,   ABGR4444,     RGBA4,         SWIZ_XYZW, 16, true),
    FORMAT(B4G4R4A4_UNORM_PACK16,   ABGR4444,     RGBA4,         SWIZ_ZYXW, 16, true), /* Swap RB */
    FORMAT(R5G6B5_UNORM_PACK16,     BGR565,       RGB565,        SWIZ_XYZ1, 16, true),
    FORMAT(R5G5B5A1_UNORM_PACK16,   ABGR1555,     RGB5_A1,       SWIZ_XYZW, 16, true),
@@ -166,6 +167,36 @@ static const struct v3dv_format format_table[] = {
    FORMAT(BC2_SRGB_BLOCK,             NO,  BC2,                      SWIZ_XYZW, 16, true),
    FORMAT(BC3_UNORM_BLOCK,            NO,  BC3,                      SWIZ_XYZW, 16, true),
    FORMAT(BC3_SRGB_BLOCK,             NO,  BC3,                      SWIZ_XYZW, 16, true),
+
+   /* Compressed: ASTC */
+   FORMAT(ASTC_4x4_UNORM_BLOCK,       NO,  ASTC_4X4,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_4x4_SRGB_BLOCK,        NO,  ASTC_4X4,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_5x4_UNORM_BLOCK,       NO,  ASTC_5X4,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_5x4_SRGB_BLOCK,        NO,  ASTC_5X4,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_5x5_UNORM_BLOCK,       NO,  ASTC_5X5,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_5x5_SRGB_BLOCK,        NO,  ASTC_5X5,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_6x5_UNORM_BLOCK,       NO,  ASTC_6X5,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_6x5_SRGB_BLOCK,        NO,  ASTC_6X5,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_6x6_UNORM_BLOCK,       NO,  ASTC_6X6,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_6x6_SRGB_BLOCK,        NO,  ASTC_6X6,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_8x5_UNORM_BLOCK,       NO,  ASTC_8X5,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_8x5_SRGB_BLOCK,        NO,  ASTC_8X5,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_8x6_UNORM_BLOCK,       NO,  ASTC_8X6,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_8x6_SRGB_BLOCK,        NO,  ASTC_8X6,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_8x8_UNORM_BLOCK,       NO,  ASTC_8X8,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_8x8_SRGB_BLOCK,        NO,  ASTC_8X8,                 SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_10x5_UNORM_BLOCK,      NO,  ASTC_10X5,                SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_10x5_SRGB_BLOCK,       NO,  ASTC_10X5,                SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_10x6_UNORM_BLOCK,      NO,  ASTC_10X6,                SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_10x6_SRGB_BLOCK,       NO,  ASTC_10X6,                SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_10x8_UNORM_BLOCK,      NO,  ASTC_10X8,                SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_10x8_SRGB_BLOCK,       NO,  ASTC_10X8,                SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_10x10_UNORM_BLOCK,     NO,  ASTC_10X10,               SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_10x10_SRGB_BLOCK,      NO,  ASTC_10X10,               SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_12x10_UNORM_BLOCK,     NO,  ASTC_12X10,               SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_12x10_SRGB_BLOCK,      NO,  ASTC_12X10,               SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_12x12_UNORM_BLOCK,     NO,  ASTC_12X12,               SWIZ_XYZW, 16, true),
+   FORMAT(ASTC_12x12_SRGB_BLOCK,      NO,  ASTC_12X12,               SWIZ_XYZW, 16, true),
 };
 
 const struct v3dv_format *

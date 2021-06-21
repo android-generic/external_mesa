@@ -673,14 +673,14 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
 
    LLVMValueRef accepted =
       ac_cull_triangle(&ctx->ac, pos, prim_restart_accepted, vp_scale, vp_translate,
-                       ac_get_arg(&ctx->ac, param_smallprim_precision), &options);
+                       ac_get_arg(&ctx->ac, param_smallprim_precision), &options,
+                       NULL, NULL);
 
    ac_build_optimization_barrier(&ctx->ac, &accepted, false);
    LLVMValueRef accepted_threadmask = ac_get_i1_sgpr_mask(&ctx->ac, accepted);
 
    /* Count the number of active threads by doing bitcount(accepted). */
-   LLVMValueRef num_prims_accepted = ac_build_intrinsic(
-      &ctx->ac, "llvm.ctpop.i64", ctx->ac.i64, &accepted_threadmask, 1, AC_FUNC_ATTR_READNONE);
+   LLVMValueRef num_prims_accepted = ac_build_bit_count(&ctx->ac, accepted_threadmask);
    num_prims_accepted = LLVMBuildTrunc(builder, num_prims_accepted, ctx->ac.i32, "");
 
    LLVMValueRef start;

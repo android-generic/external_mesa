@@ -415,17 +415,113 @@ enum isl_format {
  * Numerical base type for channels of isl_format.
  */
 enum PACKED isl_base_type {
+   /** Data which takes up space but is ignored */
    ISL_VOID,
+
+   /** Data in a "raw" form and cannot be easily interpreted */
    ISL_RAW,
+
+   /**
+    * Unsigned normalized data
+    *
+    * Though stored as an integer, the data is interpreted as a floating-point
+    * number in the range [0, 1] where the conversion from the in-memory
+    * representation to float is given by \f$\frac{x}{2^{bits} - 1}\f$.
+    */
    ISL_UNORM,
+
+   /**
+    * Signed normalized data
+    *
+    * Though stored as an integer, the data is interpreted as a floating-point
+    * number in the range [-1, 1] where the conversion from the in-memory
+    * representation to float is given by
+    * \f$max\left(\frac{x}{2^{bits - 1} - 1}, -1\right)\f$.
+    */
    ISL_SNORM,
+
+   /**
+    * Unsigned floating-point data
+    *
+    * Unlike the standard IEEE floating-point representation, unsigned
+    * floating-point data has no sign bit. This saves a bit of space which is
+    * important if more than one float is required to represent a color value.
+    * As with IEEE floats, the high bits are the exponent and the low bits are
+    * the mantissa.  The available bit sizes for unsigned floats are as
+    * follows:
+    *
+    * \rst
+    * =====  =========  =========
+    * Bits   Mantissa   Exponent
+    * =====  =========  =========
+    *  11       6          5
+    *  10       5          5
+    * =====  =========  =========
+    * \endrst
+    *
+    * In particular, both unsigned floating-point formats are identical to
+    * IEEE float16 except that the sign bit and the bottom mantissa bits are
+    * removed.
+    */
    ISL_UFLOAT,
+
+   /** Signed floating-point data
+    *
+    * Signed floating-point data is represented as standard IEEE floats with
+    * the usual number of mantissa and exponent bits
+    *
+    * \rst
+    * =====  =========  =========
+    * Bits   Mantissa   Exponent
+    * =====  =========  =========
+    *  64      52         11
+    *  32      23          8
+    *  16      10          5
+    * =====  =========  =========
+    * \endrst
+    */
    ISL_SFLOAT,
+
+   /**
+    * Unsigned fixed-point data
+    *
+    * This is a 32-bit unsigned integer that is interpreted as a 16.16
+    * fixed-point value.
+    */
    ISL_UFIXED,
+
+   /**
+    * Signed fixed-point data
+    *
+    * This is a 32-bit signed integer that is interpreted as a 16.16
+    * fixed-point value.
+    */
    ISL_SFIXED,
+
+   /** Unsigned integer data */
    ISL_UINT,
+
+   /** Signed integer data */
    ISL_SINT,
+
+   /**
+    * Unsigned scaled data
+    *
+    * This is data which is stored as an unsigned integer but interpreted as a
+    * floating-point value by the hardware.  The re-interpretation is done via
+    * a simple unsigned integer to float cast.  This is typically used as a
+    * vertex format.
+    */
    ISL_USCALED,
+
+   /**
+    * Signed scaled data
+    *
+    * This is data which is stored as a signed integer but interpreted as a
+    * floating-point value by the hardware.  The re-interpretation is done via
+    * a simple signed integer to float cast.  This is typically used as a
+    * vertex format.
+    */
    ISL_SSCALED,
 };
 
@@ -462,18 +558,22 @@ enum isl_txc {
 };
 
 /**
- * @brief Hardware tile mode
+ * Describes the memory tiling of a surface
  *
- * WARNING: These values differ from the hardware enum values, which are
- * unstable across hardware generations.
+ * This differs from the HW enum values used to represent tiling.  The bits
+ * used by hardware have varried significantly over the years from the
+ * "Tile Walk" bit on old pre-Broadwell parts to the "Tile Mode" enum on
+ * Broadwell to the combination of "Tile Mode" and "Tiled Resource Mode" on
+ * Skylake. This enum represents them all in a consistent manner and in one
+ * place.
  *
  * Note that legacy Y tiling is ISL_TILING_Y0 instead of ISL_TILING_Y, to
  * clearly distinguish it from Yf and Ys.
  */
 enum isl_tiling {
-   ISL_TILING_LINEAR = 0,
-   ISL_TILING_W,
-   ISL_TILING_X,
+   ISL_TILING_LINEAR = 0, /**< Linear, or no tiling */
+   ISL_TILING_W, /**< W tiling */
+   ISL_TILING_X, /**< X tiling */
    ISL_TILING_Y0, /**< Legacy Y tiling */
    ISL_TILING_Yf, /**< Standard 4K tiling. The 'f' means "four". */
    ISL_TILING_Ys, /**< Standard 64K tiling. The 's' means "sixty-four". */
@@ -1101,21 +1201,26 @@ struct isl_extent4d {
    union { uint32_t a, array_len; };
 };
 
+/**
+ * Describes a single channel of an isl_format
+ */
 struct isl_channel_layout {
-   enum isl_base_type type;
+   enum isl_base_type type; /**< Channel data encoding */
    uint8_t start_bit; /**< Bit at which this channel starts */
    uint8_t bits; /**< Size in bits */
 };
 
 /**
+ * Describes the layout of an isl_format
+ *
  * Each format has 3D block extent (width, height, depth). The block extent of
  * compressed formats is that of the format's compression block. For example,
- * the block extent of ISL_FORMAT_ETC2_RGB8 is (w=4, h=4, d=1).  The block
- * extent of uncompressed pixel formats, such as ISL_FORMAT_R8G8B8A8_UNORM, is
- * is (w=1, h=1, d=1).
+ * the block extent of `ISL_FORMAT_ETC2_RGB8` is `(w=4, h=4, d=1)`. The block
+ * extent of uncompressed pixel formats, such as `ISL_FORMAT_R8G8B8A8_UNORM`,
+ * is `(w=1, h=1, d=1)`.
  */
 struct isl_format_layout {
-   enum isl_format format;
+   enum isl_format format; /**< Format */
 
    uint16_t bpb; /**< Bits per block */
    uint8_t bw; /**< Block width, in pixels */
@@ -1135,7 +1240,7 @@ struct isl_format_layout {
       struct isl_channel_layout channels_array[7];
    };
 
-   /** Set if all channels have the same isl_base_type. Otherwise, ISL_BASE_VOID. */
+   /** Set if all channels have the same isl_base_type. Otherwise, ISL_VOID. */
    enum isl_base_type uniform_channel_type;
 
    enum isl_colorspace colorspace;
@@ -1143,9 +1248,11 @@ struct isl_format_layout {
 };
 
 struct isl_tile_info {
+   /** Tiling represented by this isl_tile_info */
    enum isl_tiling tiling;
 
-   /* The size (in bits per block) of a single surface element
+   /**
+    * The size (in bits per block) of a single surface element
     *
     * For surfaces with power-of-two formats, this is the same as
     * isl_format_layout::bpb.  For non-power-of-two formats it may be smaller.
@@ -1164,7 +1271,8 @@ struct isl_tile_info {
     */
    uint32_t format_bpb;
 
-   /** The logical size of the tile in units of format_bpb size elements
+   /**
+    * The logical size of the tile in units of format_bpb size elements
     *
     * This field determines how a given surface is cut up into tiles.  It is
     * used to compute the size of a surface in tiles and can be used to
@@ -1174,7 +1282,8 @@ struct isl_tile_info {
     */
    struct isl_extent4d logical_extent_el;
 
-   /** The physical size of the tile in bytes and rows of bytes
+   /**
+    * The physical size of the tile in bytes and rows of bytes
     *
     * This field determines how the tiles of a surface are physically layed
     * out in memory.  The logical and physical tile extent are frequently the
@@ -1247,10 +1356,29 @@ struct isl_surf_init_info {
 };
 
 struct isl_surf {
+   /** Dimensionality of the surface */
    enum isl_surf_dim dim;
+
+   /**
+    * Spatial layout of the surface in memory
+    *
+    * This is dependent on isl_surf::dim and hardware generation.
+    */
    enum isl_dim_layout dim_layout;
+
+   /** Spatial layout of the samples if isl_surf::samples > 1 */
    enum isl_msaa_layout msaa_layout;
+
+   /** Memory tiling used by the surface */
    enum isl_tiling tiling;
+
+   /**
+    * Base image format of the surface
+    *
+    * This need not be the same as the format specified in isl_view::format
+    * when a surface state is constructed.  It must, however, have the same
+    * number of bits per pixel or else memory calculations will go wrong.
+    */
    enum isl_format format;
 
    /**
@@ -1277,7 +1405,14 @@ struct isl_surf {
     */
    struct isl_extent4d phys_level0_sa;
 
+   /** Number of miplevels in the surface */
    uint32_t levels;
+
+   /**
+    * Number of samples in the surface
+    *
+    * @invariant samples >= 1
+    */
    uint32_t samples;
 
    /** Total size of the surface, in bytes. */
@@ -1543,6 +1678,9 @@ isl_device_init(struct isl_device *dev,
 isl_sample_count_mask_t ATTRIBUTE_CONST
 isl_device_get_sample_counts(struct isl_device *dev);
 
+/**
+ * \return The isl_format_layout for the given isl_format
+ */
 static inline const struct isl_format_layout * ATTRIBUTE_CONST
 isl_format_get_layout(enum isl_format fmt)
 {
@@ -1746,6 +1884,11 @@ isl_lower_storage_image_format(const struct intel_device_info *devinfo,
 bool
 isl_has_matching_typed_storage_image_format(const struct intel_device_info *devinfo,
                                             enum isl_format fmt);
+
+void
+isl_tiling_get_info(enum isl_tiling tiling,
+                    uint32_t format_bpb,
+                    struct isl_tile_info *tile_info);
 
 static inline enum isl_tiling
 isl_tiling_flag_to_enum(isl_tiling_flags_t flag)

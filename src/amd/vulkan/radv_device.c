@@ -383,6 +383,8 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
    *ext = (struct vk_device_extension_table){
       .KHR_8bit_storage = true,
       .KHR_16bit_storage = true,
+      .KHR_acceleration_structure = (device->instance->perftest_flags & RADV_PERFTEST_RT) &&
+                                    device->rad_info.chip_class >= GFX10_3,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_copy_commands2 = true,
@@ -784,13 +786,16 @@ radv_get_debug_option_name(int id)
    return radv_debug_options[id].string;
 }
 
-static const struct debug_control radv_perftest_options[] = {
-   {"localbos", RADV_PERFTEST_LOCAL_BOS},   {"dccmsaa", RADV_PERFTEST_DCC_MSAA},
-   {"bolist", RADV_PERFTEST_BO_LIST},
-   {"cswave32", RADV_PERFTEST_CS_WAVE_32},  {"pswave32", RADV_PERFTEST_PS_WAVE_32},
-   {"gewave32", RADV_PERFTEST_GE_WAVE_32},
-   {"nosam", RADV_PERFTEST_NO_SAM},         {"sam", RADV_PERFTEST_SAM},
-   {NULL, 0}};
+static const struct debug_control radv_perftest_options[] = {{"localbos", RADV_PERFTEST_LOCAL_BOS},
+                                                             {"dccmsaa", RADV_PERFTEST_DCC_MSAA},
+                                                             {"bolist", RADV_PERFTEST_BO_LIST},
+                                                             {"cswave32", RADV_PERFTEST_CS_WAVE_32},
+                                                             {"pswave32", RADV_PERFTEST_PS_WAVE_32},
+                                                             {"gewave32", RADV_PERFTEST_GE_WAVE_32},
+                                                             {"nosam", RADV_PERFTEST_NO_SAM},
+                                                             {"sam", RADV_PERFTEST_SAM},
+                                                             {"rt", RADV_PERFTEST_RT},
+                                                             {NULL, 0}};
 
 const char *
 radv_get_perftest_option_name(int id)
@@ -1595,6 +1600,16 @@ radv_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
          features->globalPriorityQuery = true;
          break;
       }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR: {
+         VkPhysicalDeviceAccelerationStructureFeaturesKHR *features =
+            (VkPhysicalDeviceAccelerationStructureFeaturesKHR *)ext;
+         features->accelerationStructure = true;
+         features->accelerationStructureCaptureReplay = false;
+         features->accelerationStructureIndirectBuild = false;
+         features->accelerationStructureHostCommands = true;
+         features->descriptorBindingAccelerationStructureUpdateAfterBind = true;
+         break;
+      }
       default:
          break;
       }
@@ -2267,6 +2282,23 @@ radv_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
          props->transformFeedbackPreservesTriangleFanProvokingVertex = true;
          break;
       }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR: {
+         VkPhysicalDeviceAccelerationStructurePropertiesKHR *props =
+            (VkPhysicalDeviceAccelerationStructurePropertiesKHR *)ext;
+         props->maxGeometryCount = (1 << 24) - 1;
+         props->maxInstanceCount = (1 << 24) - 1;
+         props->maxPrimitiveCount = (1 << 29) - 1;
+         props->maxPerStageDescriptorAccelerationStructures =
+            pProperties->properties.limits.maxPerStageDescriptorStorageBuffers;
+         props->maxPerStageDescriptorUpdateAfterBindAccelerationStructures =
+            pProperties->properties.limits.maxPerStageDescriptorStorageBuffers;
+         props->maxDescriptorSetAccelerationStructures =
+            pProperties->properties.limits.maxDescriptorSetStorageBuffers;
+         props->maxDescriptorSetUpdateAfterBindAccelerationStructures =
+            pProperties->properties.limits.maxDescriptorSetStorageBuffers;
+         props->minAccelerationStructureScratchOffsetAlignment = 128;
+         break;
+      }
       default:
          break;
       }
@@ -2880,7 +2912,8 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
                                 device->vk.enabled_extensions.EXT_descriptor_indexing ||
                                 device->vk.enabled_extensions.EXT_buffer_device_address ||
                                 device->vk.enabled_extensions.KHR_buffer_device_address ||
-                                device->vk.enabled_extensions.KHR_ray_tracing_pipeline;
+                                device->vk.enabled_extensions.KHR_ray_tracing_pipeline ||
+                                device->vk.enabled_extensions.KHR_acceleration_structure;
 
    device->robust_buffer_access = robust_buffer_access || robust_buffer_access2;
    device->robust_buffer_access2 = robust_buffer_access2;
@@ -5466,14 +5499,27 @@ radv_GetDeviceMemoryCommitment(VkDevice device, VkDeviceMemory memory,
 }
 
 VkResult
-radv_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
+radv_BindBufferMemory2(VkDevice _device, uint32_t bindInfoCount,
                        const VkBindBufferMemoryInfo *pBindInfos)
 {
+   RADV_FROM_HANDLE(radv_device, device, _device);
+
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
       RADV_FROM_HANDLE(radv_device_memory, mem, pBindInfos[i].memory);
       RADV_FROM_HANDLE(radv_buffer, buffer, pBindInfos[i].buffer);
 
       if (mem) {
+         if (mem->alloc_size) {
+            VkMemoryRequirements req;
+
+            radv_GetBufferMemoryRequirements(_device, pBindInfos[i].buffer, &req);
+
+            if (pBindInfos[i].memoryOffset + req.size > mem->alloc_size) {
+               return vk_errorf(device->instance, VK_ERROR_UNKNOWN,
+                                "Device memory object too small for the buffer.\n");
+            }
+         }
+
          buffer->bo = mem->bo;
          buffer->offset = pBindInfos[i].memoryOffset;
       } else {
@@ -5496,14 +5542,27 @@ radv_BindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory,
 }
 
 VkResult
-radv_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
+radv_BindImageMemory2(VkDevice _device, uint32_t bindInfoCount,
                       const VkBindImageMemoryInfo *pBindInfos)
 {
+   RADV_FROM_HANDLE(radv_device, device, _device);
+
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
       RADV_FROM_HANDLE(radv_device_memory, mem, pBindInfos[i].memory);
       RADV_FROM_HANDLE(radv_image, image, pBindInfos[i].image);
 
       if (mem) {
+         if (mem->alloc_size) {
+            VkMemoryRequirements req;
+
+            radv_GetImageMemoryRequirements(_device, pBindInfos[i].image, &req);
+
+            if (pBindInfos[i].memoryOffset + req.size > mem->alloc_size) {
+               return vk_errorf(device->instance, VK_ERROR_UNKNOWN,
+                                "Device memory object too small for the image.\n");
+            }
+         }
+
          image->bo = mem->bo;
          image->offset = pBindInfos[i].memoryOffset;
       } else {

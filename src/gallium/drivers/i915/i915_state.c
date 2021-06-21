@@ -30,6 +30,8 @@
 
 
 #include "draw/draw_context.h"
+#include "nir.h"
+#include "nir/nir_to_tgsi.h"
 #include "util/u_helpers.h"
 #include "util/u_inlines.h"
 #include "util/u_math.h"
@@ -293,46 +295,16 @@ i915_create_sampler_state(struct pipe_context *pipe,
 }
 
 static void
-i915_bind_vertex_sampler_states(struct pipe_context *pipe,
-                                unsigned start,
-                                unsigned num,
-                                void **samplers)
+i915_bind_sampler_states(struct pipe_context *pipe,
+                         enum pipe_shader_type shader,
+                         unsigned start, unsigned num,
+                         void **samplers)
 {
-   struct i915_context *i915 = i915_context(pipe);
-   unsigned i;
-
-   assert(start + num <= ARRAY_SIZE(i915->vertex_samplers));
-
-   /* Check for no-op */
-   if (num == i915->num_vertex_samplers &&
-       !memcmp(i915->vertex_samplers + start, samplers,
-	       num * sizeof(void *)))
+   if (shader != PIPE_SHADER_FRAGMENT) {
+      assert(num == 0);
       return;
-
-   for (i = 0; i < num; ++i)
-      i915->vertex_samplers[i + start] = samplers[i];
-
-   /* find highest non-null samplers[] entry */
-   {
-      unsigned j = MAX2(i915->num_vertex_samplers, start + num);
-      while (j > 0 && i915->vertex_samplers[j - 1] == NULL)
-         j--;
-      i915->num_vertex_samplers = j;
    }
 
-   draw_set_samplers(i915->draw,
-                     PIPE_SHADER_VERTEX,
-                     i915->vertex_samplers,
-                     i915->num_vertex_samplers);
-}
-
-
-
-static void i915_bind_fragment_sampler_states(struct pipe_context *pipe,
-                                              unsigned start,
-                                              unsigned num,
-                                              void **samplers)
-{
    struct i915_context *i915 = i915_context(pipe);
    unsigned i;
 
@@ -357,101 +329,11 @@ static void i915_bind_fragment_sampler_states(struct pipe_context *pipe,
 }
 
 
-static void
-i915_bind_sampler_states(struct pipe_context *pipe,
-                         enum pipe_shader_type shader,
-                         unsigned start, unsigned num_samplers,
-                         void **samplers)
-{
-   switch (shader) {
-   case PIPE_SHADER_VERTEX:
-      i915_bind_vertex_sampler_states(pipe, start, num_samplers, samplers);
-      break;
-   case PIPE_SHADER_FRAGMENT:
-      i915_bind_fragment_sampler_states(pipe, start, num_samplers, samplers);
-      break;
-   default:
-      ;
-   }
-}
-
-
 static void i915_delete_sampler_state(struct pipe_context *pipe,
                                       void *sampler)
 {
    FREE(sampler);
 }
-
-
-/**
- * Called before drawing VBO to map vertex samplers and hand them to draw
- */
-void
-i915_prepare_vertex_sampling(struct i915_context *i915)
-{
-   struct i915_winsys *iws = i915->iws;
-   unsigned i,j;
-   uint32_t row_stride[PIPE_MAX_TEXTURE_LEVELS];
-   uint32_t img_stride[PIPE_MAX_TEXTURE_LEVELS];
-   uint32_t mip_offsets[PIPE_MAX_TEXTURE_LEVELS];
-   unsigned num = i915->num_vertex_sampler_views;
-   struct pipe_sampler_view **views = i915->vertex_sampler_views;
-
-   assert(num <= PIPE_MAX_SAMPLERS);
-   if (!num)
-      return;
-
-   for (i = 0; i < PIPE_MAX_SAMPLERS; i++) {
-      struct pipe_sampler_view *view = i < num ? views[i] : NULL;
-
-      if (view) {
-         struct pipe_resource *tex = view->texture;
-         struct i915_texture *i915_tex = i915_texture(tex);
-         ubyte *addr;
-
-         /* We're referencing the texture's internal data, so save a
-          * reference to it.
-          */
-         pipe_resource_reference(&i915->mapped_vs_tex[i], tex);
-
-         i915->mapped_vs_tex_buffer[i] = i915_tex->buffer;
-         addr = iws->buffer_map(iws,
-                                i915_tex->buffer,
-                                FALSE /* read only */);
-
-         /* Setup array of mipmap level pointers */
-         /* FIXME: handle 3D textures? */
-         for (j = view->u.tex.first_level; j <= tex->last_level; j++) {
-            mip_offsets[j] = i915_texture_offset(i915_tex, j , 0 /* FIXME depth */);
-            row_stride[j] = i915_tex->stride;
-            img_stride[j] = 0; /* FIXME */
-         }
-
-         draw_set_mapped_texture(i915->draw,
-                                 PIPE_SHADER_VERTEX,
-                                 i,
-                                 tex->width0, tex->height0, tex->depth0,
-                                 view->u.tex.first_level, tex->last_level,
-                                 0, 0, addr,
-                                 row_stride, img_stride, mip_offsets);
-      } else
-         i915->mapped_vs_tex[i] = NULL;
-   }
-}
-
-void
-i915_cleanup_vertex_sampling(struct i915_context *i915)
-{
-   struct i915_winsys *iws = i915->iws;
-   unsigned i;
-   for (i = 0; i < ARRAY_SIZE(i915->mapped_vs_tex); i++) {
-      if (i915->mapped_vs_tex_buffer[i]) { 
-         iws->buffer_unmap(iws, i915->mapped_vs_tex_buffer[i]);
-         pipe_resource_reference(&i915->mapped_vs_tex[i], NULL);
-      }
-   }
-}
-
 
 
 /** XXX move someday?  Or consolidate all these simple state setters
@@ -596,9 +478,18 @@ i915_create_fs_state(struct pipe_context *pipe,
       return NULL;
 
    ifs->draw_data = draw_create_fragment_shader(i915->draw, templ);
-   ifs->state.tokens = tgsi_dup_tokens(templ->tokens);
 
-   tgsi_scan_shader(templ->tokens, &ifs->info);
+   if (templ->type == PIPE_SHADER_IR_NIR) {
+      ifs->state.tokens = nir_to_tgsi(templ->ir.nir, pipe->screen);
+   } else {
+      assert(templ->type == PIPE_SHADER_IR_TGSI);
+      /* we need to keep a local copy of the tokens */
+      ifs->state.tokens = tgsi_dup_tokens(templ->tokens);
+   }
+
+   ifs->state.type = PIPE_SHADER_IR_TGSI;
+
+   tgsi_scan_shader(ifs->state.tokens, &ifs->info);
 
    /* The shader's compiled to i915 instructions here */
    i915_translate_fragment_program(i915, ifs);
@@ -647,7 +538,18 @@ i915_create_vs_state(struct pipe_context *pipe,
 {
    struct i915_context *i915 = i915_context(pipe);
 
-   /* just pass-through to draw module */
+   struct pipe_shader_state from_nir;
+   if (templ->type == PIPE_SHADER_IR_NIR) {
+      /* The gallivm draw path doesn't support non-native-integers NIR shaders,
+       * st/mesa does native-integers for the screen as a whole rather than
+       * per-stage, and i915 FS can't do native integers.  So, convert to TGSI,
+       * where the draw path *does* support non-native-integers.
+       */
+      from_nir.type = PIPE_SHADER_IR_TGSI;
+      from_nir.tokens = nir_to_tgsi(templ->ir.nir, pipe->screen);
+      templ = &from_nir;
+   }
+
    return draw_create_vertex_shader(i915->draw, templ);
 }
 
@@ -736,10 +638,19 @@ static void i915_set_constant_buffer(struct pipe_context *pipe,
 }
 
 
-static void i915_set_fragment_sampler_views(struct pipe_context *pipe,
-                                            unsigned num,
-                                            struct pipe_sampler_view **views)
+static void
+i915_set_sampler_views(struct pipe_context *pipe, enum pipe_shader_type shader,
+                       unsigned start, unsigned num, unsigned unbind_num_trailing_slots,
+                       struct pipe_sampler_view **views)
 {
+   if (shader != PIPE_SHADER_FRAGMENT) {
+      /* No support for VS samplers, because it would mean accessing the
+       * write-combined maps of the textures, which is very slow.  VS samplers
+       * are not a required feature of GL2.1 or GLES2.
+       */
+      assert(num == 0);
+      return;
+   }
    struct i915_context *i915 = i915_context(pipe);
    uint i;
 
@@ -760,55 +671,6 @@ static void i915_set_fragment_sampler_views(struct pipe_context *pipe,
    i915->num_fragment_sampler_views = num;
 
    i915->dirty |= I915_NEW_SAMPLER_VIEW;
-}
-
-static void
-i915_set_vertex_sampler_views(struct pipe_context *pipe,
-                              unsigned num,
-                              struct pipe_sampler_view **views)
-{
-   struct i915_context *i915 = i915_context(pipe);
-   uint i;
-
-   assert(num <= ARRAY_SIZE(i915->vertex_sampler_views));
-
-   /* Check for no-op */
-   if (views && num == i915->num_vertex_sampler_views &&
-       !memcmp(i915->vertex_sampler_views, views, num * sizeof(struct pipe_sampler_view *))) {
-      return;
-   }
-
-   for (i = 0; i < ARRAY_SIZE(i915->vertex_sampler_views); i++) {
-      struct pipe_sampler_view *view = i < num ? views[i] : NULL;
-
-      pipe_sampler_view_reference(&i915->vertex_sampler_views[i], view);
-   }
-
-   i915->num_vertex_sampler_views = num;
-
-   draw_set_sampler_views(i915->draw,
-                          PIPE_SHADER_VERTEX,
-                          i915->vertex_sampler_views,
-                          i915->num_vertex_sampler_views);
-}
-
-
-static void
-i915_set_sampler_views(struct pipe_context *pipe, enum pipe_shader_type shader,
-                       unsigned start, unsigned num, unsigned unbind_num_trailing_slots,
-                       struct pipe_sampler_view **views)
-{
-   assert(start == 0);
-   switch (shader) {
-   case PIPE_SHADER_FRAGMENT:
-      i915_set_fragment_sampler_views(pipe, num, views);
-      break;
-   case PIPE_SHADER_VERTEX:
-      i915_set_vertex_sampler_views(pipe, num, views);
-      break;
-   default:
-      ;
-   }
 }
 
 
@@ -975,8 +837,10 @@ i915_create_rasterizer_state(struct pipe_context *pipe,
                     S4_FLATSHADE_SPECULAR);
    }
 
-   cso->LIS7 = fui( rasterizer->offset_units );
+   if (!rasterizer->flatshade_first)
+      cso->LIS6 |= (2 << S6_TRISTRIP_PV_SHIFT);
 
+   cso->LIS7 = fui( rasterizer->offset_units );
 
    return cso;
 }
