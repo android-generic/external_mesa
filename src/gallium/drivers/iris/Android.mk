@@ -166,11 +166,11 @@ LOCAL_STATIC_LIBRARIES := \
 	libmesa_nir
 
 LOCAL_WHOLE_STATIC_LIBRARIES := \
-	libmesa_iris_gen8 \
-	libmesa_iris_gen9 \
-	libmesa_iris_gen11 \
-	libmesa_iris_gen12 \
-	libmesa_iris_gen125
+	libmesa_iris_gfx8 \
+	libmesa_iris_gfx9 \
+	libmesa_iris_gfx11 \
+	libmesa_iris_gfx12 \
+	libmesa_iris_gfx125
 
 include $(GALLIUM_COMMON_MK)
 include $(BUILD_STATIC_LIBRARY)
