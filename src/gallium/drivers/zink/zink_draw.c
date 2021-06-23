@@ -7,7 +7,6 @@
 #include "zink_state.h"
 #include "zink_surface.h"
 
-#include "indices/u_primconvert.h"
 #include "tgsi/tgsi_from_mesa.h"
 #include "util/hash_table.h"
 #include "util/u_debug.h"
@@ -235,12 +234,6 @@ line_width_needed(enum pipe_prim_type reduced_prim,
    }
 }
 
-static inline bool
-restart_supported(enum pipe_prim_type mode)
-{
-    return mode == PIPE_PRIM_LINE_STRIP || mode == PIPE_PRIM_TRIANGLE_STRIP || mode == PIPE_PRIM_TRIANGLE_FAN;
-}
-
 ALWAYS_INLINE static void
 update_drawid(struct zink_context *ctx, unsigned draw_id)
 {
@@ -297,10 +290,17 @@ draw_indexed(struct zink_context *ctx,
    } else {
       if (needs_drawid)
          update_drawid(ctx, draw_id);
-      for (unsigned i = 0; i < num_draws; i++)
-         vkCmdDrawIndexed(cmdbuf,
-            draws[i].count, dinfo->instance_count,
-            draws[i].start, draws[i].index_bias, dinfo->start_instance);
+      if (zink_screen(ctx->base.screen)->info.have_EXT_multi_draw)
+         zink_screen(ctx->base.screen)->vk.CmdDrawMultiIndexedEXT(cmdbuf, num_draws, (VkMultiDrawIndexedInfoEXT*)draws,
+                                                                   dinfo->instance_count,
+                                                                   dinfo->start_instance, sizeof(struct pipe_draw_start_count_bias),
+                                                                   dinfo->index_bias_varies ? NULL : &draws[0].index_bias);
+      else {
+         for (unsigned i = 0; i < num_draws; i++)
+            vkCmdDrawIndexed(cmdbuf,
+               draws[i].count, dinfo->instance_count,
+               draws[i].start, draws[i].index_bias, dinfo->start_instance);
+      }
    }
 }
 
@@ -322,8 +322,15 @@ draw(struct zink_context *ctx,
    } else {
       if (needs_drawid)
          update_drawid(ctx, draw_id);
-      for (unsigned i = 0; i < num_draws; i++)
-         vkCmdDraw(cmdbuf, draws[i].count, dinfo->instance_count, draws[i].start, dinfo->start_instance);
+      if (zink_screen(ctx->base.screen)->info.have_EXT_multi_draw)
+         zink_screen(ctx->base.screen)->vk.CmdDrawMultiEXT(cmdbuf, num_draws, (VkMultiDrawInfoEXT*)draws,
+                                                            dinfo->instance_count, dinfo->start_instance,
+                                                            sizeof(struct pipe_draw_start_count_bias));
+      else {
+         for (unsigned i = 0; i < num_draws; i++)
+            vkCmdDraw(cmdbuf, draws[i].count, dinfo->instance_count, draws[i].start, dinfo->start_instance);
+
+      }
    }
 }
 
@@ -408,19 +415,6 @@ zink_draw_vbo(struct pipe_context *pctx,
 
    update_barriers(ctx, false);
 
-   if (dinfo->primitive_restart && !restart_supported(dinfo->mode)) {
-       util_draw_vbo_without_prim_restart(pctx, dinfo, drawid_offset, dindirect, &draws[0]);
-       return;
-   }
-   if (dinfo->mode == PIPE_PRIM_QUADS ||
-       dinfo->mode == PIPE_PRIM_QUAD_STRIP ||
-       dinfo->mode == PIPE_PRIM_POLYGON ||
-       (dinfo->mode == PIPE_PRIM_TRIANGLE_FAN && !screen->have_triangle_fans) ||
-       dinfo->mode == PIPE_PRIM_LINE_LOOP) {
-      util_primconvert_save_rasterizer_state(ctx->primconvert, &rast_state->base);
-      util_primconvert_draw_vbo(ctx->primconvert, dinfo, drawid_offset, dindirect, draws, num_draws);
-      return;
-   }
    if (ctx->gfx_pipeline_state.vertices_per_patch != dinfo->vertices_per_patch)
       ctx->gfx_pipeline_state.dirty = true;
    bool drawid_broken = ctx->drawid_broken;
@@ -464,20 +458,13 @@ zink_draw_vbo(struct pipe_context *pctx,
    unsigned index_offset = 0;
    struct pipe_resource *index_buffer = NULL;
    if (dinfo->index_size > 0) {
-       uint32_t restart_index = util_prim_restart_index_from_size(dinfo->index_size);
-       if ((dinfo->primitive_restart && (dinfo->restart_index != restart_index)) ||
-           (!screen->info.have_EXT_index_type_uint8 && dinfo->index_size == 1)) {
-          util_translate_prim_restart_ib(pctx, dinfo, dindirect, &draws[0], &index_buffer);
-          need_index_buffer_unref = true;
-       } else {
-          if (dinfo->has_user_indices) {
-             if (!util_upload_index_buffer(pctx, dinfo, &draws[0], &index_buffer, &index_offset, 4)) {
-                debug_printf("util_upload_index_buffer() failed\n");
-                return;
-             }
-          } else
-             index_buffer = dinfo->index.resource;
-       }
+       if (dinfo->has_user_indices) {
+          if (!util_upload_index_buffer(pctx, dinfo, &draws[0], &index_buffer, &index_offset, 4)) {
+             debug_printf("util_upload_index_buffer() failed\n");
+             return;
+          }
+       } else
+          index_buffer = dinfo->index.resource;
    }
    if (ctx->xfb_barrier)
       zink_emit_xfb_counter_barrier(ctx);

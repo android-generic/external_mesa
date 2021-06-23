@@ -24,7 +24,14 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <string.h>
+#ifdef MAJOR_IN_MKDEV
+#include <sys/mkdev.h>
+#endif
+#ifdef MAJOR_IN_SYSMACROS
+#include <sys/sysmacros.h>
+#endif
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include "drm-uapi/drm_fourcc.h"
@@ -281,6 +288,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_line_rasterization                = true,
       .EXT_memory_budget                     = device->has_mem_available,
       .EXT_pci_bus_info                      = true,
+      .EXT_physical_device_drm               = true,
       .EXT_pipeline_creation_cache_control   = true,
       .EXT_pipeline_creation_feedback        = true,
       .EXT_post_depth_coverage               = device->info.ver >= 9,
@@ -1346,6 +1354,16 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR: {
+         VkPhysicalDeviceAccelerationStructureFeaturesKHR *features = (void *)ext;
+         features->accelerationStructure = false;
+         features->accelerationStructureCaptureReplay = false;
+         features->accelerationStructureIndirectBuild = false;
+         features->accelerationStructureHostCommands = false;
+         features->descriptorBindingAccelerationStructureUpdateAfterBind = true;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT: {
          VkPhysicalDeviceBufferDeviceAddressFeaturesEXT *features = (void *)ext;
          features->bufferDeviceAddress = pdevice->has_a64_buffer_access;
@@ -1959,7 +1977,7 @@ anv_get_physical_device_properties_1_1(struct anv_physical_device *pdevice,
 
    p->subgroupSize = BRW_SUBGROUP_SIZE;
    VkShaderStageFlags scalar_stages = 0;
-   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; stage++) {
+   for (unsigned stage = 0; stage < MESA_VULKAN_SHADER_STAGES; stage++) {
       if (pdevice->compiler->scalar_stage[stage])
          scalar_stages |= mesa_to_vk_shader_stage(stage);
    }
@@ -2135,6 +2153,19 @@ void anv_GetPhysicalDeviceProperties2(
 
    vk_foreach_struct(ext, pProperties->pNext) {
       switch (ext->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR: {
+         VkPhysicalDeviceAccelerationStructurePropertiesKHR *props = (void *)ext;
+         props->maxGeometryCount = (1u << 24) - 1;
+         props->maxInstanceCount = (1u << 24) - 1;
+         props->maxPrimitiveCount = (1u << 29) - 1;
+         props->maxPerStageDescriptorAccelerationStructures = UINT16_MAX;
+         props->maxPerStageDescriptorUpdateAfterBindAccelerationStructures = UINT16_MAX;
+         props->maxDescriptorSetAccelerationStructures = UINT16_MAX;
+         props->maxDescriptorSetUpdateAfterBindAccelerationStructures = UINT16_MAX;
+         props->minAccelerationStructureScratchOffsetAlignment = 64;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONSERVATIVE_RASTERIZATION_PROPERTIES_EXT: {
          /* TODO: Real limits */
          VkPhysicalDeviceConservativeRasterizationPropertiesEXT *properties =
@@ -2242,6 +2273,31 @@ void anv_GetPhysicalDeviceProperties2(
          CORE_PROPERTY(1, 2, driverName);
          CORE_PROPERTY(1, 2, driverInfo);
          CORE_PROPERTY(1, 2, conformanceVersion);
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT: {
+         VkPhysicalDeviceDrmPropertiesEXT *props =
+            (VkPhysicalDeviceDrmPropertiesEXT *)ext;
+         struct stat st;
+
+         props->hasPrimary = fstat(pdevice->master_fd, &st) == 0;
+         if (props->hasPrimary) {
+            props->primaryMajor = (int64_t) major(st.st_rdev);
+            props->primaryMinor = (int64_t) minor(st.st_rdev);
+         } else {
+            props->primaryMajor = 0;
+            props->primaryMinor = 0;
+         }
+
+         props->hasRender = fstat(pdevice->local_fd, &st) == 0;
+         if (props->hasRender) {
+            props->renderMajor = (int64_t) major(st.st_rdev);
+            props->renderMinor = (int64_t) minor(st.st_rdev);
+         } else {
+            props->renderMajor = 0;
+            props->renderMinor = 0;
+         }
          break;
       }
 
@@ -3285,12 +3341,19 @@ VkResult anv_CreateDevice(
 
    anv_scratch_pool_init(device, &device->scratch_pool);
 
+   /* TODO(RT): Do we want some sort of data structure for this? */
+   memset(device->rt_scratch_bos, 0, sizeof(device->rt_scratch_bos));
+
    result = anv_genX(&device->info, init_device_state)(device);
    if (result != VK_SUCCESS)
       goto fail_trivial_batch_bo_and_scratch_pool;
 
    anv_pipeline_cache_init(&device->default_pipeline_cache, device,
                            true /* cache_enabled */, false /* external_sync */);
+
+   result = anv_device_init_rt_shaders(device);
+   if (result != VK_SUCCESS)
+      goto fail_rt_trampoline;
 
    anv_device_init_blorp(device);
 
@@ -3302,6 +3365,8 @@ VkResult anv_CreateDevice(
 
    return VK_SUCCESS;
 
+ fail_rt_trampoline:
+   anv_pipeline_cache_finish(&device->default_pipeline_cache);
  fail_trivial_batch_bo_and_scratch_pool:
    anv_scratch_pool_finish(device, &device->scratch_pool);
    anv_device_release_bo(device, device->trivial_batch_bo);
@@ -3365,6 +3430,8 @@ void anv_DestroyDevice(
 
    anv_device_finish_blorp(device);
 
+   anv_device_finish_rt_shaders(device);
+
    anv_pipeline_cache_finish(&device->default_pipeline_cache);
 
 #ifdef HAVE_VALGRIND
@@ -3376,6 +3443,11 @@ void anv_DestroyDevice(
    anv_state_pool_free(&device->dynamic_state_pool, device->border_colors);
    anv_state_pool_free(&device->dynamic_state_pool, device->slice_hash);
 #endif
+
+   for (unsigned i = 0; i < ARRAY_SIZE(device->rt_scratch_bos); i++) {
+      if (device->rt_scratch_bos[i] != NULL)
+         anv_device_release_bo(device, device->rt_scratch_bos[i]);
+   }
 
    anv_scratch_pool_finish(device, &device->scratch_pool);
 
@@ -4254,6 +4326,8 @@ anv_bind_buffer_memory(const VkBindBufferMemoryInfo *pBindInfo)
    assert(pBindInfo->sType == VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO);
 
    if (mem) {
+      assert(pBindInfo->memoryOffset < mem->bo->size);
+      assert(mem->bo->size - pBindInfo->memoryOffset >= buffer->size);
       buffer->address = (struct anv_address) {
          .bo = mem->bo,
          .offset = pBindInfo->memoryOffset,

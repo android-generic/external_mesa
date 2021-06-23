@@ -77,22 +77,14 @@ debug_describe_zink_resource_object(char *buf, const struct zink_resource_object
 static uint32_t
 get_resource_usage(struct zink_resource *res)
 {
-   uint32_t reads = p_atomic_read(&res->obj->reads.usage);
-   uint32_t writes = p_atomic_read(&res->obj->writes.usage);
+   bool reads = zink_batch_usage_exists(res->obj->reads);
+   bool writes = zink_batch_usage_exists(res->obj->writes);
    uint32_t batch_uses = 0;
    if (reads)
       batch_uses |= ZINK_RESOURCE_ACCESS_READ;
    if (writes)
       batch_uses |= ZINK_RESOURCE_ACCESS_WRITE;
    return batch_uses;
-}
-
-static void
-resource_sync_writes_from_batch_usage(struct zink_context *ctx, struct zink_resource *res)
-{
-   uint32_t writes = p_atomic_read(&res->obj->writes.usage);
-
-   zink_wait_on_batch(ctx, writes);
 }
 
 static uint32_t
@@ -787,57 +779,35 @@ zink_resource_has_usage(struct zink_resource *res, enum zink_resource_access usa
    return batch_uses & usage;
 }
 
-static VkMappedMemoryRange
-init_mem_range(struct zink_screen *screen, struct zink_resource *res, VkDeviceSize offset, VkDeviceSize size)
+ALWAYS_INLINE static void
+align_offset_size(const VkDeviceSize alignment, VkDeviceSize *offset, VkDeviceSize *size, VkDeviceSize obj_size)
 {
-   assert(res->obj->size);
-   VkDeviceSize align = offset % screen->info.props.limits.nonCoherentAtomSize;
-   if (screen->info.props.limits.nonCoherentAtomSize - 1 > offset)
-      offset = 0;
+   VkDeviceSize align = *offset % alignment;
+   if (alignment - 1 > *offset)
+      *offset = 0;
    else
-      offset -= align, size += align;
-   align = screen->info.props.limits.nonCoherentAtomSize - (size % screen->info.props.limits.nonCoherentAtomSize);
-   if (offset + size + align > res->obj->size)
-      size = res->obj->size - offset;
+      *offset -= align, *size += align;
+   align = alignment - (*size % alignment);
+   if (*offset + *size + align > obj_size)
+      *size = obj_size - *offset;
    else
-      size += align;
+      *size += align;
+}
+
+VkMappedMemoryRange
+zink_resource_init_mem_range(struct zink_screen *screen, struct zink_resource_object *obj, VkDeviceSize offset, VkDeviceSize size)
+{
+   assert(obj->size);
+   align_offset_size(screen->info.props.limits.nonCoherentAtomSize, &offset, &size, obj->size);
    VkMappedMemoryRange range = {
       VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
       NULL,
-      res->obj->mem,
+      obj->mem,
       offset,
       size
    };
    assert(range.size);
    return range;
-}
-
-bool
-zink_resource_has_curr_read_usage(struct zink_context *ctx, struct zink_resource *res)
-{
-   return res->obj->reads.usage == ctx->curr_batch;
-}
-
-static uint32_t
-get_most_recent_access(struct zink_resource *res, enum zink_resource_access flags)
-{
-   uint32_t usage[3]; // read, write, failure
-   uint32_t latest = ARRAY_SIZE(usage) - 1;
-   usage[latest] = 0;
-
-   if (flags & ZINK_RESOURCE_ACCESS_READ) {
-      usage[0] = p_atomic_read(&res->obj->reads.usage);
-      if (usage[0] > usage[latest]) {
-         latest = 0;
-      }
-   }
-   if (flags & ZINK_RESOURCE_ACCESS_WRITE) {
-      usage[1] = p_atomic_read(&res->obj->writes.usage);
-      if (usage[1] > usage[latest]) {
-         latest = 1;
-      }
-   }
-   return usage[latest];
 }
 
 static void *
@@ -902,10 +872,9 @@ buffer_transfer_map(struct zink_context *ctx, struct zink_resource *res, unsigne
       /* Check if mapping this buffer would cause waiting for the GPU.
        */
 
-      uint32_t latest_access = get_most_recent_access(res, ZINK_RESOURCE_ACCESS_RW);
       if (!res->obj->host_visible ||
-          zink_resource_has_curr_read_usage(ctx, res) ||
-          (latest_access && !zink_check_batch_completion(ctx, latest_access))) {
+          !zink_batch_usage_check_completion(ctx, res->obj->reads) ||
+          !zink_batch_usage_check_completion(ctx, res->obj->writes)) {
          /* Do a wait-free write-only transfer using a temporary buffer. */
          unsigned offset;
 
@@ -929,17 +898,13 @@ buffer_transfer_map(struct zink_context *ctx, struct zink_resource *res, unsigne
       }
    } else if ((usage & PIPE_MAP_READ) && !(usage & PIPE_MAP_PERSISTENT)) {
       assert(!(usage & (TC_TRANSFER_MAP_THREADED_UNSYNC | PIPE_MAP_THREAD_SAFE)));
-      uint32_t latest_write = get_most_recent_access(res, ZINK_RESOURCE_ACCESS_WRITE);
       if (usage & PIPE_MAP_DONTBLOCK) {
          /* sparse/device-local will always need to wait since it has to copy */
          if (!res->obj->host_visible)
             return NULL;
-         if (latest_write &&
-             (latest_write == ctx->curr_batch || !zink_check_batch_completion(ctx, latest_write)))
+         if (!zink_batch_usage_check_completion(ctx, res->obj->writes))
             return NULL;
-         latest_write = 0;
-      }
-      if (!res->obj->host_visible) {
+      } else if (!res->obj->host_visible) {
          zink_fence_wait(&ctx->base);
          trans->staging_res = pipe_buffer_create(&screen->base, PIPE_BIND_LINEAR, PIPE_USAGE_STAGING, box->x + box->width);
          if (!trans->staging_res)
@@ -948,10 +913,9 @@ buffer_transfer_map(struct zink_context *ctx, struct zink_resource *res, unsigne
          trans->offset = staging_res->obj->offset;
          zink_copy_buffer(ctx, NULL, staging_res, res, box->x, box->x, box->width);
          res = staging_res;
-         latest_write = ctx->curr_batch;
-      }
-      if (latest_write)
-         zink_wait_on_batch(ctx, latest_write);
+         zink_fence_wait(&ctx->base);
+      } else
+         zink_batch_usage_wait(ctx, res->obj->writes);
    }
 
    if (!ptr) {
@@ -977,8 +941,8 @@ buffer_transfer_map(struct zink_context *ctx, struct zink_resource *res, unsigne
 #endif
       ) {
       VkDeviceSize size = box->width;
-      VkDeviceSize offset = trans->offset + box->x;
-      VkMappedMemoryRange range = init_mem_range(screen, res, offset, size);
+      VkDeviceSize offset = res->obj->offset + trans->offset + box->x;
+      VkMappedMemoryRange range = zink_resource_init_mem_range(screen, res->obj, offset, size);
       if (vkInvalidateMappedMemoryRanges(screen->dev, 1, &range) != VK_SUCCESS) {
          vkUnmapMemory(screen->dev, res->obj->mem);
          return NULL;
@@ -1061,6 +1025,9 @@ zink_transfer_map(struct pipe_context *pctx,
          struct zink_resource *staging_res = zink_resource(trans->staging_res);
 
          if (usage & PIPE_MAP_READ) {
+            /* force multi-context sync */
+            if (zink_batch_usage_is_unflushed(res->obj->writes))
+               zink_batch_usage_wait(ctx, res->obj->writes);
             zink_transfer_copy_bufimage(ctx, staging_res, res, trans);
             /* need to wait for rendering to finish */
             zink_fence_wait(pctx);
@@ -1078,7 +1045,7 @@ zink_transfer_map(struct pipe_context *pctx,
             if (usage & PIPE_MAP_WRITE)
                zink_fence_wait(pctx);
             else
-               resource_sync_writes_from_batch_usage(ctx, res);
+               zink_batch_usage_wait(ctx, res->obj->writes);
          }
          VkImageSubresource isr = {
             res->aspect,
@@ -1101,7 +1068,7 @@ zink_transfer_map(struct pipe_context *pctx,
                            (box->x / desc->block.width) * (desc->block.bits / 8);
          if (!res->obj->coherent) {
             VkDeviceSize size = box->width * box->height * desc->block.bits / 8;
-            VkMappedMemoryRange range = init_mem_range(screen, res, offset, size);
+            VkMappedMemoryRange range = zink_resource_init_mem_range(screen, res->obj, res->obj->offset + offset, size);
             vkFlushMappedMemoryRanges(screen->dev, 1, &range);
          }
          ptr = ((uint8_t *)base) + offset;
@@ -1140,7 +1107,7 @@ zink_transfer_flush_region(struct pipe_context *pctx,
          assert(offset + size <= res->obj->size);
       }
       if (!m->obj->coherent) {
-         VkMappedMemoryRange range = init_mem_range(screen, m, m->obj->offset, m->obj->size);
+         VkMappedMemoryRange range = zink_resource_init_mem_range(screen, m->obj, m->obj->offset, m->obj->size);
          vkFlushMappedMemoryRanges(screen->dev, 1, &range);
       }
       if (trans->staging_res) {

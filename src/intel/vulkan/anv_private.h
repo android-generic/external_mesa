@@ -51,6 +51,7 @@
 #include "dev/intel_device_info.h"
 #include "blorp/blorp.h"
 #include "compiler/brw_compiler.h"
+#include "compiler/brw_rt.h"
 #include "util/bitset.h"
 #include "util/bitscan.h"
 #include "util/macros.h"
@@ -81,6 +82,7 @@ struct anv_batch;
 struct anv_buffer;
 struct anv_buffer_view;
 struct anv_image_view;
+struct anv_acceleration_structure;
 struct anv_instance;
 
 struct intel_aux_map_context;
@@ -1174,7 +1176,7 @@ anv_device_upload_nir(struct anv_device *device,
 
 struct anv_address {
    struct anv_bo *bo;
-   uint32_t offset;
+   int64_t offset;
 };
 
 struct anv_device {
@@ -1236,6 +1238,10 @@ struct anv_device {
     struct anv_queue  *                         queues;
 
     struct anv_scratch_pool                     scratch_pool;
+    struct anv_bo                              *rt_scratch_bos[16];
+
+    struct anv_shader_bin                      *rt_trampoline;
+    struct anv_shader_bin                      *rt_trivial_return;
 
     pthread_mutex_t                             mutex;
     pthread_cond_t                              queue_submit;
@@ -1635,6 +1641,16 @@ anv_batch_emit_reloc(struct anv_batch *batch,
 
 #define ANV_NULL_ADDRESS ((struct anv_address) { NULL, 0 })
 
+static inline struct anv_address
+anv_address_from_u64(uint64_t addr_u64)
+{
+   assert(addr_u64 == intel_canonical_address(addr_u64));
+   return (struct anv_address) {
+      .bo = NULL,
+      .offset = addr_u64,
+   };
+}
+
 static inline bool
 anv_address_is_null(struct anv_address addr)
 {
@@ -1682,9 +1698,13 @@ _anv_combine_address(struct anv_batch *batch, void *location,
 {
    if (address.bo == NULL) {
       return address.offset + delta;
+   } else if (batch == NULL) {
+      assert(address.bo->flags & EXEC_OBJECT_PINNED);
+      return anv_address_physical(anv_address_add(address, delta));
    } else {
       assert(batch->start <= location && location < batch->end);
-
+      /* i915 relocations are signed. */
+      assert(INT32_MIN <= address.offset && address.offset <= INT32_MAX);
       return anv_batch_emit_reloc(batch, location, address.bo, address.offset + delta);
    }
 }
@@ -2144,6 +2164,14 @@ anv_descriptor_set_write_buffer(struct anv_device *device,
                                 uint32_t element,
                                 VkDeviceSize offset,
                                 VkDeviceSize range);
+
+void
+anv_descriptor_set_write_acceleration_structure(struct anv_device *device,
+                                                struct anv_descriptor_set *set,
+                                                struct anv_acceleration_structure *accel,
+                                                uint32_t binding,
+                                                uint32_t element);
+
 void
 anv_descriptor_set_write_inline_uniform_data(struct anv_device *device,
                                              struct anv_descriptor_set *set,
@@ -2669,6 +2697,9 @@ struct anv_push_constants {
    /** Pad out to a multiple of 32 bytes */
    uint32_t pad[2];
 
+   /* Base addresses for descriptor sets */
+   uint64_t desc_sets[MAX_SETS];
+
    struct {
       /** Base workgroup ID
        *
@@ -2918,6 +2949,19 @@ struct anv_cmd_compute_state {
    struct anv_address num_workgroups;
 };
 
+struct anv_cmd_ray_tracing_state {
+   struct anv_cmd_pipeline_state base;
+
+   struct anv_ray_tracing_pipeline *pipeline;
+
+   bool pipeline_dirty;
+
+   struct {
+      struct anv_bo *bo;
+      struct brw_rt_scratch_layout layout;
+   } scratch;
+};
+
 /** State required while building cmd buffer */
 struct anv_cmd_state {
    /* PIPELINE_SELECT.PipelineSelection */
@@ -2927,6 +2971,7 @@ struct anv_cmd_state {
 
    struct anv_cmd_graphics_state                gfx;
    struct anv_cmd_compute_state                 compute;
+   struct anv_cmd_ray_tracing_state             rt;
 
    enum anv_pipe_bits                           pending_pipe_bits;
    VkShaderStageFlags                           descriptors_dirty;
@@ -2940,8 +2985,8 @@ struct anv_cmd_state {
    struct anv_vertex_binding                    vertex_bindings[MAX_VBS];
    bool                                         xfb_enabled;
    struct anv_xfb_binding                       xfb_bindings[MAX_XFB_BUFFERS];
-   struct anv_state                             binding_tables[MESA_SHADER_STAGES];
-   struct anv_state                             samplers[MESA_SHADER_STAGES];
+   struct anv_state                             binding_tables[MESA_VULKAN_SHADER_STAGES];
+   struct anv_state                             samplers[MESA_VULKAN_SHADER_STAGES];
 
    unsigned char                                sampler_sha1s[MESA_SHADER_STAGES][20];
    unsigned char                                surface_sha1s[MESA_SHADER_STAGES][20];
@@ -3337,18 +3382,13 @@ struct anv_semaphore {
 void anv_semaphore_reset_temporary(struct anv_device *device,
                                    struct anv_semaphore *semaphore);
 
-#define ANV_STAGE_MASK ((1 << MESA_SHADER_STAGES) - 1)
+#define ANV_STAGE_MASK ((1 << MESA_VULKAN_SHADER_STAGES) - 1)
 
 #define anv_foreach_stage(stage, stage_bits)                         \
    for (gl_shader_stage stage,                                       \
         __tmp = (gl_shader_stage)((stage_bits) & ANV_STAGE_MASK);    \
         stage = __builtin_ffs(__tmp) - 1, __tmp;                     \
         __tmp &= ~(1 << (stage)))
-
-enum anv_shader_reloc {
-   ANV_SHADER_RELOC_CONST_DATA_ADDR_LOW,
-   ANV_SHADER_RELOC_CONST_DATA_ADDR_HIGH,
-};
 
 struct anv_pipeline_bind_map {
    unsigned char                                surface_sha1[20];
@@ -3419,6 +3459,19 @@ anv_shader_bin_unref(struct anv_device *device, struct anv_shader_bin *shader)
       anv_shader_bin_destroy(device, shader);
 }
 
+#define anv_shader_bin_get_bsr(bin, local_arg_offset) ({             \
+   assert((local_arg_offset) % 8 == 0);                              \
+   const struct brw_bs_prog_data *prog_data =                        \
+      brw_bs_prog_data_const(bin->prog_data);                        \
+   assert(prog_data->simd_size == 8 || prog_data->simd_size == 16);  \
+                                                                     \
+   (struct GFX_BINDLESS_SHADER_RECORD) {                             \
+      .OffsetToLocalArguments = (local_arg_offset) / 8,              \
+      .BindlessShaderDispatchMode = prog_data->simd_size / 16,       \
+      .KernelStartPointer = bin->kernel.offset,                      \
+   };                                                                \
+})
+
 struct anv_pipeline_executable {
    gl_shader_stage stage;
 
@@ -3431,6 +3484,7 @@ struct anv_pipeline_executable {
 enum anv_pipeline_type {
    ANV_PIPELINE_GRAPHICS,
    ANV_PIPELINE_COMPUTE,
+   ANV_PIPELINE_RAY_TRACING,
 };
 
 struct anv_pipeline {
@@ -3473,6 +3527,13 @@ struct anv_graphics_pipeline {
    anv_cmd_dirty_mask_t                         dynamic_states;
 
    uint32_t                                     topology;
+
+   /* These fields are required with dynamic primitive topology,
+    * rasterization_samples used only with gen < 8.
+    */
+   VkLineRasterizationModeEXT                   line_mode;
+   VkPolygonMode                                polygon_mode;
+   uint32_t                                     rasterization_samples;
 
    struct anv_subpass *                         subpass;
 
@@ -3540,6 +3601,34 @@ struct anv_compute_pipeline {
    uint32_t                                     interface_descriptor_data[8];
 };
 
+struct anv_rt_shader_group {
+   VkRayTracingShaderGroupTypeKHR type;
+
+   struct anv_shader_bin *general;
+   struct anv_shader_bin *closest_hit;
+   struct anv_shader_bin *any_hit;
+   struct anv_shader_bin *intersection;
+
+   /* VK_KHR_ray_tracing requires shaderGroupHandleSize == 32 */
+   uint32_t handle[8];
+};
+
+struct anv_ray_tracing_pipeline {
+   struct anv_pipeline                          base;
+
+   /* All shaders in the pipeline */
+   struct util_dynarray                         shaders;
+
+   uint32_t                                     group_count;
+   struct anv_rt_shader_group *                 groups;
+
+   /* If non-zero, this is the default computed stack size as per the stack
+    * size computation in the Vulkan spec.  If zero, that indicates that the
+    * client has requested a dynamic stack size.
+    */
+   uint32_t                                     stack_size;
+};
+
 #define ANV_DECL_PIPELINE_DOWNCAST(pipe_type, pipe_enum)             \
    static inline struct anv_##pipe_type##_pipeline *                 \
    anv_pipeline_to_##pipe_type(struct anv_pipeline *pipeline)      \
@@ -3550,6 +3639,7 @@ struct anv_compute_pipeline {
 
 ANV_DECL_PIPELINE_DOWNCAST(graphics, ANV_PIPELINE_GRAPHICS)
 ANV_DECL_PIPELINE_DOWNCAST(compute, ANV_PIPELINE_COMPUTE)
+ANV_DECL_PIPELINE_DOWNCAST(ray_tracing, ANV_PIPELINE_RAY_TRACING)
 
 static inline bool
 anv_pipeline_has_stage(const struct anv_graphics_pipeline *pipeline,
@@ -3595,6 +3685,12 @@ anv_pipeline_get_last_vue_prog_data(const struct anv_graphics_pipeline *pipeline
 }
 
 VkResult
+anv_device_init_rt_shaders(struct anv_device *device);
+
+void
+anv_device_finish_rt_shaders(struct anv_device *device);
+
+VkResult
 anv_pipeline_init(struct anv_pipeline *pipeline,
                   struct anv_device *device,
                   enum anv_pipeline_type type,
@@ -3619,6 +3715,13 @@ anv_pipeline_compile_cs(struct anv_compute_pipeline *pipeline,
                         const struct vk_shader_module *module,
                         const char *entrypoint,
                         const VkSpecializationInfo *spec_info);
+
+VkResult
+anv_ray_tracing_pipeline_init(struct anv_ray_tracing_pipeline *pipeline,
+                              struct anv_device *device,
+                              struct anv_pipeline_cache *cache,
+                              const VkRayTracingPipelineCreateInfoKHR *pCreateInfo,
+                              const VkAllocationCallbacks *alloc);
 
 struct anv_format_plane {
    enum isl_format isl_format:16;
@@ -4344,6 +4447,16 @@ anv_sanitize_image_offset(const VkImageType imageType,
    }
 }
 
+static inline uint32_t
+anv_rasterization_aa_mode(VkPolygonMode raster_mode,
+                          VkLineRasterizationModeEXT line_mode)
+{
+   if (raster_mode == VK_POLYGON_MODE_LINE &&
+       line_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_EXT)
+      return true;
+   return false;
+}
+
 VkFormatFeatureFlags
 anv_get_image_format_features(const struct intel_device_info *devinfo,
                               VkFormat vk_format,
@@ -4549,6 +4662,13 @@ static inline uint32_t khr_perf_query_preamble_offset(const struct anv_query_poo
    return pool->pass_size * pass + 8;
 }
 
+struct anv_acceleration_structure {
+   struct vk_object_base                        base;
+
+   VkDeviceSize                                 size;
+   struct anv_address                           address;
+};
+
 int anv_get_instance_entrypoint_index(const char *name);
 int anv_get_device_entrypoint_index(const char *name);
 int anv_get_physical_device_entrypoint_index(const char *name);
@@ -4629,6 +4749,9 @@ VK_DEFINE_HANDLE_CASTS(anv_physical_device, vk.base, VkPhysicalDevice,
                        VK_OBJECT_TYPE_PHYSICAL_DEVICE)
 VK_DEFINE_HANDLE_CASTS(anv_queue, base, VkQueue, VK_OBJECT_TYPE_QUEUE)
 
+VK_DEFINE_NONDISP_HANDLE_CASTS(anv_acceleration_structure, base,
+                               VkAccelerationStructureKHR,
+                               VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR)
 VK_DEFINE_NONDISP_HANDLE_CASTS(anv_cmd_pool, base, VkCommandPool,
                                VK_OBJECT_TYPE_COMMAND_POOL)
 VK_DEFINE_NONDISP_HANDLE_CASTS(anv_buffer, base, VkBuffer,

@@ -47,7 +47,6 @@
 #include <vulkan/vulkan.h>
 
 struct blitter_context;
-struct primconvert_context;
 struct list_head;
 
 struct zink_blend_state;
@@ -62,13 +61,14 @@ enum zink_blit_flags {
    ZINK_BLIT_SAVE_FS = 1 << 1,
    ZINK_BLIT_SAVE_FB = 1 << 2,
    ZINK_BLIT_SAVE_TEXTURES = 1 << 3,
+   ZINK_BLIT_NO_COND_RENDER = 1 << 4,
 };
 
 struct zink_sampler_state {
    VkSampler sampler;
    uint32_t hash;
    struct zink_descriptor_refs desc_set_refs;
-   struct zink_batch_usage batch_uses;
+   struct zink_batch_usage *batch_uses;
    bool custom_border_color;
 };
 
@@ -77,7 +77,7 @@ struct zink_buffer_view {
    VkBufferViewCreateInfo bvci;
    VkBufferView buffer_view;
    uint32_t hash;
-   struct zink_batch_usage batch_uses;
+   struct zink_batch_usage *batch_uses;
    struct zink_descriptor_refs desc_set_refs;
 };
 
@@ -146,6 +146,7 @@ struct zink_context {
    uint32_t curr_batch; //the current batch id
    struct zink_batch batch;
    simple_mtx_t batch_mtx;
+   struct zink_fence *deferred_fence;
    struct zink_fence *last_fence; //the last command buffer submitted
    struct hash_table batch_states; //submitted batch states
    struct util_dynarray free_batch_states; //unused batch states
@@ -192,8 +193,6 @@ struct zink_context {
    bool new_swapchain;
    bool fb_changed;
    bool rp_changed;
-
-   struct primconvert_context *primconvert;
 
    struct zink_framebuffer *framebuffer;
    struct zink_framebuffer_clear fb_clears[PIPE_MAX_COLOR_BUFS + 1];

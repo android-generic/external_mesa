@@ -207,18 +207,18 @@ i915_surface_copy_blitter(struct pipe_context *pipe,
                           struct pipe_resource *src, unsigned src_level,
                           const struct pipe_box *src_box)
 {
-   struct i915_texture *dst_tex = i915_texture(dst);
-   struct i915_texture *src_tex = i915_texture(src);
-   struct pipe_resource *dpt = &dst_tex->b;
-   struct pipe_resource *spt = &src_tex->b;
-   unsigned dst_offset, src_offset;  /* in bytes */
-
    /* Fallback for buffers. */
    if (dst->target == PIPE_BUFFER && src->target == PIPE_BUFFER) {
       util_resource_copy_region(pipe, dst, dst_level, dstx, dsty, dstz,
                                 src, src_level, src_box);
       return;
    }
+
+   struct i915_texture *dst_tex = i915_texture(dst);
+   struct i915_texture *src_tex = i915_texture(src);
+   struct pipe_resource *dpt = &dst_tex->b;
+   struct pipe_resource *spt = &src_tex->b;
+   unsigned dst_offset, src_offset;  /* in bytes */
 
    /* XXX cannot copy 3d regions at this time */
    assert(src_box->depth == 1);
@@ -349,6 +349,31 @@ i915_clear_depth_stencil_blitter(struct pipe_context *pipe,
  * Screen surface functions
  */
 
+static void i915_set_color_surface_swizzle(struct i915_surface *surf)
+{
+   const struct {
+      enum pipe_format format;
+      uint8_t color_swizzle[4];
+      uint32_t oc_swizzle;
+   } fixup_formats[] = {
+      { PIPE_FORMAT_R8G8B8A8_UNORM, {2, 1, 0, 3 }, 0x21030000 /* BGRA */},
+      { PIPE_FORMAT_R8G8B8X8_UNORM, {2, 1, 0, 3 }, 0x21030000 /* BGRX */},
+      { PIPE_FORMAT_L8_UNORM,       {0, 0, 0, 0 }, 0x00030000 /* RRRA */},
+      { PIPE_FORMAT_I8_UNORM,       {0, 0, 0, 0 }, 0x00030000 /* RRRA */},
+      { PIPE_FORMAT_A8_UNORM,       {3, 3, 3, 3 }, 0x33330000 /* AAAA */},
+   };
+
+   for (int i = 0; i < ARRAY_SIZE(fixup_formats); i++) {
+      if (fixup_formats[i].format == surf->templ.format) {
+         memcpy(surf->color_swizzle, fixup_formats[i].color_swizzle, sizeof(surf->color_swizzle));
+         surf->oc_swizzle = fixup_formats[i].oc_swizzle;
+         return;
+      }
+   }
+
+   for (int i = 0; i < 4; i++)
+      surf->color_swizzle[i] = i;
+}
 
 static struct pipe_surface *
 i915_create_surface_custom(struct pipe_context *ctx,
@@ -357,26 +382,51 @@ i915_create_surface_custom(struct pipe_context *ctx,
                            unsigned width0,
                            unsigned height0)
 {
-   struct pipe_surface *ps;
+   struct i915_texture *tex = i915_texture(pt);
+   struct i915_surface *surf;
 
    assert(surf_tmpl->u.tex.first_layer == surf_tmpl->u.tex.last_layer);
    if (pt->target != PIPE_TEXTURE_CUBE &&
        pt->target != PIPE_TEXTURE_3D)
       assert(surf_tmpl->u.tex.first_layer == 0);
 
-   ps = CALLOC_STRUCT(pipe_surface);
-   if (ps) {
-      /* could subclass pipe_surface and store offset as it used to do */
-      pipe_reference_init(&ps->reference, 1);
-      pipe_resource_reference(&ps->texture, pt);
-      ps->format = surf_tmpl->format;
-      ps->width = u_minify(width0, surf_tmpl->u.tex.level);
-      ps->height = u_minify(height0, surf_tmpl->u.tex.level);
-      ps->u.tex.level = surf_tmpl->u.tex.level;
-      ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-      ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
-      ps->context = ctx;
+   surf = CALLOC_STRUCT(i915_surface);
+   if (!surf)
+      return NULL;
+
+   struct pipe_surface *ps = &surf->templ;
+
+   pipe_reference_init(&ps->reference, 1);
+   pipe_resource_reference(&ps->texture, pt);
+   ps->format = surf_tmpl->format;
+   ps->width = u_minify(width0, surf_tmpl->u.tex.level);
+   ps->height = u_minify(height0, surf_tmpl->u.tex.level);
+   ps->u.tex.level = surf_tmpl->u.tex.level;
+   ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
+   ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
+   ps->context = ctx;
+
+   if (util_format_is_depth_or_stencil(ps->format)) {
+      surf->buf_info = BUF_3D_ID_DEPTH;
+   } else {
+      surf->buf_info = BUF_3D_ID_COLOR_BACK;
+
+      i915_set_color_surface_swizzle(surf);
    }
+
+   surf->buf_info |= BUF_3D_PITCH(tex->stride); /* pitch in bytes */
+
+   switch (tex->tiling) {
+   case I915_TILE_Y:
+      surf->buf_info |= BUF_3D_TILED_SURFACE | BUF_3D_TILE_WALK_Y;
+      break;
+   case I915_TILE_X:
+      surf->buf_info |= BUF_3D_TILED_SURFACE;
+      break;
+   case I915_TILE_NONE:
+      break;
+   }
+
    return ps;
 }
 

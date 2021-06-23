@@ -241,6 +241,28 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    switch (param) {
    case PIPE_CAP_ANISOTROPIC_FILTER:
       return screen->info.feats.features.samplerAnisotropy;
+   case PIPE_CAP_EMULATE_NONFIXED_PRIMITIVE_RESTART:
+      return 1;
+   case PIPE_CAP_SUPPORTED_PRIM_MODES_WITH_RESTART: {
+      uint32_t modes = BITFIELD_BIT(PIPE_PRIM_LINE_STRIP) |
+                       BITFIELD_BIT(PIPE_PRIM_TRIANGLE_STRIP) |
+                       BITFIELD_BIT(PIPE_PRIM_LINE_STRIP_ADJACENCY) |
+                       BITFIELD_BIT(PIPE_PRIM_TRIANGLE_STRIP_ADJACENCY) |
+                       BITFIELD_BIT(PIPE_PRIM_PATCHES);
+      if (screen->have_triangle_fans)
+         modes |= BITFIELD_BIT(PIPE_PRIM_TRIANGLE_FAN);
+      return modes;
+   }
+   case PIPE_CAP_SUPPORTED_PRIM_MODES: {
+      uint32_t modes = BITFIELD_MASK(PIPE_PRIM_MAX);
+      modes &= ~BITFIELD_BIT(PIPE_PRIM_QUADS);
+      modes &= ~BITFIELD_BIT(PIPE_PRIM_QUAD_STRIP);
+      modes &= ~BITFIELD_BIT(PIPE_PRIM_POLYGON);
+      modes &= ~BITFIELD_BIT(PIPE_PRIM_LINE_LOOP);
+      if (!screen->have_triangle_fans)
+         modes &= ~BITFIELD_BIT(PIPE_PRIM_TRIANGLE_FAN);
+      return modes;
+   }
 
    case PIPE_CAP_QUERY_MEMORY_INFO:
    case PIPE_CAP_NPOT_TEXTURES:
@@ -847,6 +869,9 @@ zink_is_format_supported(struct pipe_screen *pscreen,
              vk_sample_count_flags(sample_count);
 
    if (bind & PIPE_BIND_INDEX_BUFFER) {
+      if (format == PIPE_FORMAT_R8_UINT &&
+          !screen->info.have_EXT_index_type_uint8)
+         return false;
       if (format != PIPE_FORMAT_R8_UINT &&
           format != PIPE_FORMAT_R16_UINT &&
           format != PIPE_FORMAT_R32_UINT)
@@ -1020,6 +1045,8 @@ zink_destroy_screen(struct pipe_screen *pscreen)
    if (screen->prev_sem)
       vkDestroySemaphore(screen->dev, screen->prev_sem, NULL);
 
+   if (screen->threaded)
+      util_queue_destroy(&screen->flush_queue);
 
    vkDestroyDevice(screen->dev, NULL);
    vkDestroyInstance(screen->instance, NULL);
@@ -1596,6 +1623,8 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
 
    util_cpu_detect();
    screen->threaded = util_get_cpu_caps()->nr_cpus > 1 && debug_get_bool_option("GALLIUM_THREAD", util_get_cpu_caps()->nr_cpus > 1);
+   if (screen->threaded)
+      util_queue_init(&screen->flush_queue, "zfq", 8, 1, UTIL_QUEUE_INIT_RESIZE_IF_FULL, NULL);
 
    zink_debug = debug_get_option_zink_debug();
    screen->descriptor_mode = debug_get_option_zink_descriptor_mode();

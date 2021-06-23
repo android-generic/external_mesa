@@ -42,7 +42,7 @@
  *
  * It takes a monolithic VS in LLVM IR returning gl_Position and invokes it
  * in a compute shader. The shader processes 1 primitive/thread by invoking
- * the VS for each vertex to get the positions, decomposes strips and fans
+ * the VS for each vertex to get the positions, decomposes strips
  * into triangles (if needed), eliminates primitive restart (if needed),
  * does (W<0) culling, face culling, view XY culling, zero-area and
  * small-primitive culling, and generates a new index buffer that doesn't
@@ -77,7 +77,7 @@
  * represents the barrier in the previous gfx IB.
  *
  * Features:
- * - Triangle strips and fans are decomposed into an indexed triangle list.
+ * - Triangle strips are decomposed into an indexed triangle list.
  *   The decomposition differs based on the provoking vertex state.
  * - Instanced draws are converted into non-instanced draws for 16-bit indices.
  *   (InstanceID is stored in the high bits of VertexID and unpacked by VS)
@@ -96,7 +96,7 @@
  * - HiZ culling.
  *
  * Limitations (and unimplemented features that may be possible to implement):
- * - Only triangles, triangle strips, and triangle fans are supported.
+ * - Only triangles and triangle strips are supported.
  * - Primitive restart is only supported with triangle strips.
  * - Instancing and primitive restart can't be used together.
  * - Instancing is only supported with 16-bit indices and instance count <= 2^16.
@@ -157,8 +157,6 @@
 #define THREADGROUPS_PER_CU  1   /* TGs to launch on 1 CU before going onto the next, max 8 */
 #define MAX_WAVES_PER_SH     0   /* no limit */
 #define INDEX_STORES_USE_SLC 1   /* don't cache indices if L2 is full */
-/* Don't cull Z. We already do (W < 0) culling for primitives behind the viewer. */
-#define CULL_Z 0
 /* 0 = unordered memory counter, 1 = unordered GDS counter, 2 = ordered GDS counter */
 #define VERTEX_COUNTER_GDS_MODE 2
 #define GDS_SIZE_UNORDERED      (4 * 1024) /* only for the unordered GDS counter */
@@ -182,8 +180,6 @@
                                  : UINT_MAX & ~(THREADGROUP_SIZE - 1))
 
 #define REWIND_SIGNAL_BIT 0x80000000
-/* For emulating the rewind packet on CI. */
-#define FORCE_REWIND_EMULATION 0
 
 void si_initialize_prim_discard_tunables(struct si_screen *sscreen, bool is_aux_context,
                                          unsigned *prim_discard_vertex_count_threshold,
@@ -191,7 +187,7 @@ void si_initialize_prim_discard_tunables(struct si_screen *sscreen, bool is_aux_
 {
    *prim_discard_vertex_count_threshold = UINT_MAX; /* disable */
 
-   if (sscreen->info.chip_class == GFX6 || /* SI support is not implemented */
+   if (sscreen->info.chip_class <= GFX7 || /* SI-CI support is not implemented */
        !sscreen->info.has_gds_ordered_append || sscreen->debug_flags & DBG(NO_PD) || is_aux_context)
       return;
 
@@ -265,7 +261,8 @@ struct si_thread0_section {
 
 /* Enter a section that only executes on thread 0. */
 static void si_enter_thread0_section(struct si_shader_context *ctx,
-                                     struct si_thread0_section *section, LLVMValueRef thread_id)
+                                     struct si_thread0_section *section, LLVMValueRef thread_id,
+                                     LLVMValueRef check_nonzero)
 {
    section->ctx = ctx;
    section->vgpr_result = ac_build_alloca_undef(&ctx->ac, ctx->ac.i32, "result0");
@@ -278,8 +275,13 @@ static void si_enter_thread0_section(struct si_shader_context *ctx,
     *
     * It could just be s_and_saveexec_b64 s, 1.
     */
-   ac_build_ifcc(&ctx->ac, LLVMBuildICmp(ctx->ac.builder, LLVMIntEQ, thread_id, ctx->ac.i32_0, ""),
-                 12601);
+   LLVMValueRef cond = LLVMBuildICmp(ctx->ac.builder, LLVMIntEQ, thread_id, ctx->ac.i32_0, "");
+   if (check_nonzero) {
+      cond = LLVMBuildAnd(ctx->ac.builder, cond,
+                          LLVMBuildICmp(ctx->ac.builder, LLVMIntNE, check_nonzero,
+                                        ctx->ac.i32_0, ""), "");
+   }
+   ac_build_ifcc(&ctx->ac, cond, 12601);
 }
 
 /* Exit a section that only executes on thread 0 and broadcast the result
@@ -436,22 +438,6 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
          index[i] = LLVMBuildAdd(builder, prim_id, LLVMConstInt(ctx->ac.i32, i, 0), "");
       }
       break;
-   case PIPE_PRIM_TRIANGLE_FAN:
-      /* Vertex 1 is first and vertex 2 is last. This will go to the hw clipper
-       * and rasterizer as a normal triangle, so we need to put the provoking
-       * vertex into the correct index variable and preserve orientation at the same time.
-       * gl_VertexID is preserved, because it's equal to the index.
-       */
-      if (key->opt.cs_provoking_vertex_first) {
-         index[0] = LLVMBuildAdd(builder, prim_id, LLVMConstInt(ctx->ac.i32, 1, 0), "");
-         index[1] = LLVMBuildAdd(builder, prim_id, LLVMConstInt(ctx->ac.i32, 2, 0), "");
-         index[2] = ctx->ac.i32_0;
-      } else {
-         index[0] = ctx->ac.i32_0;
-         index[1] = LLVMBuildAdd(builder, prim_id, LLVMConstInt(ctx->ac.i32, 1, 0), "");
-         index[2] = LLVMBuildAdd(builder, prim_id, LLVMConstInt(ctx->ac.i32, 2, 0), "");
-      }
-      break;
    default:
       unreachable("unexpected primitive type");
    }
@@ -557,7 +543,7 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
             last_strip_start = LLVMBuildAdd(builder, last_strip_start, ctx->ac.i32_1, "");
 
             struct si_thread0_section section;
-            si_enter_thread0_section(ctx, &section, thread_id);
+            si_enter_thread0_section(ctx, &section, thread_id, NULL);
 
             /* This must be done in the thread 0 section, because
              * we expect PrimID to be 0 for the whole first wave
@@ -664,12 +650,9 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
    options.cull_front = key->opt.cs_cull_front;
    options.cull_back = key->opt.cs_cull_back;
    options.cull_view_xy = true;
-   options.cull_view_near_z = CULL_Z && key->opt.cs_cull_z;
-   options.cull_view_far_z = CULL_Z && key->opt.cs_cull_z;
    options.cull_small_prims = true;
    options.cull_zero_area = true;
    options.cull_w = true;
-   options.use_halfz_clip_space = key->opt.cs_halfz_clip_space;
 
    LLVMValueRef accepted =
       ac_cull_triangle(&ctx->ac, pos, prim_restart_accepted, vp_scale, vp_translate,
@@ -687,7 +670,7 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
 
    /* Execute atomic_add on the vertex count. */
    struct si_thread0_section section;
-   si_enter_thread0_section(ctx, &section, thread_id);
+   si_enter_thread0_section(ctx, &section, thread_id, num_prims_accepted);
    {
       if (VERTEX_COUNTER_GDS_MODE == 0) {
          LLVMValueRef num_indices = LLVMBuildMul(
@@ -878,11 +861,6 @@ static bool si_shader_select_prim_discard_cs(struct si_context *sctx,
       key.opt.cs_cull_back = sctx->viewport0_y_inverted ? rs->cull_front : rs->cull_back;
    }
 
-   if (!rs->depth_clamp_any && CULL_Z) {
-      key.opt.cs_cull_z = 1;
-      key.opt.cs_halfz_clip_space = rs->clip_halfz;
-   }
-
    sctx->cs_prim_discard_state.cso = sctx->shader.vs.cso;
    sctx->cs_prim_discard_state.current = NULL;
 
@@ -978,10 +956,11 @@ si_prepare_prim_discard_or_split_draw(struct si_context *sctx, const struct pipe
 
    /* Split draws at the draw call level if the ring is full. This makes
     * better use of the ring space.
+    *
+    * If instancing is enabled and there is not enough ring buffer space, compute-based
+    * primitive discard is disabled.
     */
-   if (ring_full && num_prims > split_prims_draw_level &&
-       instance_count == 1 && /* TODO: support splitting instanced draws */
-       (1 << prim) & ((1 << PIPE_PRIM_TRIANGLES) | (1 << PIPE_PRIM_TRIANGLE_STRIP))) {
+   if (ring_full && num_prims > PRIMS_PER_BATCH && instance_count == 1) {
       unsigned vert_count_per_subdraw = 0;
 
       if (prim == PIPE_PRIM_TRIANGLES)
@@ -1070,12 +1049,8 @@ si_prepare_prim_discard_or_split_draw(struct si_context *sctx, const struct pipe
    unsigned need_compute_dw = 11 /* shader */ + 34 /* first draw */ +
                               24 * (num_subdraws - 1) + /* subdraws */
                               30;                       /* leave some space at the end */
-   unsigned need_gfx_dw = si_get_minimum_num_gfx_cs_dwords(sctx, 0);
-
-   if (sctx->chip_class <= GFX7 || FORCE_REWIND_EMULATION)
-      need_gfx_dw += 9; /* NOP(2) + WAIT_REG_MEM(7), then chain */
-   else
-      need_gfx_dw += num_subdraws * 8; /* use REWIND(2) + DRAW(6) */
+   unsigned need_gfx_dw = si_get_minimum_num_gfx_cs_dwords(sctx, 0) +
+                          num_subdraws * 8; /* use REWIND(2) + DRAW(6) */
 
    if (ring_full ||
        (VERTEX_COUNTER_GDS_MODE == 1 && sctx->compute_gds_offset + 8 > GDS_SIZE_UNORDERED) ||
@@ -1107,11 +1082,8 @@ void si_compute_signal_gfx(struct si_context *sctx)
    struct radeon_cmdbuf *cs = &sctx->prim_discard_compute_cs;
    unsigned writeback_L2_flags = 0;
 
-   /* The writeback L2 flags vary with each chip generation. */
-   /* CI needs to flush vertex indices to memory. */
-   if (sctx->chip_class <= GFX7)
-      writeback_L2_flags = EVENT_TC_WB_ACTION_ENA;
-   else if (sctx->chip_class == GFX8 && VERTEX_COUNTER_GDS_MODE == 0)
+   /* GFX8 needs to flush L2 for CP to see the updated vertex count. */
+   if (sctx->chip_class == GFX8 && VERTEX_COUNTER_GDS_MODE == 0)
       writeback_L2_flags = EVENT_TC_WB_ACTION_ENA | EVENT_TC_NC_ACTION_ENA;
 
    if (!sctx->compute_num_prims_in_batch)
@@ -1155,7 +1127,6 @@ void si_dispatch_prim_discard_cs_and_draw(struct si_context *sctx,
    switch (info->mode) {
    case PIPE_PRIM_TRIANGLES:
    case PIPE_PRIM_TRIANGLE_STRIP:
-   case PIPE_PRIM_TRIANGLE_FAN:
       vertices_per_prim = 3;
       output_indexbuf_format = V_008F0C_BUF_DATA_FORMAT_32_32_32;
       gfx10_output_indexbuf_format = V_008F0C_GFX10_FORMAT_32_32_32_UINT;
@@ -1427,27 +1398,10 @@ void si_dispatch_prim_discard_cs_and_draw(struct si_context *sctx,
          assert((gfx_cs->gpu_address >> 32) == sctx->screen->info.address32_hi);
          sctx->compute_rewind_va = gfx_cs->gpu_address + (gfx_cs->current.cdw + 1) * 4;
 
-         if (sctx->chip_class <= GFX7 || FORCE_REWIND_EMULATION) {
-            radeon_begin(gfx_cs);
-            radeon_emit(gfx_cs, PKT3(PKT3_NOP, 0, 0));
-            radeon_emit(gfx_cs, 0);
-            radeon_end();
-
-            si_cp_wait_mem(
-               sctx, gfx_cs,
-               sctx->compute_rewind_va | (uint64_t)sctx->screen->info.address32_hi << 32,
-               REWIND_SIGNAL_BIT, REWIND_SIGNAL_BIT, WAIT_REG_MEM_EQUAL | WAIT_REG_MEM_PFP);
-
-            /* Use INDIRECT_BUFFER to chain to a different buffer
-             * to discard the CP prefetch cache.
-             */
-            sctx->ws->cs_check_space(gfx_cs, 0, true);
-         } else {
-            radeon_begin(gfx_cs);
-            radeon_emit(gfx_cs, PKT3(PKT3_REWIND, 0, 0));
-            radeon_emit(gfx_cs, 0);
-            radeon_end();
-         }
+         radeon_begin(gfx_cs);
+         radeon_emit(gfx_cs, PKT3(PKT3_REWIND, 0, 0));
+         radeon_emit(gfx_cs, 0);
+         radeon_end();
       }
 
       sctx->compute_num_prims_in_batch += num_subdraw_prims;

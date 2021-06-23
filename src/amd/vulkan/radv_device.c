@@ -29,6 +29,13 @@
 #include <stdbool.h>
 #include <string.h>
 
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#elif !defined(_WIN32)
+#include <sys/sysmacros.h>
+#endif
+
+#include "util/debug.h"
 #include "util/disk_cache.h"
 #include "radv_cs.h"
 #include "radv_debug.h"
@@ -468,6 +475,9 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_memory_budget = true,
       .EXT_memory_priority = true,
       .EXT_pci_bus_info = true,
+#ifndef _WIN32
+      .EXT_physical_device_drm = true,
+#endif
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
       .EXT_post_depth_coverage = device->rad_info.chip_class >= GFX10,
@@ -518,6 +528,15 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .NV_compute_shader_derivatives = true,
       .VALVE_mutable_descriptor_type = true,
    };
+}
+
+static void
+warn_non_conformant_implementation()
+{
+   if (env_var_as_boolean("RADV_IGNORE_CONFORMANCE_WARNING", false))
+      return;
+   fprintf(stderr,
+	   "WARNING: radv is not a conformant vulkan implementation, testing use only.\n");
 }
 
 static VkResult
@@ -649,8 +668,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 #endif
 
    if (device->rad_info.chip_class < GFX8 || device->rad_info.chip_class > GFX10)
-      fprintf(stderr,
-              "WARNING: radv is not a conformant vulkan implementation, testing use only.\n");
+      warn_non_conformant_implementation();
 
    radv_get_driver_uuid(&device->driver_uuid);
    radv_get_device_uuid(&device->rad_info, &device->device_uuid);
@@ -689,8 +707,30 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    radv_physical_device_get_supported_extensions(device, &device->vk.supported_extensions);
 
 #ifndef _WIN32
-   if (drm_device)
+   if (drm_device) {
+      struct stat primary_stat = {0}, render_stat = {0};
+
+      device->available_nodes = drm_device->available_nodes;
       device->bus_info = *drm_device->businfo.pci;
+
+      if ((drm_device->available_nodes & (1 << DRM_NODE_PRIMARY)) &&
+          stat(drm_device->nodes[DRM_NODE_PRIMARY], &primary_stat) != 0) {
+         result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                            "failed to stat DRM primary node %s",
+                            drm_device->nodes[DRM_NODE_PRIMARY]);
+         goto fail_disk_cache;
+      }
+      device->primary_devid = primary_stat.st_rdev;
+
+      if ((drm_device->available_nodes & (1 << DRM_NODE_RENDER)) &&
+          stat(drm_device->nodes[DRM_NODE_RENDER], &render_stat) != 0) {
+         result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                            "failed to stat DRM render node %s",
+                            drm_device->nodes[DRM_NODE_RENDER]);
+         goto fail_disk_cache;
+      }
+      device->render_devid = render_stat.st_rdev;
+   }
 #endif
 
    if ((device->instance->debug_flags & RADV_DEBUG_INFO))
@@ -1590,7 +1630,7 @@ radv_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
          VkPhysicalDeviceExtendedDynamicState2FeaturesEXT *features =
             (VkPhysicalDeviceExtendedDynamicState2FeaturesEXT *)ext;
          features->extendedDynamicState2 = true;
-         features->extendedDynamicState2LogicOp = false;
+         features->extendedDynamicState2LogicOp = true;
          features->extendedDynamicState2PatchControlPoints = false;
          break;
       }
@@ -2299,6 +2339,26 @@ radv_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
          props->minAccelerationStructureScratchOffsetAlignment = 128;
          break;
       }
+#ifndef _WIN32
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT: {
+         VkPhysicalDeviceDrmPropertiesEXT *props = (VkPhysicalDeviceDrmPropertiesEXT *)ext;
+         if (pdevice->available_nodes & (1 << DRM_NODE_PRIMARY)) {
+            props->hasPrimary = true;
+            props->primaryMajor = (int64_t)major(pdevice->primary_devid);
+            props->primaryMinor = (int64_t)minor(pdevice->primary_devid);
+         } else {
+            props->hasPrimary = false;
+         }
+         if (pdevice->available_nodes & (1 << DRM_NODE_RENDER)) {
+            props->hasRender = true;
+            props->renderMajor = (int64_t)major(pdevice->render_devid);
+            props->renderMinor = (int64_t)minor(pdevice->render_devid);
+         } else {
+            props->hasRender = false;
+         }
+         break;
+      }
+#endif
       default:
          break;
       }
