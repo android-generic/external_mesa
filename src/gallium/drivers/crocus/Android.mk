@@ -162,6 +162,26 @@ LOCAL_WHOLE_STATIC_LIBRARIES := libmesa_genxml
 include $(MESA_COMMON_MK)
 include $(BUILD_STATIC_LIBRARY)
 
+#
+# libcrocus for gen8
+#
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := libmesa_crocus_gen8
+LOCAL_MODULE_CLASS := STATIC_LIBRARIES
+
+LOCAL_SRC_FILES := $(LIBCROCUS_SRC_FILES)
+LOCAL_CFLAGS := -DGFX_VERx10=80
+
+LOCAL_C_INCLUDES := $(CROCUS_COMMON_INCLUDES)
+
+LOCAL_STATIC_LIBRARIES := $(LIBCROCUS_STATIC_LIBS)
+
+LOCAL_WHOLE_STATIC_LIBRARIES := libmesa_genxml
+
+include $(MESA_COMMON_MK)
+include $(BUILD_STATIC_LIBRARY)
+
 ###########################################################
 include $(CLEAR_VARS)
 
@@ -193,7 +213,8 @@ LOCAL_WHOLE_STATIC_LIBRARIES := \
 	libmesa_crocus_gen5 \
 	libmesa_crocus_gen6 \
 	libmesa_crocus_gen7 \
-	libmesa_crocus_gen75
+	libmesa_crocus_gen75 \
+	libmesa_crocus_gen8
 
 include $(GALLIUM_COMMON_MK)
 include $(BUILD_STATIC_LIBRARY)
