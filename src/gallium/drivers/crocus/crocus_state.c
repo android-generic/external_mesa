@@ -3142,7 +3142,10 @@ crocus_set_sampler_views(struct pipe_context *ctx,
          shs->bound_sampler_views |= 1 << (start + i);
       }
    }
-
+#if GFX_VER == 6
+   /* first level parameters to crocus_upload_sampler_state is gfx6 only */
+   ice->state.stage_dirty |= CROCUS_STAGE_DIRTY_SAMPLER_STATES_VS << stage;
+#endif
    ice->state.stage_dirty |= (CROCUS_STAGE_DIRTY_BINDINGS_VS << stage);
    ice->state.dirty |=
       stage == MESA_SHADER_COMPUTE ? CROCUS_DIRTY_COMPUTE_RESOLVES_AND_FLUSHES
@@ -3376,10 +3379,8 @@ crocus_set_framebuffer_state(struct pipe_context *ctx,
    }
 #endif
 
-#if GFX_VER >= 6
-   if (cso->nr_cbufs != state->nr_cbufs) {
-      ice->state.dirty |= CROCUS_DIRTY_GEN6_BLEND_STATE;
-   }
+#if GFX_VER >= 6 && GFX_VER < 8
+   ice->state.dirty |= CROCUS_DIRTY_GEN6_BLEND_STATE;
 #endif
 
    if ((cso->layers == 0) != (layers == 0)) {
@@ -4173,7 +4174,7 @@ crocus_set_stream_output_targets(struct pipe_context *ctx,
       }
       pipe_so_target_reference(&old_tgt[i], NULL);
    }
-
+   ice->state.stage_dirty |= CROCUS_STAGE_DIRTY_BINDINGS_GS;
 #else
    for (int i = 0; i < PIPE_MAX_SO_BUFFERS; i++) {
       if (num_targets) {
@@ -4209,7 +4210,6 @@ crocus_set_stream_output_targets(struct pipe_context *ctx,
    ice->state.dirty |= CROCUS_DIRTY_GEN7_SO_BUFFERS;
 #elif GFX_VER == 6
    ice->state.dirty |= CROCUS_DIRTY_GEN6_SVBI;
-   ice->state.stage_dirty |= CROCUS_STAGE_DIRTY_BINDINGS_GS;
 #endif
 }
 

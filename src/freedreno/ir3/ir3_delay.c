@@ -95,19 +95,16 @@ ir3_delayslots(struct ir3_instruction *assigner,
 			is_mem(consumer)) {
 		return 6;
 	} else {
-		/* assigner and consumer are both alu */
-		assert(n > 0);
-
 		/* In mergedregs mode, there is an extra 2-cycle penalty when half of
 		 * a full-reg is read as a half-reg or when a half-reg is read as a
 		 * full-reg.
 		 */
 		bool mismatched_half =
-			(assigner->regs[0]->flags & IR3_REG_HALF) !=
-			(consumer->regs[n - 1]->flags & IR3_REG_HALF);
+			(assigner->dsts[0]->flags & IR3_REG_HALF) !=
+			(consumer->srcs[n]->flags & IR3_REG_HALF);
 		unsigned penalty = mismatched_half ? 2 : 0;
 		if ((is_mad(consumer->opc) || is_madsh(consumer->opc)) &&
-			(n == 3)) {
+			(n == 2)) {
 			/* special case, 3rd src to cat3 not required on first cycle */
 			return 1 + penalty;
 		} else {
@@ -188,14 +185,9 @@ ir3_delay_calc_prera(struct ir3_block *block, struct ir3_instruction *instr)
 		unsigned d = 0;
 
 		if (src->def && src->def->instr->block == block) {
-			d = delay_calc_srcn_prera(block, src->def->instr, instr, i+1);
+			d = delay_calc_srcn_prera(block, src->def->instr, instr, i);
 		}
 
-		delay = MAX2(delay, d);
-	}
-
-	if (instr->address) {
-		unsigned d = delay_calc_srcn_prera(block, instr->address, instr, 0);
 		delay = MAX2(delay, d);
 	}
 
@@ -226,12 +218,16 @@ static unsigned
 delay_calc_srcn_postra(struct ir3_instruction *assigner, struct ir3_instruction *consumer,
 					   unsigned n, bool soft, bool mergedregs)
 {
-	struct ir3_register *src = consumer->regs[n];
-	struct ir3_register *dst = assigner->regs[0];
+	struct ir3_register *src = consumer->srcs[n];
+	struct ir3_register *dst = assigner->dsts[0];
 	bool mismatched_half =
 		(src->flags & IR3_REG_HALF) != (dst->flags & IR3_REG_HALF);
 
-	if (!mergedregs && mismatched_half)
+	/* In the mergedregs case or when the register is a special register,
+	 * half-registers do not alias with full registers.
+	 */
+	if ((!mergedregs || is_reg_special(src) || is_reg_special(dst)) &&
+		mismatched_half)
 		return 0;
 
 	unsigned src_start = post_ra_reg_num(src) * reg_elem_size(src);
@@ -318,17 +314,12 @@ delay_calc_postra(struct ir3_block *block,
 
 		unsigned new_delay = 0;
 
-		if (consumer->address == assigner) {
-			unsigned addr_delay = ir3_delayslots(assigner, consumer, 0, soft);
-			new_delay = MAX2(new_delay, addr_delay);
-		}
-
 		if (dest_regs(assigner) != 0) {
 			foreach_src_n (src, n, consumer) {
 				if (src->flags & (IR3_REG_IMMED | IR3_REG_CONST))
 					continue;
 
-				unsigned src_delay = delay_calc_srcn_postra(assigner, consumer, n+1, soft, mergedregs);
+				unsigned src_delay = delay_calc_srcn_postra(assigner, consumer, n, soft, mergedregs);
 				new_delay = MAX2(new_delay, src_delay);
 			}
 		}

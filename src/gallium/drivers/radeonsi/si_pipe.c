@@ -1164,8 +1164,12 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    unsigned prim_discard_vertex_count_threshold, tmp;
    si_initialize_prim_discard_tunables(sscreen, false, &prim_discard_vertex_count_threshold, &tmp);
    /* Compute-shader-based culling doesn't support VBOs in user SGPRs. */
-   if (prim_discard_vertex_count_threshold == UINT_MAX)
+   if (prim_discard_vertex_count_threshold == UINT_MAX) {
+      /* This decreases CPU overhead if all descriptors are in user SGPRs because we don't
+       * have to allocate and count references for the upload buffer.
+       */
       sscreen->num_vbos_in_user_sgprs = sscreen->info.chip_class >= GFX9 ? 5 : 1;
+   }
 
    /* Determine tessellation ring info. */
    bool double_offchip_buffers = sscreen->info.chip_class >= GFX7 &&
@@ -1237,6 +1241,7 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
                       (sscreen->info.family != CHIP_NAVI14 ||
                        sscreen->info.is_pro_graphics);
    sscreen->use_ngg_culling = sscreen->use_ngg &&
+                              sscreen->info.max_render_backends >= 2 &&
                               !((sscreen->debug_flags & DBG(NO_NGG_CULLING)) ||
                                 LLVM_VERSION_MAJOR <= 11 /* hangs on 11, see #4874 */);
    sscreen->use_ngg_streamout = false;

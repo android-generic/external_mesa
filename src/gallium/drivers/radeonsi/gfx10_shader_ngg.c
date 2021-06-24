@@ -1113,9 +1113,15 @@ void gfx10_emit_ngg_culling_epilogue(struct ac_shader_abi *abi, unsigned max_out
    }
    ac_build_endif(&ctx->ac, 16009);
 
+   /* If all vertices are culled, set the primitive count to 0, so that all waves are culled here. */
+   LLVMValueRef num_primitives = ngg_get_prim_cnt(ctx);
+   num_primitives = LLVMBuildSelect(builder,
+                                    LLVMBuildICmp(builder, LLVMIntEQ, new_num_es_threads,
+                                                  ctx->ac.i32_0, ""),
+                                    ctx->ac.i32_0, num_primitives, "");
    /* Kill waves that have inactive threads. */
    kill_wave = LLVMBuildICmp(builder, LLVMIntULE,
-                             ac_build_imax(&ctx->ac, new_num_es_threads, ngg_get_prim_cnt(ctx)),
+                             ac_build_imax(&ctx->ac, new_num_es_threads, num_primitives),
                              LLVMBuildMul(builder, get_wave_id_in_tg(ctx),
                                           LLVMConstInt(ctx->ac.i32, ctx->ac.wave_size, 0), ""),
                              "");
@@ -1872,9 +1878,7 @@ void gfx10_ngg_gs_emit_epilogue(struct si_shader_context *ctx)
 
    ac_build_wg_scan(&ctx->ac, &vertlive_scan);
 
-   /* Skip all exports (including index exports) when possible. At least on
-    * early gfx10 revisions this is also to avoid hangs.
-    */
+   /* Skip all exports (including index exports) when possible. */
    LLVMValueRef have_exports =
       LLVMBuildICmp(builder, LLVMIntNE, vertlive_scan.result_reduce, ctx->ac.i32_0, "");
    num_emit_threads = LLVMBuildSelect(builder, have_exports, num_emit_threads, ctx->ac.i32_0, "");
