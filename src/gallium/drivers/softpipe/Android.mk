@@ -33,6 +33,8 @@ LOCAL_SRC_FILES := \
 
 LOCAL_MODULE := libmesa_pipe_softpipe
 
+LOCAL_STATIC_LIBRARIES := libmesa_nir
+
 include $(GALLIUM_COMMON_MK)
 include $(BUILD_STATIC_LIBRARY)
 
