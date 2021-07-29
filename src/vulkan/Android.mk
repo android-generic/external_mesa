@@ -49,6 +49,9 @@ LOCAL_C_INCLUDES += \
 LOCAL_HEADER_LIBRARIES += libcutils_headers libsystem_headers
 endif
 
+LOCAL_STATIC_LIBRARIES := \
+	libmesa_nir
+
 LOCAL_GENERATED_SOURCES := $(addprefix $(intermediates)/, \
 	$(VULKAN_UTIL_GENERATED_FILES))
 
