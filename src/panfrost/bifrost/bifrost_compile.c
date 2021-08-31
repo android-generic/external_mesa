@@ -1488,8 +1488,8 @@ bi_fexp_32(bi_builder *b, bi_index dst, bi_index s0, bi_index log2_base)
         bi_index fixed_pt = bi_f32_to_s32(b, scale, BI_ROUND_NONE);
 
         /* Compute the result for the fixed-point input, but pass along
-         * the original input for correct NaN propagation */
-        bi_fexp_f32_to(b, dst, fixed_pt, s0);
+         * the floating-point scale for correct NaN propagation */
+        bi_fexp_f32_to(b, dst, fixed_pt, scale);
 }
 
 static void
@@ -3167,7 +3167,6 @@ bi_optimize_nir(nir_shader *nir, unsigned gpu_id, bool is_blend)
         nir_lower_tex_options lower_tex_options = {
                 .lower_txs_lod = true,
                 .lower_txp = ~0,
-                .lower_tex_without_implicit_lod = true,
                 .lower_tg4_broadcom_swizzle = true,
                 .lower_txd = true,
         };

@@ -328,13 +328,17 @@ get_device_extensions(const struct anv_physical_device *device,
    };
 }
 
-static void
-anv_track_meminfo(struct anv_physical_device *device,
-                  const struct drm_i915_query_memory_regions *mem_regions)
+static bool
+anv_get_query_meminfo(struct anv_physical_device *device, int fd)
 {
+   struct drm_i915_query_memory_regions *mem_regions =
+      intel_i915_query_alloc(fd, DRM_I915_QUERY_MEMORY_REGIONS);
+   if (mem_regions == NULL)
+      return false;
+
    for(int i = 0; i < mem_regions->num_regions; i++) {
       switch(mem_regions->regions[i].region.memory_class) {
-         case I915_MEMORY_CLASS_SYSTEM:
+      case I915_MEMORY_CLASS_SYSTEM:
          device->sys.region = mem_regions->regions[i].region;
          device->sys.size = mem_regions->regions[i].probed_size;
          break;
@@ -346,32 +350,6 @@ anv_track_meminfo(struct anv_physical_device *device,
          break;
       }
    }
-}
-
-static bool
-anv_get_query_meminfo(struct anv_physical_device *device, int fd)
-{
-   struct drm_i915_query_item item = {
-      .query_id = DRM_I915_QUERY_MEMORY_REGIONS
-   };
-
-   struct drm_i915_query query = {
-      .num_items = 1,
-      .items_ptr = (uintptr_t) &item,
-   };
-
-   if (drmIoctl(fd, DRM_IOCTL_I915_QUERY, &query))
-      return false;
-
-   struct drm_i915_query_memory_regions *mem_regions = calloc(1, item.length);
-   item.data_ptr = (uintptr_t) mem_regions;
-
-   if (drmIoctl(fd, DRM_IOCTL_I915_QUERY, &query) || item.length <= 0) {
-      free(mem_regions);
-      return false;
-   }
-
-   anv_track_meminfo(device, mem_regions);
 
    free(mem_regions);
    return true;
@@ -1550,7 +1528,9 @@ void anv_GetPhysicalDeviceFeatures2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR: {
          VkPhysicalDeviceFragmentShadingRateFeaturesKHR *features =
             (VkPhysicalDeviceFragmentShadingRateFeaturesKHR *)ext;
+         features->attachmentFragmentShadingRate = false;
          features->pipelineFragmentShadingRate = true;
+         features->primitiveFragmentShadingRate = false;
          break;
       }
 
@@ -2344,12 +2324,12 @@ void anv_GetPhysicalDeviceProperties2(
          props->maxFragmentShadingRateAttachmentTexelSize = (VkExtent2D) { 0, 0 };
          props->maxFragmentShadingRateAttachmentTexelSizeAspectRatio = 0;
 
-         props->primitiveFragmentShadingRateWithMultipleViewports = pdevice->info.ver >= 12;
+         props->primitiveFragmentShadingRateWithMultipleViewports = false;
          props->layeredShadingRateAttachments = false;
-         props->fragmentShadingRateNonTrivialCombinerOps = true;
+         props->fragmentShadingRateNonTrivialCombinerOps = false;
          props->maxFragmentSize = (VkExtent2D) { 4, 4 };
          props->maxFragmentSizeAspectRatio = 4;
-         props->maxFragmentShadingRateCoverageSamples = 4 * 4;
+         props->maxFragmentShadingRateCoverageSamples = 4 * 4 * 16;
          props->maxFragmentShadingRateRasterizationSamples = VK_SAMPLE_COUNT_16_BIT;
          props->fragmentShadingRateWithShaderDepthStencilWrites = false;
          props->fragmentShadingRateWithSampleMask = true;
@@ -4954,7 +4934,11 @@ VkResult anv_GetPhysicalDeviceFragmentShadingRatesKHR(
 
    for (uint32_t x = 4; x >= 1; x /= 2) {
        for (uint32_t y = 4; y >= 1; y /= 2) {
-         append_rate(sample_counts, x, y);
+          /* For size {1, 1}, the sample count must be ~0 */
+          if (x == 1 && y == 1)
+             append_rate(~0, x, y);
+          else
+             append_rate(sample_counts, x, y);
       }
    }
 

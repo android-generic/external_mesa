@@ -1116,9 +1116,13 @@ fs_inst::flags_read(const intel_device_info *devinfo) const
 }
 
 unsigned
-fs_inst::flags_written() const
+fs_inst::flags_written(const intel_device_info *devinfo) const
 {
-   if ((conditional_mod && (opcode != BRW_OPCODE_SEL &&
+   /* On Gfx4 and Gfx5, sel.l (for min) and sel.ge (for max) are implemented
+    * using a separte cmpn and sel instruction.  This lowering occurs in
+    * fs_vistor::lower_minmax which is called very, very late.
+    */
+   if ((conditional_mod && ((opcode != BRW_OPCODE_SEL || devinfo->ver <= 5) &&
                             opcode != BRW_OPCODE_CSEL &&
                             opcode != BRW_OPCODE_IF &&
                             opcode != BRW_OPCODE_WHILE)) ||
@@ -2656,16 +2660,23 @@ fs_visitor::assign_constant_locations()
    /* Now that we know how many regular uniforms we'll push, reduce the
     * UBO push ranges so we don't exceed the 3DSTATE_CONSTANT limits.
     */
+   /* For gen4/5:
+    * Only allow 16 registers (128 uniform components) as push constants.
+    *
+    * If changing this value, note the limitation about total_regs in
+    * brw_curbe.c/crocus_state.c
+    */
+   const unsigned max_push_length = compiler->devinfo->ver < 6 ? 16 : 64;
    unsigned push_length = DIV_ROUND_UP(stage_prog_data->nr_params, 8);
    for (int i = 0; i < 4; i++) {
       struct brw_ubo_range *range = &prog_data->ubo_ranges[i];
 
-      if (push_length + range->length > 64)
-         range->length = 64 - push_length;
+      if (push_length + range->length > max_push_length)
+         range->length = max_push_length - push_length;
 
       push_length += range->length;
    }
-   assert(push_length <= 64);
+   assert(push_length <= max_push_length);
 }
 
 bool
@@ -7602,7 +7613,7 @@ needs_src_copy(const fs_builder &lbld, const fs_inst *inst, unsigned i)
    return !(is_periodic(inst->src[i], lbld.dispatch_width()) ||
             (inst->components_read(i) == 1 &&
              lbld.dispatch_width() <= inst->exec_size)) ||
-          (inst->flags_written() &
+          (inst->flags_written(lbld.shader->devinfo) &
            flag_mask(inst->src[i], type_sz(inst->src[i].type)));
 }
 
@@ -8723,7 +8734,7 @@ fs_visitor::fixup_nomask_control_flow()
 
       foreach_inst_in_block_reverse_safe(fs_inst, inst, block) {
          if (!inst->predicate && inst->exec_size >= 8)
-            flag_liveout &= ~inst->flags_written();
+            flag_liveout &= ~inst->flags_written(devinfo);
 
          switch (inst->opcode) {
          case BRW_OPCODE_DO:
