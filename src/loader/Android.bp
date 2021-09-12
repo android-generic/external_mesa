@@ -35,6 +35,7 @@ cc_library_static {
         "-DPREFER_IRIS",
         "-Wno-missing-field-initializers",
         "-Wno-sign-compare",
+        "-DPREFER_CROCUS",
     ],
 
     shared_libs: ["libdrm"],
