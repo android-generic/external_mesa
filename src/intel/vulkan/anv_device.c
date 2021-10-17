@@ -1329,14 +1329,14 @@ anv_get_physical_device_features_1_2(struct anv_physical_device *pdevice,
    f->shaderInputAttachmentArrayDynamicIndexing          = false;
    f->shaderUniformTexelBufferArrayDynamicIndexing       = descIndexing;
    f->shaderStorageTexelBufferArrayDynamicIndexing       = descIndexing;
-   f->shaderUniformBufferArrayNonUniformIndexing         = false;
+   f->shaderUniformBufferArrayNonUniformIndexing         = descIndexing;
    f->shaderSampledImageArrayNonUniformIndexing          = descIndexing;
    f->shaderStorageBufferArrayNonUniformIndexing         = descIndexing;
    f->shaderStorageImageArrayNonUniformIndexing          = descIndexing;
    f->shaderInputAttachmentArrayNonUniformIndexing       = false;
    f->shaderUniformTexelBufferArrayNonUniformIndexing    = descIndexing;
    f->shaderStorageTexelBufferArrayNonUniformIndexing    = descIndexing;
-   f->descriptorBindingUniformBufferUpdateAfterBind      = false;
+   f->descriptorBindingUniformBufferUpdateAfterBind      = descIndexing;
    f->descriptorBindingSampledImageUpdateAfterBind       = descIndexing;
    f->descriptorBindingStorageImageUpdateAfterBind       = descIndexing;
    f->descriptorBindingStorageBufferUpdateAfterBind      = descIndexing;
@@ -3206,6 +3206,15 @@ VkResult anv_CreateDevice(
       result = vk_error(VK_ERROR_INITIALIZATION_FAILED);
       goto fail_fd;
    }
+
+   /* Here we tell the kernel not to attempt to recover our context but
+    * immediately (on the next batchbuffer submission) report that the
+    * context is lost, and we will do the recovery ourselves.  In the case
+    * of Vulkan, recovery means throwing VK_ERROR_DEVICE_LOST and letting
+    * the client clean up the pieces.
+    */
+   anv_gem_set_context_param(device->fd, device->context_id,
+                             I915_CONTEXT_PARAM_RECOVERABLE, false);
 
    device->has_thread_submit = physical_device->has_thread_submit;
 
