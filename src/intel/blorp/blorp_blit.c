@@ -144,9 +144,8 @@ blorp_create_nir_tex_instr(nir_builder *b, struct brw_blorp_blit_vars *v,
    tex->is_array = false;
    tex->is_shadow = false;
 
-   /* Blorp only has one texture and it's bound at unit 0 */
-   tex->texture_index = 0;
-   tex->sampler_index = 0;
+   tex->texture_index = BLORP_TEXTURE_BT_INDEX;
+   tex->sampler_index = BLORP_SAMPLER_INDEX;
 
    /* To properly handle 3-D and 2-D array textures, we pull the Z component
     * from an input.  TODO: This is a bit magic; we should probably make this
@@ -2115,11 +2114,11 @@ try_blorp_blit(struct blorp_batch *batch,
       /* Gfx4-5 don't support non-normalized texture coordinates */
       key->src_coords_normalized = true;
       params->wm_inputs.src_inv_size[0] =
-         1.0f / minify(params->src.surf.logical_level0_px.width,
-                       params->src.view.base_level);
+         1.0f / u_minify(params->src.surf.logical_level0_px.width,
+                         params->src.view.base_level);
       params->wm_inputs.src_inv_size[1] =
-         1.0f / minify(params->src.surf.logical_level0_px.height,
-                       params->src.view.base_level);
+         1.0f / u_minify(params->src.surf.logical_level0_px.height,
+                         params->src.view.base_level);
    }
 
    if (isl_format_get_layout(params->dst.view.format)->bpb % 3 == 0) {
@@ -2520,6 +2519,9 @@ blorp_blit(struct blorp_batch *batch,
                         isl_format_has_sint_channel(params.dst.view.format),
    };
 
+   params.shader_type = key.base.shader_type;
+   params.shader_pipeline = key.base.shader_pipeline;
+
    /* Scaling factors used for bilinear filtering in multisample scaled
     * blits.
     */
@@ -2530,10 +2532,10 @@ blorp_blit(struct blorp_batch *batch,
    key.y_scale = params.src.surf.samples / key.x_scale;
 
    params.wm_inputs.rect_grid.x1 =
-      minify(params.src.surf.logical_level0_px.width, src_level) *
+      u_minify(params.src.surf.logical_level0_px.width, src_level) *
       key.x_scale - 1.0f;
    params.wm_inputs.rect_grid.y1 =
-      minify(params.src.surf.logical_level0_px.height, src_level) *
+      u_minify(params.src.surf.logical_level0_px.height, src_level) *
       key.y_scale - 1.0f;
 
    struct blt_coords coords = {
@@ -2739,9 +2741,9 @@ blorp_surf_convert_to_uncompressed(const struct isl_device *isl_dev,
 
    if (width && height) {
       ASSERTED const uint32_t level_width =
-         minify(info->surf.logical_level0_px.width, info->view.base_level);
+         u_minify(info->surf.logical_level0_px.width, info->view.base_level);
       ASSERTED const uint32_t level_height =
-         minify(info->surf.logical_level0_px.height, info->view.base_level);
+         u_minify(info->surf.logical_level0_px.height, info->view.base_level);
       assert(*width % fmtl->bw == 0 || *x + *width == level_width);
       assert(*height % fmtl->bh == 0 || *y + *height == level_height);
       *width = DIV_ROUND_UP(*width, fmtl->bw);
@@ -2832,6 +2834,9 @@ blorp_copy(struct blorp_batch *batch,
       .need_src_offset = src_surf->tile_x_sa || src_surf->tile_y_sa,
       .need_dst_offset = dst_surf->tile_x_sa || dst_surf->tile_y_sa,
    };
+
+   params.shader_type = key.base.shader_type;
+   params.shader_pipeline = key.base.shader_pipeline;
 
    const struct isl_format_layout *src_fmtl =
       isl_format_get_layout(params.src.surf.format);

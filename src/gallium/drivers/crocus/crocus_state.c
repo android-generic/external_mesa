@@ -88,6 +88,7 @@
 #include "intel/common/intel_l3_config.h"
 #include "intel/common/intel_sample_positions.h"
 #include "intel/compiler/brw_compiler.h"
+#include "compiler/shader_info.h"
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
@@ -111,6 +112,7 @@
 
 #include "crocus_genx_macros.h"
 #include "intel/common/intel_guardband.h"
+#include "main/macros.h" /* UNCLAMPED_* */
 
 /**
  * Statically assert that PIPE_* enums match the hardware packets.
@@ -4831,10 +4833,9 @@ crocus_populate_fs_key(const struct crocus_context *ice,
       screen->driconf.dual_color_blend_by_location &&
       (blend->blend_enables & 1) && blend->dual_color_blending;
 
-   /* TODO: Respect glHint for key->high_quality_derivatives */
-
 #if GFX_VER <= 5
    if (fb->nr_cbufs > 1 && zsa->cso.alpha_enabled) {
+      key->emit_alpha_test = true;
       key->alpha_test_func = zsa->cso.alpha_func;
       key->alpha_test_ref = zsa->cso.alpha_ref_value;
    }

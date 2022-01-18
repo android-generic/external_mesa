@@ -399,6 +399,7 @@ static void print_token(FILE *file, int type, YYSTYPE value)
 %token <tok> T_OP_STKR
 %token <tok> T_OP_XSET
 %token <tok> T_OP_XCLR
+%token <tok> T_OP_GETLAST
 %token <tok> T_OP_GETONE
 %token <tok> T_OP_DBG
 %token <tok> T_OP_SHPS
@@ -483,7 +484,15 @@ static void print_token(FILE *file, int type, YYSTYPE value)
 %token <tok> T_OP_SEL_F32
 %token <tok> T_OP_SAD_S16
 %token <tok> T_OP_SAD_S32
-%token <tok> T_OP_SHLG_B16
+%token <tok> T_OP_SHRM
+%token <tok> T_OP_SHLM
+%token <tok> T_OP_SHRG
+%token <tok> T_OP_SHLG
+%token <tok> T_OP_ANDG
+%token <tok> T_OP_DP2ACC
+%token <tok> T_OP_DP4ACC
+%token <tok> T_OP_WMM
+%token <tok> T_OP_WMM_ACCU
 
 /* category 4: */
 %token <tok> T_OP_RCP
@@ -526,6 +535,11 @@ static void print_token(FILE *file, int type, YYSTYPE value)
 %token <tok> T_OP_DSYPP_1
 %token <tok> T_OP_RGETPOS
 %token <tok> T_OP_RGETINFO
+%token <tok> T_OP_BRCST_A
+%token <tok> T_OP_QSHUFFLE_BRCST
+%token <tok> T_OP_QSHUFFLE_H
+%token <tok> T_OP_QSHUFFLE_V
+%token <tok> T_OP_QSHUFFLE_DIAG
 
 /* category 6: */
 %token <tok> T_OP_LDG
@@ -598,6 +612,7 @@ static void print_token(FILE *file, int type, YYSTYPE value)
 %token <tok> T_OP_LDLV
 %token <tok> T_OP_GETSPID
 %token <tok> T_OP_GETWID
+%token <tok> T_OP_GETFIBERID
 
 /* category 7: */
 %token <tok> T_OP_BAR
@@ -615,6 +630,11 @@ static void print_token(FILE *file, int type, YYSTYPE value)
 
 %token <tok> T_UNTYPED
 %token <tok> T_TYPED
+
+%token <tok> T_MIXED
+%token <tok> T_UNSIGNED
+%token <tok> T_LOW
+%token <tok> T_HIGH
 
 %token <tok> T_1D
 %token <tok> T_2D
@@ -697,7 +717,7 @@ const_header:      T_A_CONST '(' T_CONSTANT ')' const_val ',' const_val ',' cons
 }
 
 buf_header_addr_reg:
-|                  '(' T_CONSTANT ')' {
+                   '(' T_CONSTANT ')' {
                        assert(($2 & 0x1) == 0);  /* half-reg not allowed */
                        unsigned reg = $2 >> 1;
 
@@ -705,6 +725,7 @@ buf_header_addr_reg:
                        /* reserve space in immediates for the actual value to be plugged in later: */
                        add_const($2, 0, 0, 0, 0);
 }
+|
 
 buf_header:        T_A_BUF const_val {
                        int idx = info->num_bufs++;
@@ -822,6 +843,7 @@ cat0_instr:        T_OP_NOP        { new_instr(OPC_NOP); }
 |                  T_OP_PREDT      { new_instr(OPC_PREDT); }    cat0_src1
 |                  T_OP_PREDF      { new_instr(OPC_PREDF); }    cat0_src1
 |                  T_OP_PREDE      { new_instr(OPC_PREDE); }
+|                  T_OP_GETLAST '.' T_W { new_instr(OPC_GETLAST); }   cat0_immed
 
 cat1_opc:          T_OP_MOV '.' T_CAT1_TYPE_TYPE {
                        parse_type_type(new_instr(OPC_MOV), $3);
@@ -837,9 +859,16 @@ cat1_movmsk:       T_OP_MOVMSK '.' T_W {
                        new_instr(OPC_MOVMSK);
                        instr->cat1.src_type = TYPE_U32;
                        instr->cat1.dst_type = TYPE_U32;
-                       instr->repeat = $3 - 1;
                    } dst_reg {
-                       instr->dsts[0]->wrmask = (1 << $3) - 1;
+                       if (($3 % 32) != 0)
+                          yyerror("w# must be multiple of 32");
+                       if ($3 < 32)
+                          yyerror("w# must be at least 32");
+
+                       int num = $3 / 32;
+
+                       instr->repeat = num - 1;
+                       instr->dsts[0]->wrmask = (1 << num) - 1;
                    }
 
 cat1_mova1:        T_OP_MOVA1 T_A1 ',' {
@@ -933,6 +962,12 @@ cat2_instr:        cat2_opc_1src dst_reg ',' src_reg_or_const_or_rel_or_imm
 |                  cat2_opc_2src_cnd '.' cond dst_reg ',' src_reg_or_const_or_rel_or_imm ',' src_reg_or_const_or_rel_or_imm
 |                  cat2_opc_2src dst_reg ',' src_reg_or_const_or_rel_or_imm ',' src_reg_or_const_or_rel_or_imm
 
+cat3_dp_signedness:'.' T_MIXED   { instr->cat3.signedness = IR3_SRC_MIXED; }
+|                  '.' T_UNSIGNED{ instr->cat3.signedness = IR3_SRC_UNSIGNED; }
+
+cat3_dp_pack:      '.' T_LOW     { instr->cat3.packed = IR3_SRC_PACKED_LOW; }
+|                  '.' T_HIGH    { instr->cat3.packed = IR3_SRC_PACKED_HIGH; }
+
 cat3_opc:          T_OP_MAD_U16   { new_instr(OPC_MAD_U16); }
 |                  T_OP_MADSH_U16 { new_instr(OPC_MADSH_U16); }
 |                  T_OP_MAD_S16   { new_instr(OPC_MAD_S16); }
@@ -950,8 +985,22 @@ cat3_opc:          T_OP_MAD_U16   { new_instr(OPC_MAD_U16); }
 |                  T_OP_SAD_S16   { new_instr(OPC_SAD_S16); }
 |                  T_OP_SAD_S32   { new_instr(OPC_SAD_S32); }
 
+cat3_imm_reg_opc:  T_OP_SHRM      { new_instr(OPC_SHRM); }
+|                  T_OP_SHLM      { new_instr(OPC_SHLM); }
+|                  T_OP_SHRG      { new_instr(OPC_SHRG); }
+|                  T_OP_SHLG      { new_instr(OPC_SHLG); }
+|                  T_OP_ANDG      { new_instr(OPC_ANDG); }
+
+cat3_wmm:          T_OP_WMM       { new_instr(OPC_WMM); }
+|                  T_OP_WMM_ACCU  { new_instr(OPC_WMM_ACCU); }
+
+cat3_dp:           T_OP_DP2ACC    { new_instr(OPC_DP2ACC); }
+|                  T_OP_DP4ACC    { new_instr(OPC_DP4ACC); }
+
 cat3_instr:        cat3_opc dst_reg ',' src_reg_or_const_or_rel ',' src_reg_or_const ',' src_reg_or_const_or_rel
-|                  T_OP_SHLG_B16 { new_instr(OPC_SHLG_B16); } dst_reg ',' src_reg_or_rel_or_imm ',' src_reg_or_const ',' src_reg_or_rel_or_imm
+|                  cat3_imm_reg_opc dst_reg ',' src_reg_or_rel_or_imm ',' src_reg_or_const ',' src_reg_or_rel_or_imm
+|                  cat3_wmm         dst_reg ',' src_reg_gpr ',' src_reg ',' immediate
+|                  cat3_dp cat3_dp_signedness cat3_dp_pack dst_reg ',' src_reg_or_rel_or_imm ',' src_reg_or_const ',' src_reg_or_rel_or_imm
 
 cat4_opc:          T_OP_RCP       { new_instr(OPC_RCP); }
 |                  T_OP_RSQ       { new_instr(OPC_RSQ); }
@@ -995,6 +1044,11 @@ cat5_opc:          T_OP_ISAM      { new_instr(OPC_ISAM); }
 |                  T_OP_SAMGP3    { new_instr(OPC_SAMGP3); }
 |                  T_OP_RGETPOS   { new_instr(OPC_RGETPOS); }
 |                  T_OP_RGETINFO  { new_instr(OPC_RGETINFO); }
+|                  T_OP_BRCST_A   { new_instr(OPC_BRCST_ACTIVE); }
+|                  T_OP_QSHUFFLE_BRCST { new_instr(OPC_QUAD_SHUFFLE_BRCST); }
+|                  T_OP_QSHUFFLE_H     { new_instr(OPC_QUAD_SHUFFLE_HORIZ); }
+|                  T_OP_QSHUFFLE_V     { new_instr(OPC_QUAD_SHUFFLE_VERT); }
+|                  T_OP_QSHUFFLE_DIAG  { new_instr(OPC_QUAD_SHUFFLE_DIAG); }
 
 cat5_flag:         '.' T_3D       { instr->flags |= IR3_INSTR_3D; }
 |                  '.' 'a'        { instr->flags |= IR3_INSTR_A; }
@@ -1005,6 +1059,7 @@ cat5_flag:         '.' T_3D       { instr->flags |= IR3_INSTR_3D; }
 |                  '.' T_UNIFORM  { }
 |                  '.' T_NONUNIFORM  { instr->flags |= IR3_INSTR_NONUNIF; }
 |                  '.' T_BASE     { instr->flags |= IR3_INSTR_B; instr->cat5.tex_base = $2; }
+|                  '.' T_W        { instr->cat5.cluster_size = $2; }
 cat5_flags:
 |                  cat5_flag cat5_flags
 
@@ -1136,6 +1191,7 @@ cat6_ibo:          cat6_ibo_opc_1src cat6_type cat6_dim dst_reg ',' 'g' '[' cat6
 cat6_id_opc:
                    T_OP_GETSPID { new_instr(OPC_GETSPID); }
 |                  T_OP_GETWID  { new_instr(OPC_GETWID); }
+|                  T_OP_GETFIBERID { new_instr(OPC_GETFIBERID); }
 
 cat6_id:           cat6_id_opc cat6_type dst_reg
 
@@ -1243,6 +1299,9 @@ src_reg_flags:     src_reg_flag
 
 src_reg:           src
 |                  src_reg_flags src
+
+src_reg_gpr:       src_reg
+|                  relative_gpr_src
 
 src_const:         const
 |                  src_reg_flags const

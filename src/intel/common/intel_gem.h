@@ -76,6 +76,19 @@ intel_ioctl(int fd, unsigned long request, void *arg)
     return ret;
 }
 
+static inline uint64_t
+intel_read_gpu_timestamp(int fd)
+{
+   struct drm_i915_reg_read reg_read = {};
+   const uint64_t render_ring_timestamp = 0x2358;
+   reg_read.offset = render_ring_timestamp | I915_REG_READ_8B_WA;
+
+   if (intel_ioctl(fd, DRM_IOCTL_I915_REG_READ, &reg_read) < 0)
+      return 0;
+
+   return reg_read.val;
+}
+
 /**
  * A wrapper around DRM_IOCTL_I915_QUERY
  *
@@ -145,5 +158,11 @@ intel_i915_query_alloc(int fd, uint64_t query_id)
 }
 
 bool intel_gem_supports_syncobj_wait(int fd);
+
+int intel_gem_count_engines(const struct drm_i915_query_engine_info *info,
+                            enum drm_i915_gem_engine_class engine_class);
+int intel_gem_create_context_engines(int fd,
+                                     const struct drm_i915_query_engine_info *info,
+                                     int num_engines, uint16_t *engine_classes);
 
 #endif /* INTEL_GEM_H */

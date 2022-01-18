@@ -52,11 +52,13 @@
 #include "blorp/blorp.h"
 #include "compiler/brw_compiler.h"
 #include "compiler/brw_rt.h"
+#include "ds/intel_driver_ds.h"
 #include "util/bitset.h"
 #include "util/bitscan.h"
 #include "util/macros.h"
 #include "util/hash_table.h"
 #include "util/list.h"
+#include "util/perf/u_trace.h"
 #include "util/sparse_array.h"
 #include "util/u_atomic.h"
 #include "util/u_vector.h"
@@ -160,6 +162,7 @@ struct intel_perf_query_result;
    (DYNAMIC_STATE_POOL_MAX_ADDRESS - DYNAMIC_STATE_POOL_MIN_ADDRESS + 1)
 #define BINDING_TABLE_POOL_SIZE     \
    (BINDING_TABLE_POOL_MAX_ADDRESS - BINDING_TABLE_POOL_MIN_ADDRESS + 1)
+#define BINDING_TABLE_POOL_BLOCK_SIZE (65536)
 #define SURFACE_STATE_POOL_SIZE     \
    (SURFACE_STATE_POOL_MAX_ADDRESS - SURFACE_STATE_POOL_MIN_ADDRESS + 1)
 #define INSTRUCTION_STATE_POOL_SIZE \
@@ -551,6 +554,46 @@ anv_bo_is_pinned(struct anv_bo *bo)
 #endif
 }
 
+struct anv_address {
+   struct anv_bo *bo;
+   int64_t offset;
+};
+
+#define ANV_NULL_ADDRESS ((struct anv_address) { NULL, 0 })
+
+static inline struct anv_address
+anv_address_from_u64(uint64_t addr_u64)
+{
+   assert(addr_u64 == intel_canonical_address(addr_u64));
+   return (struct anv_address) {
+      .bo = NULL,
+      .offset = addr_u64,
+   };
+}
+
+static inline bool
+anv_address_is_null(struct anv_address addr)
+{
+   return addr.bo == NULL && addr.offset == 0;
+}
+
+static inline uint64_t
+anv_address_physical(struct anv_address addr)
+{
+   if (addr.bo && anv_bo_is_pinned(addr.bo)) {
+      return intel_canonical_address(addr.bo->offset + addr.offset);
+   } else {
+      return intel_canonical_address(addr.offset);
+   }
+}
+
+static inline struct anv_address
+anv_address_add(struct anv_address addr, uint64_t offset)
+{
+   addr.offset += offset;
+   return addr;
+}
+
 /* Represents a lock-free linked list of "free" things.  This is used by
  * both the block pool and the state pools.  Unfortunately, in order to
  * solve the ABA problem, we can't use a single uint32_t head.
@@ -889,12 +932,6 @@ struct anv_physical_device {
 
     struct anv_instance *                       instance;
     char                                        path[20];
-    struct {
-       uint16_t                                 domain;
-       uint8_t                                  bus;
-       uint8_t                                  device;
-       uint8_t                                  function;
-    }                                           pci_info;
     struct intel_device_info                      info;
     /** Amount of "GPU memory" we want to advertise
      *
@@ -991,7 +1028,7 @@ struct anv_physical_device {
     int64_t                                     master_minor;
     struct drm_i915_query_engine_info *         engine_info;
 
-    void (*cmd_emit_timestamp)(struct anv_batch *, struct anv_bo *, uint32_t );
+    void (*cmd_emit_timestamp)(struct anv_batch *, struct anv_device *, struct anv_address, bool);
     struct intel_measure_device                 measure_device;
 };
 
@@ -1025,7 +1062,11 @@ struct anv_queue {
 
    const struct anv_queue_family *           family;
 
+   uint32_t                                  index_in_family;
+
    uint32_t                                  exec_flags;
+
+   struct intel_ds_queue *                   ds;
 };
 
 struct anv_pipeline_cache {
@@ -1098,11 +1139,6 @@ anv_device_upload_nir(struct anv_device *device,
                       struct anv_pipeline_cache *cache,
                       const struct nir_shader *nir,
                       unsigned char sha1_key[20]);
-
-struct anv_address {
-   struct anv_bo *bo;
-   int64_t offset;
-};
 
 struct anv_device {
     struct vk_device                            vk;
@@ -1184,6 +1220,8 @@ struct anv_device {
     const struct intel_l3_config                *l3_config;
 
     struct intel_debug_block_frame              *debug_frame_desc;
+
+    struct intel_ds_device                       ds;
 };
 
 #if defined(GFX_VERx10) && GFX_VERx10 >= 90
@@ -1365,16 +1403,10 @@ int anv_gem_execbuffer(struct anv_device *device,
 int anv_gem_set_tiling(struct anv_device *device, uint32_t gem_handle,
                        uint32_t stride, uint32_t tiling);
 int anv_gem_create_context(struct anv_device *device);
-int anv_gem_create_context_engines(struct anv_device *device,
-                                   const struct drm_i915_query_engine_info *info,
-                                   int num_engines,
-                                   uint16_t *engine_classes);
 bool anv_gem_has_context_priority(int fd, int priority);
 int anv_gem_destroy_context(struct anv_device *device, int context);
 int anv_gem_set_context_param(int fd, int context, uint32_t param,
                               uint64_t value);
-int anv_gem_get_context_param(int fd, int context, uint32_t param,
-                              uint64_t *value);
 int anv_gem_get_param(int fd, uint32_t param);
 int anv_gem_get_tiling(struct anv_device *device, uint32_t gem_handle);
 int anv_gem_context_get_reset_stats(int fd, int context,
@@ -1388,8 +1420,6 @@ int anv_gem_set_domain(struct anv_device *device, uint32_t gem_handle,
 int anv_i915_query(int fd, uint64_t query_id, void *buffer,
                    int32_t *buffer_len);
 struct drm_i915_query_engine_info *anv_gem_get_engine_info(int fd);
-int anv_gem_count_engines(const struct drm_i915_query_engine_info *info,
-                          uint16_t engine_class);
 
 uint64_t anv_vma_alloc(struct anv_device *device,
                        uint64_t size, uint64_t align,
@@ -1517,42 +1547,6 @@ anv_batch_emit_reloc(struct anv_batch *batch,
    }
 
    return address_u64;
-}
-
-
-#define ANV_NULL_ADDRESS ((struct anv_address) { NULL, 0 })
-
-static inline struct anv_address
-anv_address_from_u64(uint64_t addr_u64)
-{
-   assert(addr_u64 == intel_canonical_address(addr_u64));
-   return (struct anv_address) {
-      .bo = NULL,
-      .offset = addr_u64,
-   };
-}
-
-static inline bool
-anv_address_is_null(struct anv_address addr)
-{
-   return addr.bo == NULL && addr.offset == 0;
-}
-
-static inline uint64_t
-anv_address_physical(struct anv_address addr)
-{
-   if (addr.bo && anv_bo_is_pinned(addr.bo)) {
-      return intel_canonical_address(addr.bo->offset + addr.offset);
-   } else {
-      return intel_canonical_address(addr.offset);
-   }
-}
-
-static inline struct anv_address
-anv_address_add(struct anv_address addr, uint64_t offset)
-{
-   addr.offset += offset;
-   return addr;
 }
 
 static inline void
@@ -2353,6 +2347,7 @@ enum anv_pipe_bits {
     * must reinterpret this flush as ANV_PIPE_DATA_CACHE_FLUSH_BIT.
     */
    ANV_PIPE_HDC_PIPELINE_FLUSH_BIT           = (1 << 14),
+   ANV_PIPE_PSS_STALL_SYNC_BIT               = (1 << 15),
    ANV_PIPE_CS_STALL_BIT                     = (1 << 20),
    ANV_PIPE_END_OF_PIPE_SYNC_BIT             = (1 << 21),
 
@@ -2404,6 +2399,9 @@ enum anv_pipe_bits {
    ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT | \
    ANV_PIPE_INSTRUCTION_CACHE_INVALIDATE_BIT | \
    ANV_PIPE_AUX_TABLE_INVALIDATE_BIT)
+
+enum intel_ds_stall_flag
+anv_pipe_flush_bit_to_ds_stall_flag(enum anv_pipe_bits bits);
 
 static inline enum anv_pipe_bits
 anv_pipe_flush_bits_for_access_flags(struct anv_device *device,
@@ -2796,6 +2794,37 @@ struct anv_vb_cache_range {
    uint64_t end;
 };
 
+/* Check whether we need to apply the Gfx8-9 vertex buffer workaround*/
+static inline bool
+anv_gfx8_9_vb_cache_range_needs_workaround(struct anv_vb_cache_range *bound,
+                                           struct anv_vb_cache_range *dirty,
+                                           struct anv_address vb_address,
+                                           uint32_t vb_size)
+{
+   if (vb_size == 0) {
+      bound->start = 0;
+      bound->end = 0;
+      return false;
+   }
+
+   assert(vb_address.bo && anv_bo_is_pinned(vb_address.bo));
+   bound->start = intel_48b_address(anv_address_physical(vb_address));
+   bound->end = bound->start + vb_size;
+   assert(bound->end > bound->start); /* No overflow */
+
+   /* Align everything to a cache line */
+   bound->start &= ~(64ull - 1ull);
+   bound->end = align_u64(bound->end, 64);
+
+   /* Compute the dirty range */
+   dirty->start = MIN2(dirty->start, bound->start);
+   dirty->end = MAX2(dirty->end, bound->end);
+
+   /* If our range is larger than 32 bits, we have to flush */
+   assert(bound->end - bound->start <= (1ull << 32));
+   return (dirty->end - dirty->start) > (1ull << 32);
+}
+
 /** State tracking for particular pipeline bind point
  *
  * This struct is the base struct for anv_cmd_graphics_state and
@@ -3069,6 +3098,11 @@ struct anv_cmd_buffer {
     * Used to increase allocation size for long command buffers.
     */
    uint32_t                                     total_batch_size;
+
+   /**
+    *
+    */
+   struct u_trace                               trace;
 };
 
 /* Determine whether we can chain a given cmd_buffer to another one. We need
@@ -3180,9 +3214,10 @@ vk_sync_is_anv_bo_sync(const struct vk_sync *sync)
    return sync->type == &anv_bo_sync_type;
 }
 
-VkResult anv_sync_create_for_bo(struct anv_device *device,
-                                struct anv_bo *bo,
-                                struct vk_sync **sync_out);
+VkResult anv_create_sync_for_memory(struct vk_device *device,
+                                    VkDeviceMemory memory,
+                                    bool signal_memory,
+                                    struct vk_sync **sync_out);
 
 struct anv_event {
    struct vk_object_base                        base;
@@ -3355,7 +3390,6 @@ struct anv_graphics_pipeline {
    bool                                         stencil_test_enable;
    bool                                         depth_clamp_enable;
    bool                                         depth_clip_enable;
-   bool                                         sample_shading_enable;
    bool                                         kill_pixel;
    bool                                         depth_bounds_test_enable;
    bool                                         force_fragment_thread_dispatch;
@@ -4512,6 +4546,66 @@ void anv_perf_write_pass_results(struct intel_perf_config *perf,
                                  struct anv_query_pool *pool, uint32_t pass,
                                  const struct intel_perf_query_result *accumulated_results,
                                  union VkPerformanceCounterResultKHR *results);
+
+/* Use to emit a series of memcpy operations */
+struct anv_memcpy_state {
+   struct anv_device *device;
+   struct anv_batch *batch;
+
+   struct anv_vb_cache_range vb_bound;
+   struct anv_vb_cache_range vb_dirty;
+};
+
+struct anv_utrace_flush_copy {
+   /* Needs to be the first field */
+   struct intel_ds_flush_data ds;
+
+   /* Batch stuff to implement of copy of timestamps recorded in another
+    * buffer.
+    */
+   struct anv_reloc_list relocs;
+   struct anv_batch batch;
+   struct anv_bo *batch_bo;
+
+   /* Buffer of 64bits timestamps */
+   struct anv_bo *trace_bo;
+
+   /* Syncobj to be signaled when the batch completes */
+   struct vk_sync *sync;
+
+   /* Queue on which all the recorded traces are submitted */
+   struct anv_queue *queue;
+
+   struct anv_memcpy_state memcpy_state;
+};
+
+void anv_device_utrace_init(struct anv_device *device);
+void anv_device_utrace_finish(struct anv_device *device);
+VkResult
+anv_device_utrace_flush_cmd_buffers(struct anv_queue *queue,
+                                    uint32_t cmd_buffer_count,
+                                    struct anv_cmd_buffer **cmd_buffers,
+                                    struct anv_utrace_flush_copy **out_flush_data);
+
+#ifdef HAVE_PERFETTO
+void anv_perfetto_init(void);
+uint64_t anv_perfetto_begin_submit(struct anv_queue *queue);
+void anv_perfetto_end_submit(struct anv_queue *queue, uint32_t submission_id,
+                             uint64_t start_ts);
+#else
+static inline void anv_perfetto_init(void)
+{
+}
+static inline uint64_t anv_perfetto_begin_submit(struct anv_queue *queue)
+{
+   return 0;
+}
+static inline void anv_perfetto_end_submit(struct anv_queue *queue,
+                                           uint32_t submission_id,
+                                           uint64_t start_ts)
+{}
+#endif
+
 
 #define ANV_FROM_HANDLE(__anv_type, __name, __handle) \
    VK_FROM_HANDLE(__anv_type, __name, __handle)

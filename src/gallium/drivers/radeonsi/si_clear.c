@@ -352,7 +352,7 @@ bool vi_dcc_get_clear_info(struct si_context *sctx, struct si_texture *tex, unsi
          return false;
 
       dcc_offset += tex->surface.u.legacy.color.dcc_level[level].dcc_offset;
-      clear_size = tex->surface.u.legacy.color.dcc_level[level].dcc_fast_clear_size * num_layers;
+      clear_size = tex->surface.u.legacy.color.dcc_level[level].dcc_fast_clear_size;
    }
 
    si_init_buffer_clear(out, dcc_buffer, dcc_offset, clear_size, clear_value);
@@ -830,6 +830,8 @@ static void si_fast_clear(struct si_context *sctx, unsigned *buffers,
                clear_value = !zstex->htile_stencil_disabled ? 0xfffff30f : 0xfffc000f;
             }
 
+            zstex->need_flush_after_depth_decompression = sctx->chip_class == GFX10_3;
+
             assert(num_clears < ARRAY_SIZE(info));
             si_init_buffer_clear(&info[num_clears++], &zstex->buffer.b.b,
                                  zstex->surface.meta_offset, zstex->surface.meta_size, clear_value);
@@ -934,6 +936,8 @@ static void si_fast_clear(struct si_context *sctx, unsigned *buffers,
                update_db_stencil_clear = true;
             }
          }
+
+         zstex->need_flush_after_depth_decompression = update_db_depth_clear && sctx->chip_class == GFX10_3;
 
          /* Update DB_DEPTH_CLEAR. */
          if (update_db_depth_clear &&
@@ -1143,7 +1147,7 @@ static void si_clear_depth_stencil(struct pipe_context *ctx, struct pipe_surface
                                    bool render_condition_enabled)
 {
    struct si_context *sctx = (struct si_context *)ctx;
-   union pipe_color_union unused;
+   union pipe_color_union unused = {};
 
    /* Fast path that just clears HTILE. */
    if (si_try_normal_clear(sctx, dst, dstx, dsty, width, height, render_condition_enabled,

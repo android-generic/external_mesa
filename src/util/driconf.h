@@ -238,6 +238,10 @@
    DRI_CONF_OPT_B(force_compat_profile, def, \
                   "Force an OpenGL compatibility context")
 
+#define DRI_CONF_FORCE_COMPAT_SHADERS(def) \
+   DRI_CONF_OPT_B(force_compat_shaders, def, \
+                  "Force OpenGL compatibility shaders")
+
 #define DRI_CONF_FORCE_DIRECT_GLX_CONTEXT(def) \
    DRI_CONF_OPT_B(force_direct_glx_context, def, \
                   "Force direct GLX context (even if indirect is requested)")
@@ -540,6 +544,10 @@
    DRI_CONF_OPT_B(radv_invariant_geom, def, \
                   "Mark geometry-affecting outputs as invariant")
 
+#define DRI_CONF_RADV_SPLIT_FMA(def) \
+   DRI_CONF_OPT_B(radv_split_fma, def, \
+                  "Split application-provided fused multiply-add in geometry stages")
+
 #define DRI_CONF_RADV_DISABLE_TC_COMPAT_HTILE_GENERAL(def) \
    DRI_CONF_OPT_B(radv_disable_tc_compat_htile_general, def, \
                   "Disable TC-compat HTILE in GENERAL layout")
@@ -551,5 +559,17 @@
 #define DRI_CONF_RADV_REPORT_APU_AS_DGPU(def) \
    DRI_CONF_OPT_B(radv_report_apu_as_dgpu, def, \
                   "Report APUs as discrete GPUs instead of integrated GPUs")
+
+#define DRI_CONF_RADV_REQUIRE_ETC2(def)                                        \
+  DRI_CONF_OPT_B(radv_require_etc2, def,                                       \
+                 "Implement emulated ETC2 on HW that does not support it")
+
+#define DRI_CONF_RADV_DISABLE_HTILE_LAYERS(def) \
+   DRI_CONF_OPT_B(radv_disable_htile_layers, def, \
+                  "Disable HTILE for layered depth/stencil formats")
+
+#define DRI_CONF_RADV_DISABLE_ANISO_SINGLE_LEVEL(def) \
+  DRI_CONF_OPT_B(radv_disable_aniso_single_level, def, \
+                 "Disable anisotropic filtering for single level images")
 
 #endif

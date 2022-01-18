@@ -547,8 +547,12 @@ compile_shader(struct tu_device *dev, struct nir_shader *nir,
 
    ir3_finalize_nir(dev->compiler, nir);
 
-   struct ir3_shader *sh = ir3_shader_from_nir(dev->compiler, nir,
-                                               align(consts, 4), NULL);
+   struct ir3_shader *sh =
+      ir3_shader_from_nir(dev->compiler, nir, &(struct ir3_shader_options) {
+                              .api_wavesize = IR3_SINGLE_OR_DOUBLE,
+                              .real_wavesize = IR3_SINGLE_OR_DOUBLE,
+                              .reserved_user_consts = align(consts, 4),
+                          }, NULL);
 
    struct ir3_shader_key key = {};
    bool created;
@@ -2690,7 +2694,7 @@ tu_emit_blit(struct tu_cmd_buffer *cmd,
    tu_cs_emit_regs(cs, A6XX_RB_BLIT_INFO(
       .unk0 = !resolve,
       .gmem = !resolve,
-      .sample_0 = vk_format_is_int(attachment->format) |
+      .sample_0 = vk_format_is_int(attachment->format) ||
          vk_format_is_depth_or_stencil(attachment->format)));
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_DST_INFO, 4);

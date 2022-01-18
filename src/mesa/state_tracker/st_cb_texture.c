@@ -55,7 +55,6 @@
 #include "state_tracker/st_cb_fbo.h"
 #include "state_tracker/st_cb_flush.h"
 #include "state_tracker/st_cb_texture.h"
-#include "state_tracker/st_cb_bufferobjects.h"
 #include "state_tracker/st_cb_memoryobjects.h"
 #include "state_tracker/st_format.h"
 #include "state_tracker/st_pbo.h"
@@ -386,8 +385,7 @@ st_pbo_get_dst_format(struct gl_context *ctx, enum pipe_texture_target target,
    return dst_format;
 }
 
-/** called via ctx->Driver.NewTextureImage() */
-static struct gl_texture_image *
+struct gl_texture_image *
 st_NewTextureImage(struct gl_context * ctx)
 {
    DBG("%s\n", __func__);
@@ -396,8 +394,7 @@ st_NewTextureImage(struct gl_context * ctx)
 }
 
 
-/** called via ctx->Driver.DeleteTextureImage() */
-static void
+void
 st_DeleteTextureImage(struct gl_context * ctx, struct gl_texture_image *img)
 {
    /* nothing special (yet) for st_texture_image */
@@ -405,8 +402,7 @@ st_DeleteTextureImage(struct gl_context * ctx, struct gl_texture_image *img)
 }
 
 
-/** called via ctx->Driver.NewTextureObject() */
-static struct gl_texture_object *
+struct gl_texture_object *
 st_NewTextureObject(struct gl_context * ctx, GLuint name, GLenum target)
 {
    struct st_texture_object *obj = ST_CALLOC_STRUCT(st_texture_object);
@@ -437,8 +433,7 @@ st_NewTextureObject(struct gl_context * ctx, GLuint name, GLenum target)
 }
 
 
-/** called via ctx->Driver.DeleteTextureObject() */
-static void
+void
 st_DeleteTextureObject(struct gl_context *ctx,
                        struct gl_texture_object *texObj)
 {
@@ -458,7 +453,7 @@ st_DeleteTextureObject(struct gl_context *ctx,
  * lead to dangling pointers to destroyed contexts.
  * Release the views to prevent this.
  */
-static void
+void
 st_TextureReleaseAllSamplerViews(struct gl_context *ctx,
                                  struct gl_texture_object *texObj)
 {
@@ -468,8 +463,7 @@ st_TextureReleaseAllSamplerViews(struct gl_context *ctx,
    st_texture_release_all_sampler_views(st, stObj);
 }
 
-/** called via ctx->Driver.FreeTextureImageBuffer() */
-static void
+void
 st_FreeTextureImageBuffer(struct gl_context *ctx,
                           struct gl_texture_image *texImage)
 {
@@ -556,8 +550,7 @@ compressed_tex_fallback_allocate(struct st_context *st,
 }
 
 
-/** called via ctx->Driver.MapTextureImage() */
-static void
+void
 st_MapTextureImage(struct gl_context *ctx,
                    struct gl_texture_image *texImage,
                    GLuint slice, GLuint x, GLuint y, GLuint w, GLuint h,
@@ -575,7 +568,7 @@ st_MapTextureImage(struct gl_context *ctx,
                     GL_MAP_INVALIDATE_RANGE_BIT)) == 0);
 
    const enum pipe_map_flags transfer_flags =
-      st_access_flags_to_transfer_flags(mode, false);
+      _mesa_access_flags_to_transfer_flags(mode, false);
 
    map = st_texture_image_map(st, stImage, transfer_flags, x, y, slice, w, h, 1,
                               &transfer);
@@ -619,8 +612,7 @@ st_MapTextureImage(struct gl_context *ctx,
 }
 
 
-/** called via ctx->Driver.UnmapTextureImage() */
-static void
+void
 st_UnmapTextureImage(struct gl_context *ctx,
                      struct gl_texture_image *texImage,
                      GLuint slice)
@@ -715,7 +707,7 @@ st_UnmapTextureImage(struct gl_context *ctx,
 
       itransfer->temp_data = NULL;
       itransfer->temp_stride = 0;
-      itransfer->map = 0;
+      itransfer->map = NULL;
    }
 
    st_texture_image_unmap(st, stImage, slice);
@@ -993,7 +985,8 @@ guess_and_alloc_texture(struct st_context *st,
                                  ptHeight,
                                  ptDepth,
                                  ptLayers, 0,
-                                 bindings);
+                                 bindings,
+                                 false);
 
    stObj->lastLevel = lastLevel;
 
@@ -1004,11 +997,10 @@ guess_and_alloc_texture(struct st_context *st,
 
 
 /**
- * Called via ctx->Driver.AllocTextureImageBuffer().
  * If the texture object/buffer already has space for the indicated image,
  * we're done.  Otherwise, allocate memory for the new texture image.
  */
-static GLboolean
+GLboolean
 st_AllocTextureImageBuffer(struct gl_context *ctx,
                            struct gl_texture_image *texImage)
 {
@@ -1089,7 +1081,8 @@ st_AllocTextureImageBuffer(struct gl_context *ctx,
                                       ptHeight,
                                       ptDepth,
                                       ptLayers, 0,
-                                      bindings);
+                                      bindings,
+                                      false);
       return stImage->pt != NULL;
    }
 }
@@ -1963,7 +1956,7 @@ fail:
 }
 
 
-static void
+void
 st_TexSubImage(struct gl_context *ctx, GLuint dims,
                struct gl_texture_image *texImage,
                GLint xoffset, GLint yoffset, GLint zoffset,
@@ -2243,7 +2236,7 @@ fallback:
 }
 
 
-static void
+void
 st_TexImage(struct gl_context * ctx, GLuint dims,
             struct gl_texture_image *texImage,
             GLenum format, GLenum type, const void *pixels,
@@ -2257,7 +2250,7 @@ st_TexImage(struct gl_context * ctx, GLuint dims,
       return;
 
    /* allocate storage for texture data */
-   if (!ctx->Driver.AllocTextureImageBuffer(ctx, texImage)) {
+   if (!st_AllocTextureImageBuffer(ctx, texImage)) {
       _mesa_error(ctx, GL_OUT_OF_MEMORY, "glTexImage%uD", dims);
       return;
    }
@@ -2296,7 +2289,7 @@ st_try_pbo_compressed_texsubimage(struct gl_context *ctx,
    return success;
 }
 
-static void
+void
 st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
                          struct gl_texture_image *texImage,
                          GLint x, GLint y, GLint z,
@@ -2381,7 +2374,7 @@ st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
 
    buf_offset = buf_offset / addr.bytes_per_pixel;
 
-   buf = st_buffer_object(ctx->Unpack.BufferObj)->buffer;
+   buf = ctx->Unpack.BufferObj->buffer;
 
    addr.xoffset = x / bw;
    addr.yoffset = y / bh;
@@ -2435,7 +2428,7 @@ fallback:
 }
 
 
-static void
+void
 st_CompressedTexImage(struct gl_context *ctx, GLuint dims,
                       struct gl_texture_image *texImage,
                       GLsizei imageSize, const void *data)
@@ -2485,7 +2478,7 @@ st_CompressedTexImage(struct gl_context *ctx, GLuint dims,
  *       texture layouts during texture uploads/downloads, so the blit
  *       we do here should be free in such cases.
  */
-static void
+void
 st_GetTexSubImage(struct gl_context * ctx,
                   GLint xoffset, GLint yoffset, GLint zoffset,
                   GLsizei width, GLsizei height, GLint depth,
@@ -2822,7 +2815,7 @@ st_can_copyteximage_using_blit(const struct gl_texture_image *texImage,
  *
  * Note: srcY=0=Bottom of renderbuffer (GL convention)
  */
-static void
+void
 st_CopyTexSubImage(struct gl_context *ctx, GLuint dims,
                    struct gl_texture_image *texImage,
                    GLint destX, GLint destY, GLint slice,
@@ -3135,7 +3128,8 @@ st_finalize_texture(struct gl_context *ctx,
                                     ptHeight,
                                     ptDepth,
                                     ptLayers, ptNumSamples,
-                                    bindings);
+                                    bindings,
+                                    false);
 
       if (!stObj->pt) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "glTexImage");
@@ -3346,7 +3340,8 @@ st_texture_storage(struct gl_context *ctx,
                                     ptHeight,
                                     ptDepth,
                                     ptLayers, num_samples,
-                                    bindings);
+                                    bindings,
+                                    texObj->IsSparse);
    }
 
    if (!stObj->pt)
@@ -3364,6 +3359,9 @@ st_texture_storage(struct gl_context *ctx,
       }
    }
 
+   /* Update gl_texture_object for texture parameter query. */
+   texObj->NumSparseLevels = stObj->pt->nr_sparse_levels;
+
    /* The texture is in a validated state, so no need to check later. */
    stObj->needs_validation = false;
    stObj->validated_first_level = 0;
@@ -3376,7 +3374,7 @@ st_texture_storage(struct gl_context *ctx,
  * Called via ctx->Driver.AllocTextureStorage() to allocate texture memory
  * for a whole mipmap stack.
  */
-static GLboolean
+GLboolean
 st_AllocTextureStorage(struct gl_context *ctx,
                        struct gl_texture_object *texObj,
                        GLsizei levels, GLsizei width,
@@ -3388,7 +3386,7 @@ st_AllocTextureStorage(struct gl_context *ctx,
 }
 
 
-static GLboolean
+GLboolean
 st_TestProxyTexImage(struct gl_context *ctx, GLenum target,
                      GLuint numLevels, GLint level,
                      mesa_format format, GLuint numSamples,
@@ -3444,7 +3442,7 @@ st_TestProxyTexImage(struct gl_context *ctx, GLenum target,
    }
 }
 
-static GLboolean
+GLboolean
 st_TextureView(struct gl_context *ctx,
                struct gl_texture_object *texObj,
                struct gl_texture_object *origTexObj)
@@ -3534,7 +3532,7 @@ find_mipmap_level(const struct gl_texture_image *texImage,
 }
 
 
-static void
+void
 st_ClearTexSubImage(struct gl_context *ctx,
                     struct gl_texture_image *texImage,
                     GLint xoffset, GLint yoffset, GLint zoffset,
@@ -3594,7 +3592,7 @@ st_ClearTexSubImage(struct gl_context *ctx,
  * Called via the glTexParam*() function, but only when some texture object
  * state has actually changed.
  */
-static void
+void
 st_TexParameter(struct gl_context *ctx,
                 struct gl_texture_object *texObj, GLenum pname)
 {
@@ -3625,7 +3623,7 @@ st_TexParameter(struct gl_context *ctx,
    }
 }
 
-static GLboolean
+GLboolean
 st_SetTextureStorageForMemoryObject(struct gl_context *ctx,
                                     struct gl_texture_object *texObj,
                                     struct gl_memory_object *memObj,
@@ -3638,7 +3636,7 @@ st_SetTextureStorageForMemoryObject(struct gl_context *ctx,
                              memObj, offset);
 }
 
-static GLuint64
+GLuint64
 st_NewTextureHandle(struct gl_context *ctx, struct gl_texture_object *texObj,
                     struct gl_sampler_object *sampObj)
 {
@@ -3665,7 +3663,7 @@ st_NewTextureHandle(struct gl_context *ctx, struct gl_texture_object *texObj,
 }
 
 
-static void
+void
 st_DeleteTextureHandle(struct gl_context *ctx, GLuint64 handle)
 {
    struct st_context *st = st_context(ctx);
@@ -3675,7 +3673,7 @@ st_DeleteTextureHandle(struct gl_context *ctx, GLuint64 handle)
 }
 
 
-static void
+void
 st_MakeTextureHandleResident(struct gl_context *ctx, GLuint64 handle,
                              bool resident)
 {
@@ -3686,7 +3684,7 @@ st_MakeTextureHandleResident(struct gl_context *ctx, GLuint64 handle,
 }
 
 
-static GLuint64
+GLuint64
 st_NewImageHandle(struct gl_context *ctx, struct gl_image_unit *imgObj)
 {
    struct st_context *st = st_context(ctx);
@@ -3699,7 +3697,7 @@ st_NewImageHandle(struct gl_context *ctx, struct gl_image_unit *imgObj)
 }
 
 
-static void
+void
 st_DeleteImageHandle(struct gl_context *ctx, GLuint64 handle)
 {
    struct st_context *st = st_context(ctx);
@@ -3709,7 +3707,7 @@ st_DeleteImageHandle(struct gl_context *ctx, GLuint64 handle)
 }
 
 
-static void
+void
 st_MakeImageHandleResident(struct gl_context *ctx, GLuint64 handle,
                            GLenum access, bool resident)
 {
@@ -3719,50 +3717,36 @@ st_MakeImageHandleResident(struct gl_context *ctx, GLuint64 handle,
    pipe->make_image_handle_resident(pipe, handle, access, resident);
 }
 
+GLboolean
+st_GetSparseTextureVirtualPageSize(struct gl_context *ctx,
+                                   GLenum target, mesa_format format,
+                                   unsigned index, int *x, int *y, int *z)
+{
+   struct st_context *st = st_context(ctx);
+   struct pipe_screen *screen = st->screen;
+   enum pipe_texture_target ptarget = gl_target_to_pipe(target);
+   enum pipe_format pformat = st_mesa_format_to_pipe_format(st, format);
+
+   /* Get an XYZ page size combination specified by index. */
+   return !!screen->get_sparse_texture_virtual_page_size(
+      screen, ptarget, pformat, index, 1, x, y, z);
+}
 
 void
-st_init_texture_functions(struct dd_function_table *functions)
+st_TexturePageCommitment(struct gl_context *ctx,
+                         struct gl_texture_object *tex_obj,
+                         int level, int xoffset, int yoffset, int zoffset,
+                         int width, int height, int depth, bool commit)
 {
-   functions->ChooseTextureFormat = st_ChooseTextureFormat;
-   functions->QueryInternalFormat = st_QueryInternalFormat;
-   functions->TexImage = st_TexImage;
-   functions->TexSubImage = st_TexSubImage;
-   functions->CompressedTexSubImage = st_CompressedTexSubImage;
-   functions->CopyTexSubImage = st_CopyTexSubImage;
-   functions->GenerateMipmap = st_generate_mipmap;
+   struct st_context *st = st_context(ctx);
+   struct pipe_context *pipe = st->pipe;
+   struct st_texture_object *tex = st_texture_object(tex_obj);
+   struct pipe_box box;
 
-   functions->GetTexSubImage = st_GetTexSubImage;
+   u_box_3d(xoffset, yoffset, zoffset, width, height, depth, &box);
 
-   /* compressed texture functions */
-   functions->CompressedTexImage = st_CompressedTexImage;
-
-   functions->NewTextureObject = st_NewTextureObject;
-   functions->NewTextureImage = st_NewTextureImage;
-   functions->DeleteTextureImage = st_DeleteTextureImage;
-   functions->DeleteTexture = st_DeleteTextureObject;
-   functions->TextureRemovedFromShared = st_TextureReleaseAllSamplerViews;
-   functions->AllocTextureImageBuffer = st_AllocTextureImageBuffer;
-   functions->FreeTextureImageBuffer = st_FreeTextureImageBuffer;
-   functions->MapTextureImage = st_MapTextureImage;
-   functions->UnmapTextureImage = st_UnmapTextureImage;
-
-   /* XXX Temporary until we can query pipe's texture sizes */
-   functions->TestProxyTexImage = st_TestProxyTexImage;
-
-   functions->AllocTextureStorage = st_AllocTextureStorage;
-   functions->TextureView = st_TextureView;
-   functions->ClearTexSubImage = st_ClearTexSubImage;
-
-   functions->TexParameter = st_TexParameter;
-
-   /* bindless functions */
-   functions->NewTextureHandle = st_NewTextureHandle;
-   functions->DeleteTextureHandle = st_DeleteTextureHandle;
-   functions->MakeTextureHandleResident = st_MakeTextureHandleResident;
-   functions->NewImageHandle = st_NewImageHandle;
-   functions->DeleteImageHandle = st_DeleteImageHandle;
-   functions->MakeImageHandleResident = st_MakeImageHandleResident;
-
-   /* external object functions */
-   functions->SetTextureStorageForMemoryObject = st_SetTextureStorageForMemoryObject;
+   if (!pipe->resource_commit(pipe, tex->pt, level, &box, commit)) {
+      _mesa_error(ctx, GL_OUT_OF_MEMORY, "glTexPageCommitmentARB(out of memory)");
+      return;
+   }
 }

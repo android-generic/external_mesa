@@ -109,9 +109,8 @@ static void
 crocus_get_device_uuid(struct pipe_screen *pscreen, char *uuid)
 {
    struct crocus_screen *screen = (struct crocus_screen *)pscreen;
-   const struct isl_device *isldev = &screen->isl_dev;
 
-   intel_uuid_compute_device_id((uint8_t *)uuid, isldev, PIPE_UUID_SIZE);
+   intel_uuid_compute_device_id((uint8_t *)uuid, &screen->devinfo, PIPE_UUID_SIZE);
 }
 
 static void
@@ -235,6 +234,7 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_COMPUTE_SHADER_DERIVATIVES:
    case PIPE_CAP_DOUBLES:
    case PIPE_CAP_MEMOBJ:
+   case PIPE_CAP_IMAGE_STORE_FORMATTED:
       return devinfo->ver >= 7;
    case PIPE_CAP_QUERY_BUFFER_OBJECT:
    case PIPE_CAP_ROBUST_BUFFER_ACCESS_BEHAVIOR:
@@ -293,7 +293,11 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    }
    case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
       return 140;
-
+   case PIPE_CAP_CLIP_PLANES:
+      if (devinfo->verx10 < 45)
+         return 6;
+      else
+         return 1; // defaults to MAX (8)
    case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
       /* 3DSTATE_CONSTANT_XS requires the start of UBOs to be 32B aligned */
       return 32;
@@ -350,7 +354,7 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
        * flushing, etc.  That's the big cliff apps will care about.
        */
       const unsigned gpu_mappable_megabytes =
-         (screen->aperture_bytes * 3 / 4) / (1024 * 1024);
+         (screen->aperture_threshold) / (1024 * 1024);
 
       const long system_memory_pages = sysconf(_SC_PHYS_PAGES);
       const long system_page_size = sysconf(_SC_PAGE_SIZE);
@@ -662,7 +666,7 @@ crocus_get_compiler_options(struct pipe_screen *pscreen,
    gl_shader_stage stage = stage_from_pipe(pstage);
    assert(ir == PIPE_SHADER_IR_NIR);
 
-   return screen->compiler->glsl_compiler_options[stage].NirOptions;
+   return screen->compiler->nir_options[stage];
 }
 
 static struct disk_cache *
@@ -727,7 +731,7 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
 
    if (!intel_get_device_info_from_fd(fd, &screen->devinfo))
       return NULL;
-   screen->pci_id = screen->devinfo.chipset_id;
+   screen->pci_id = screen->devinfo.pci_device_id;
 
    if (screen->devinfo.ver > 8)
       return NULL;
@@ -742,6 +746,7 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    p_atomic_set(&screen->refcount, 1);
 
    screen->aperture_bytes = get_aperture_size(fd);
+   screen->aperture_threshold = screen->aperture_bytes * 3 / 4;
 
    driParseConfigFiles(config->options, config->options_info, 0, "crocus",
                        NULL, NULL, NULL, 0, NULL, 0);
@@ -778,9 +783,7 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    screen->compiler = brw_compiler_create(screen, &screen->devinfo);
    screen->compiler->shader_debug_log = crocus_shader_debug_log;
    screen->compiler->shader_perf_log = crocus_shader_perf_log;
-   screen->compiler->supports_pull_constants = false;
    screen->compiler->supports_shader_constants = false;
-   screen->compiler->compact_params = false;
    screen->compiler->constant_buffer_0_is_relative = true;
 
    if (screen->devinfo.ver >= 7) {

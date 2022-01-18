@@ -69,6 +69,7 @@ static const struct test {
    INSTR_6XX(00900000_00000003, "br !p0.x, #3"),
    INSTR_6XX(03820000_00000015, "shps #21"), /* emit */
    INSTR_6XX(04021000_00000000, "(ss)shpe"), /* cut */
+   INSTR_6XX(02220000_00000004, "getlast.w8 #4"),
    INSTR_6XX(02820000_00000014, "getone #20"), /* kill p0.x */
    INSTR_6XX(00906020_00000007, "brao !p0.x, !p0.y, #7"),
    INSTR_6XX(00804040_00000003, "braa p0.x, p0.y, #3"),
@@ -126,9 +127,20 @@ static const struct test {
    INSTR_6XX(63820005_10315030, "mad.f32 r1.y, (neg)c12.x, r1.x, c12.y"),
    INSTR_6XX(62050009_00091000, "mad.u24 r2.y, c0.x, r2.z, r2.y"),
    INSTR_6XX(61828008_00081033, "madsh.m16 r2.x, c12.w, r1.y, r2.x"),
-   INSTR_6XX(65900820_100cb008, "(nop3) shlg.b16 hr8.x, 8, hr8.x, 12"), /* (nop3) shlg.b16 hr8.x, (r)8, (r)hr8.x, 12; */
-   INSTR_6XX(65ae085c_0002a001, "(nop3) shlg.b16 hr23.x, hr0.y, hr23.x, hr0.z"), /* not seen in blob */
-   INSTR_6XX(65900820_0c0aac05, "(nop3) shlg.b16 hr8.x, hc<a0.x + 5>, hr8.x, hc<a0.x + 10>"), /* not seen in blob */
+   INSTR_6XX(65900820_100cb008, "(nop3) shlg hr8.x, 8, hr8.x, 12"), /* (nop3) shlg.b16 hr8.x, (r)8, (r)hr8.x, 12; */
+   INSTR_6XX(65ae085c_0002a001, "(nop3) shlg hr23.x, hr0.y, hr23.x, hr0.z"), /* not seen in blob */
+   INSTR_6XX(65900820_0c0aac05, "(nop3) shlg hr8.x, hc<a0.x + 5>, hr8.x, hc<a0.x + 10>"), /* not seen in blob */
+   INSTR_6XX(65ae0c5c_0002a001, "(nop3) shlg r23.x, r0.y, r23.x, r0.z"), /* (nop3) shlg.b32 r23.x, (r)r0.y, (r)r23.x, r0.z */
+   INSTR_6XX(64018802_0002e003, "(nop3) shrm hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
+   INSTR_6XX(64818802_0002e003, "(nop3) shlm hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
+   INSTR_6XX(65018802_0002e003, "(nop3) shrg hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
+   INSTR_6XX(66018802_0002e003, "(nop3) andg hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
+   INSTR_6XX(67018802_1002e003, "(nop3) wmm hr0.z, (neg)hr0.w, hr0.w, 2"), /* (nop3) wmm.f16f16 hr0.z, (abs)(r)hr0.w, (r)hr0.w, 2 */
+   INSTR_6XX(67018c02_1002e003, "(nop3) wmm.accu hr0.z, (neg)hr0.w, hr0.w, 2"),
+   INSTR_6XX(6701c802_9002a003, "(nop3) wmm r0.z, r0.w, r0.w, 2"), /* (nop3) wmm.f32f32 r0.z, (r)r0.w, (r)r0.w, 2 */
+   /* custom test with qcom_dot8 function from cl_qcom_dot_product8 */
+   INSTR_6XX(66818c02_0002e003, "(sat)(nop3) dp2acc.mixed.low r0.z, r0.w, r0.w, r0.z"), /* (nop3) dp2acc (sat)r0.z, (signed)(low)(r)r0.w, (low)(r)r0.w, r0.z */
+   INSTR_6XX(6681c802_8002a003, "(nop3) dp4acc.unsigned.low r0.z, r0.w, r0.w, (neg)r0.z"), /* (nop3) dp4acc r0.z, (unsigned)(r)r0.w, (r)r0.w, (neg)r0.z */
 
    /* cat4 */
    INSTR_6XX(8010000a_00000003, "rcp r2.z, r0.w"),
@@ -156,6 +168,13 @@ static const struct test {
    INSTR_6XX(a0c81108_e2000001, "sam.base0 (f32)(x)r2.x, r0.x, s#16, a1.x"),
    INSTR_6XX(a048d107_cc080a07, "isaml.base3 (s32)(x)r1.w, r0.w, r1.y, s#0, t#6"),
 
+
+   /* dEQP-VK.subgroups.arithmetic.compute.subgroupadd_float */
+   INSTR_6XX(a7c03102_00100003, "brcst.active.w8 (u32)(x)r0.z, r0.y"), /* brcst.active.w8 (u32)(xOOO)r0.z, r0.y */
+   /* dEQP-VK.subgroups.quad.graphics.subgroupquadbroadcast_int */
+   INSTR_6XX(b7e03107_00000401, "(sy)quad_shuffle.brcst (u32)(x)r1.w, r0.x, r0.z"), /* (sy)quad_shuffle.brcst (u32)(xOOO)r1.w, r0.x, r0.z */
+   /* dEQP-VK.subgroups.quad.graphics.subgroupquadswapdiagonal_int */
+   INSTR_6XX(b7e03104_00180001, "(sy)quad_shuffle.diag (u32)(x)r1.x, r0.x"), /* (sy)quad_shuffle.diag (u32)(xOOO)r1.x, r0.x */
 
    /* cat6 */
 
@@ -373,6 +392,9 @@ static const struct test {
    INSTR_6XX(d0360c04_02640b80, "(sy)atomic.b.add.typed.2d.u32.1.nonuniform.base0 r1.x, r0.z, r1.z"),
    /* dEQP-VK.descriptor_indexing.sampler */
    INSTR_6XX(a0c81f00_40000005, "sam.s2en.nonuniform.base0 (f32)(xyzw)r0.x, r0.z, r0.x"),
+
+   /* dEQP-VK.subgroups.quad.graphics.subgroupquadbroadcast_int */
+   INSTR_6XX(c0260001_00c98000, "getfiberid.u32 r0.y"),
 
    /* Custom test since we've never seen the blob emit these. */
    INSTR_6XX(c0260004_00490000, "getspid.u32 r1.x"),

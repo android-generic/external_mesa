@@ -746,6 +746,34 @@ lower_bit_size_callback(const nir_instr *instr, UNUSED void *data)
    }
 }
 
+/* On gfx12.5+, if the offsets are not both constant and in the {-8,7} range,
+ * we will have nir_lower_tex() lower the source offset by returning true from
+ * this filter function.
+ */
+static bool
+lower_xehp_tg4_offset_filter(const nir_instr *instr, UNUSED const void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+   if (tex->op != nir_texop_tg4)
+      return false;
+
+   int offset_index = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (offset_index < 0)
+      return false;
+
+   if (!nir_src_is_const(tex->src[offset_index].src))
+      return true;
+
+   int64_t offset_x = nir_src_comp_as_int(tex->src[offset_index].src, 0);
+   int64_t offset_y = nir_src_comp_as_int(tex->src[offset_index].src, 1);
+
+   return offset_x < -8 || offset_x > 7 || offset_y < -8 || offset_y > 7;
+}
+
 /* Does some simple lowering and runs the standard suite of optimizations
  *
  * This is intended to be called more-or-less directly after you get the
@@ -792,6 +820,8 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
       .lower_txd_offset_clamp = true,
       .lower_tg4_offsets = true,
       .lower_txs_lod = true, /* Wa_14012320009 */
+      .lower_offset_filter =
+         devinfo->verx10 >= 125 ? lower_xehp_tg4_offset_filter : NULL,
    };
 
    OPT(nir_lower_tex, &tex_options);
@@ -921,12 +951,18 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
    NIR_PASS_V(producer, nir_opt_combine_stores, nir_var_shader_out);
    NIR_PASS_V(consumer, nir_lower_io_to_vector, nir_var_shader_in);
 
-   if (producer->info.stage != MESA_SHADER_TESS_CTRL) {
+   if (producer->info.stage != MESA_SHADER_TESS_CTRL &&
+       producer->info.stage != MESA_SHADER_MESH &&
+       producer->info.stage != MESA_SHADER_TASK) {
       /* Calling lower_io_to_vector creates output variable writes with
        * write-masks.  On non-TCS outputs, the back-end can't handle it and we
        * need to call nir_lower_io_to_temporaries to get rid of them.  This,
        * in turn, creates temporary variables and extra copy_deref intrinsics
        * that we need to clean up.
+       *
+       * Note Mesh/Task don't support I/O as temporaries (I/O is shared
+       * between whole workgroup, possibly using multiple HW threads). For
+       * those write-mask in output is handled by I/O lowering.
        */
       NIR_PASS_V(producer, nir_lower_io_to_temporaries,
                  nir_shader_get_entrypoint(producer), true, false);
@@ -1217,16 +1253,6 @@ brw_nir_apply_sampler_key(nir_shader *nir,
       tex_options.saturate_s = key_tex->gl_clamp_mask[0];
       tex_options.saturate_t = key_tex->gl_clamp_mask[1];
       tex_options.saturate_r = key_tex->gl_clamp_mask[2];
-   }
-
-   /* Prior to Haswell, we have to fake texture swizzle */
-   for (unsigned s = 0; s < MAX_SAMPLERS; s++) {
-      if (key_tex->swizzles[s] == SWIZZLE_NOOP)
-         continue;
-
-      tex_options.swizzle_result |= BITFIELD_BIT(s);
-      for (unsigned c = 0; c < 4; c++)
-         tex_options.swizzles[s][c] = GET_SWZ(key_tex->swizzles[s], c);
    }
 
    /* Prior to Haswell, we have to lower gradients on shadow samplers */
@@ -1528,4 +1554,50 @@ brw_nir_create_passthrough_tcs(void *mem_ctx, const struct brw_compiler *compile
    brw_preprocess_nir(compiler, nir, NULL);
 
    return nir;
+}
+
+nir_ssa_def *
+brw_nir_load_global_const(nir_builder *b, nir_intrinsic_instr *load_uniform,
+      nir_ssa_def *base_addr, unsigned off)
+{
+   assert(load_uniform->intrinsic == nir_intrinsic_load_uniform);
+   assert(load_uniform->dest.is_ssa);
+   assert(load_uniform->src[0].is_ssa);
+
+   unsigned bit_size = load_uniform->dest.ssa.bit_size;
+   assert(bit_size >= 8 && bit_size % 8 == 0);
+   unsigned byte_size = bit_size / 8;
+   nir_ssa_def *sysval;
+
+   if (nir_src_is_const(load_uniform->src[0])) {
+      uint64_t offset = off +
+                        nir_intrinsic_base(load_uniform) +
+                        nir_src_as_uint(load_uniform->src[0]);
+
+      /* Things should be component-aligned. */
+      assert(offset % byte_size == 0);
+
+      unsigned suboffset = offset % 64;
+      uint64_t aligned_offset = offset - suboffset;
+
+      /* Load two just in case we go over a 64B boundary */
+      nir_ssa_def *data[2];
+      for (unsigned i = 0; i < 2; i++) {
+         nir_ssa_def *addr = nir_iadd_imm(b, base_addr, aligned_offset + i * 64);
+         data[i] = nir_load_global_const_block_intel(b, 16, addr,
+                                                     nir_imm_true(b));
+      }
+
+      sysval = nir_extract_bits(b, data, 2, suboffset * 8,
+                                load_uniform->num_components, bit_size);
+   } else {
+      nir_ssa_def *offset32 =
+         nir_iadd_imm(b, load_uniform->src[0].ssa,
+                         off + nir_intrinsic_base(load_uniform));
+      nir_ssa_def *addr = nir_iadd(b, base_addr, nir_u2u64(b, offset32));
+      sysval = nir_load_global_constant(b, addr, byte_size,
+                                        load_uniform->num_components, bit_size);
+   }
+
+   return sysval;
 }

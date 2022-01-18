@@ -63,6 +63,7 @@ radv_mutable_descriptor_type_size_alignment(const VkMutableDescriptorTypeListVAL
       case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
       case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
       case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+      case VK_DESCRIPTOR_TYPE_SAMPLER:
          size = 16;
          align = 16;
          break;
@@ -495,11 +496,16 @@ radv_CreatePipelineLayout(VkDevice _device, const VkPipelineLayoutCreateInfo *pC
       layout->set[set].layout = set_layout;
 
       layout->set[set].dynamic_offset_start = dynamic_offset_count;
+      layout->set[set].dynamic_offset_count = 0;
+      layout->set[set].dynamic_offset_stages = 0;
 
       for (uint32_t b = 0; b < set_layout->binding_count; b++) {
-         dynamic_offset_count += set_layout->binding[b].array_size * set_layout->binding[b].dynamic_offset_count;
-         dynamic_shader_stages |= set_layout->dynamic_shader_stages;
+         layout->set[set].dynamic_offset_count +=
+            set_layout->binding[b].array_size * set_layout->binding[b].dynamic_offset_count;
+         layout->set[set].dynamic_offset_stages |= set_layout->dynamic_shader_stages;
       }
+      dynamic_offset_count += layout->set[set].dynamic_offset_count;
+      dynamic_shader_stages |= layout->set[set].dynamic_offset_stages;
 
       /* Hash the entire set layout except for the vk_object_base. The
        * rest of the set layout is carefully constructed to not have
@@ -721,8 +727,8 @@ radv_CreateDescriptorPool(VkDevice _device, const VkDescriptorPoolCreateInfo *pC
    {
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_INLINE_UNIFORM_BLOCK_CREATE_INFO_EXT: {
-         const struct VkDescriptorPoolInlineUniformBlockCreateInfoEXT *info =
-            (const struct VkDescriptorPoolInlineUniformBlockCreateInfoEXT *)ext;
+         const VkDescriptorPoolInlineUniformBlockCreateInfoEXT *info =
+            (const VkDescriptorPoolInlineUniformBlockCreateInfoEXT *)ext;
          /* the sizes are 4 aligned, and we need to align to at
           * most 32, which needs at most 28 bytes extra per
           * binding. */
@@ -1277,8 +1283,10 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
          dst_ptr += dst_binding_layout->size / 4;
 
          if (src_binding_layout->type != VK_DESCRIPTOR_TYPE_SAMPLER &&
-             src_binding_layout->type != VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
-            /* Sampler descriptors don't have a buffer list. */
+             dst_binding_layout->type != VK_DESCRIPTOR_TYPE_SAMPLER &&
+             src_binding_layout->type != VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR &&
+             dst_binding_layout->type != VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
+            /* Sampler/acceleration structure descriptors don't have a buffer list. */
             dst_buffer_list[j] = src_buffer_list[j];
          }
       }

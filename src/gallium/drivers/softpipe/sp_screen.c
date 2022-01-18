@@ -75,6 +75,7 @@ softpipe_get_name(struct pipe_screen *screen)
 }
 
 static const nir_shader_compiler_options sp_compiler_options = {
+   .fdot_replicates = true,
    .fuse_ffma32 = true,
    .fuse_ffma64 = true,
    .lower_extract_byte = true,
@@ -289,7 +290,6 @@ softpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_COPY_BETWEEN_COMPRESSED_AND_PLAIN_FORMATS:
    case PIPE_CAP_TGSI_ARRAY_COMPONENTS:
    case PIPE_CAP_TGSI_TEXCOORD:
-   case PIPE_CAP_TGSI_ANY_REG_AS_ADDRESS:
       return 1;
    case PIPE_CAP_CLEAR_TEXTURE:
       return 1;
@@ -306,6 +306,8 @@ softpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
       return 1 << 27;
    case PIPE_CAP_SHADER_BUFFER_OFFSET_ALIGNMENT:
       return 4;
+   case PIPE_CAP_IMAGE_STORE_FORMATTED:
+      return 1;
    default:
       return u_pipe_screen_get_param_defaults(screen, param);
    }

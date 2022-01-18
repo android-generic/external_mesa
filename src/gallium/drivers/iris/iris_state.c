@@ -96,20 +96,24 @@
 #include "util/u_upload_mgr.h"
 #include "util/u_viewport.h"
 #include "util/u_memory.h"
+#include "util/u_trace_gallium.h"
 #include "drm-uapi/i915_drm.h"
 #include "nir.h"
 #include "intel/compiler/brw_compiler.h"
 #include "intel/common/intel_aux_map.h"
 #include "intel/common/intel_l3_config.h"
 #include "intel/common/intel_sample_positions.h"
+#include "intel/ds/intel_tracepoints.h"
 #include "iris_batch.h"
 #include "iris_context.h"
 #include "iris_defines.h"
 #include "iris_pipe.h"
 #include "iris_resource.h"
+#include "iris_utrace.h"
 
 #include "iris_genx_macros.h"
 #include "intel/common/intel_guardband.h"
+#include "intel/common/intel_pixel_hash.h"
 
 /**
  * Statically assert that PIPE_* enums match the hardware packets.
@@ -449,12 +453,20 @@ flush_after_state_base_change(struct iris_batch *batch)
     * sufficient.  The theory here is that all of the sampling/rendering
     * units cache the binding table in the texture cache.  However, we have
     * yet to be able to actually confirm this.
+    *
+    * Wa_14013910100:
+    *
+    *  "DG2 128/256/512-A/B: S/W must program STATE_BASE_ADDRESS command twice
+    *   or program pipe control with Instruction cache invalidate post
+    *   STATE_BASE_ADDRESS command"
     */
    iris_emit_end_of_pipe_sync(batch,
                               "change STATE_BASE_ADDRESS (invalidates)",
                               PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE |
                               PIPE_CONTROL_CONST_CACHE_INVALIDATE |
-                              PIPE_CONTROL_STATE_CACHE_INVALIDATE);
+                              PIPE_CONTROL_STATE_CACHE_INVALIDATE |
+                              (GFX_VERx10 != 125 ? 0 :
+                               PIPE_CONTROL_INSTRUCTION_INVALIDATE));
 }
 
 static void
@@ -787,57 +799,20 @@ iris_enable_obj_preemption(struct iris_batch *batch, bool enable)
 }
 #endif
 
-/**
- * Compute an \p n x \p m pixel hashing table usable as slice, subslice or
- * pixel pipe hashing table.  The resulting table is the cyclic repetition of
- * a fixed pattern with periodicity equal to \p period.
- *
- * If \p index is specified to be equal to \p period, a 2-way hashing table
- * will be generated such that indices 0 and 1 are returned for the following
- * fractions of entries respectively:
- *
- *   p_0 = ceil(period / 2) / period
- *   p_1 = floor(period / 2) / period
- *
- * If \p index is even and less than \p period, a 3-way hashing table will be
- * generated such that indices 0, 1 and 2 are returned for the following
- * fractions of entries:
- *
- *   p_0 = (ceil(period / 2) - 1) / period
- *   p_1 = floor(period / 2) / period
- *   p_2 = 1 / period
- *
- * The equations above apply if \p flip is equal to 0, if it is equal to 1 p_0
- * and p_1 will be swapped for the result.  Note that in the context of pixel
- * pipe hashing this can be always 0 on Gfx12 platforms, since the hardware
- * transparently remaps logical indices found on the table to physical pixel
- * pipe indices from the highest to lowest EU count.
- */
-UNUSED static void
-calculate_pixel_hashing_table(unsigned n, unsigned m,
-                              unsigned period, unsigned index, bool flip,
-                              uint32_t *p)
+static void
+upload_pixel_hashing_tables(struct iris_batch *batch)
 {
-   for (unsigned i = 0; i < n; i++) {
-      for (unsigned j = 0; j < m; j++) {
-         const unsigned k = (i + j) % period;
-         p[j + m * i] = (k == index ? 2 : (k & 1) ^ flip);
-      }
-   }
-}
+   UNUSED const struct intel_device_info *devinfo = &batch->screen->devinfo;
+   UNUSED struct iris_context *ice = batch->ice;
+   assert(&ice->batches[IRIS_BATCH_RENDER] == batch);
 
 #if GFX_VER == 11
-static void
-gfx11_upload_pixel_hashing_tables(struct iris_batch *batch)
-{
-   const struct intel_device_info *devinfo = &batch->screen->devinfo;
-   assert(devinfo->ppipe_subslices[2] == 0);
+   /* Gfx11 hardware has two pixel pipes at most. */
+   for (unsigned i = 2; i < ARRAY_SIZE(devinfo->ppipe_subslices); i++)
+      assert(devinfo->ppipe_subslices[i] == 0);
 
    if (devinfo->ppipe_subslices[0] == devinfo->ppipe_subslices[1])
       return;
-
-   struct iris_context *ice = batch->ice;
-   assert(&ice->batches[IRIS_BATCH_RENDER] == batch);
 
    unsigned size = GENX(SLICE_HASH_TABLE_length) * 4;
    uint32_t hash_address;
@@ -849,7 +824,7 @@ gfx11_upload_pixel_hashing_tables(struct iris_batch *batch)
 
    const bool flip = devinfo->ppipe_subslices[0] < devinfo->ppipe_subslices[1];
    struct GENX(SLICE_HASH_TABLE) table;
-   calculate_pixel_hashing_table(16, 16, 3, 3, flip, table.Entry[0]);
+   intel_compute_pixel_hash_table_3way(16, 16, 3, 3, flip, table.Entry[0]);
 
    GENX(SLICE_HASH_TABLE_pack)(NULL, map, &table);
 
@@ -861,24 +836,21 @@ gfx11_upload_pixel_hashing_tables(struct iris_batch *batch)
    iris_emit_cmd(batch, GENX(3DSTATE_3D_MODE), mode) {
       mode.SliceHashingTableEnable = true;
    }
-}
+
 #elif GFX_VERx10 == 120
-static void
-gfx12_upload_pixel_hashing_tables(struct iris_batch *batch)
-{
-   const struct intel_device_info *devinfo = &batch->screen->devinfo;
    /* For each n calculate ppipes_of[n], equal to the number of pixel pipes
     * present with n active dual subslices.
     */
    unsigned ppipes_of[3] = {};
 
    for (unsigned n = 0; n < ARRAY_SIZE(ppipes_of); n++) {
-      for (unsigned p = 0; p < ARRAY_SIZE(devinfo->ppipe_subslices); p++)
+      for (unsigned p = 0; p < 3; p++)
          ppipes_of[n] += (devinfo->ppipe_subslices[p] == n);
    }
 
    /* Gfx12 has three pixel pipes. */
-   assert(ppipes_of[0] + ppipes_of[1] + ppipes_of[2] == 3);
+   for (unsigned p = 3; p < ARRAY_SIZE(devinfo->ppipe_subslices); p++)
+      assert(devinfo->ppipe_subslices[p] == 0);
 
    if (ppipes_of[2] == 3 || ppipes_of[0] == 2) {
       /* All three pixel pipes have the maximum number of active dual
@@ -891,16 +863,16 @@ gfx12_upload_pixel_hashing_tables(struct iris_batch *batch)
       p.SliceHashControl[0] = TABLE_0;
 
       if (ppipes_of[2] == 2 && ppipes_of[0] == 1)
-         calculate_pixel_hashing_table(8, 16, 2, 2, 0, p.TwoWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 2, 2, 0, p.TwoWayTableEntry[0]);
       else if (ppipes_of[2] == 1 && ppipes_of[1] == 1 && ppipes_of[0] == 1)
-         calculate_pixel_hashing_table(8, 16, 3, 3, 0, p.TwoWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 3, 3, 0, p.TwoWayTableEntry[0]);
 
       if (ppipes_of[2] == 2 && ppipes_of[1] == 1)
-         calculate_pixel_hashing_table(8, 16, 5, 4, 0, p.ThreeWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 5, 4, 0, p.ThreeWayTableEntry[0]);
       else if (ppipes_of[2] == 2 && ppipes_of[0] == 1)
-         calculate_pixel_hashing_table(8, 16, 2, 2, 0, p.ThreeWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 2, 2, 0, p.ThreeWayTableEntry[0]);
       else if (ppipes_of[2] == 1 && ppipes_of[1] == 1 && ppipes_of[0] == 1)
-         calculate_pixel_hashing_table(8, 16, 3, 3, 0, p.ThreeWayTableEntry[0]);
+         intel_compute_pixel_hash_table_3way(8, 16, 3, 3, 0, p.ThreeWayTableEntry[0]);
       else
          unreachable("Illegal fusing.");
    }
@@ -909,8 +881,73 @@ gfx12_upload_pixel_hashing_tables(struct iris_batch *batch)
       p.SubsliceHashingTableEnable = true;
       p.SubsliceHashingTableEnableMask = true;
    }
-}
+
+#elif GFX_VERx10 == 125
+   struct pipe_screen *pscreen = &batch->screen->base;
+   const unsigned size = GENX(SLICE_HASH_TABLE_length) * 4;
+   const struct pipe_resource tmpl = {
+     .target = PIPE_BUFFER,
+     .format = PIPE_FORMAT_R8_UNORM,
+     .bind = PIPE_BIND_CUSTOM,
+     .usage = PIPE_USAGE_IMMUTABLE,
+     .flags = IRIS_RESOURCE_FLAG_DYNAMIC_MEMZONE,
+     .width0 = size,
+     .height0 = 1,
+     .depth0 = 1,
+     .array_size = 1
+   };
+
+   pipe_resource_reference(&ice->state.pixel_hashing_tables, NULL);
+   ice->state.pixel_hashing_tables = pscreen->resource_create(pscreen, &tmpl);
+
+   struct iris_resource *res = (struct iris_resource *)ice->state.pixel_hashing_tables;
+   struct pipe_transfer *transfer = NULL;
+   uint32_t *map = pipe_buffer_map_range(&ice->ctx, ice->state.pixel_hashing_tables,
+                                         0, size, PIPE_MAP_WRITE,
+                                         &transfer);
+
+   uint32_t ppipe_mask = 0;
+   for (unsigned p = 0; p < ARRAY_SIZE(devinfo->ppipe_subslices); p++) {
+      if (devinfo->ppipe_subslices[p])
+         ppipe_mask |= (1u << p);
+   }
+   assert(ppipe_mask);
+
+   struct GENX(SLICE_HASH_TABLE) table;
+
+   /* Note that the hardware expects an array with 7 tables, each
+    * table is intended to specify the pixel pipe hashing behavior for
+    * every possible slice count between 2 and 8, however that doesn't
+    * actually work, among other reasons due to hardware bugs that
+    * will cause the GPU to erroneously access the table at the wrong
+    * index in some cases, so in practice all 7 tables need to be
+    * initialized to the same value.
+    */
+   for (unsigned i = 0; i < 7; i++)
+     intel_compute_pixel_hash_table_nway(16, 16, ppipe_mask, table.Entry[i][0]);
+
+   GENX(SLICE_HASH_TABLE_pack)(NULL, map, &table);
+
+   pipe_buffer_unmap(&ice->ctx, transfer);
+
+   iris_use_pinned_bo(batch, res->bo, false, IRIS_DOMAIN_NONE);
+   iris_record_state_size(batch->state_sizes, res->bo->address + res->offset, size);
+
+   iris_emit_cmd(batch, GENX(3DSTATE_SLICE_TABLE_STATE_POINTERS), ptr) {
+      ptr.SliceHashStatePointerValid = true;
+      ptr.SliceHashTableStatePointer = iris_bo_offset_from_base_address(res->bo) +
+                                       res->offset;
+   }
+
+   iris_emit_cmd(batch, GENX(3DSTATE_3D_MODE), mode) {
+      mode.SliceHashingTableEnable = true;
+      mode.SliceHashingTableEnableMask = true;
+      mode.CrossSliceHashingMode = (util_bitcount(ppipe_mask) > 1 ?
+                                    hashing32x32 : NormalMode);
+      mode.CrossSliceHashingModeMask = -1;
+   }
 #endif
+}
 
 static void
 iris_alloc_push_constants(struct iris_batch *batch)
@@ -939,6 +976,20 @@ iris_alloc_push_constants(struct iris_batch *batch)
          alloc.ConstantBufferSize = i == MESA_SHADER_FRAGMENT ? frag_size : stage_size;
       }
    }
+
+#if GFX_VERx10 == 125
+   /* Wa_22011440098
+    *
+    * In 3D mode, after programming push constant alloc command immediately
+    * program push constant command(ZERO length) without any commit between
+    * them.
+    */
+   if (intel_device_info_is_dg2(devinfo)) {
+      iris_emit_cmd(batch, GENX(3DSTATE_CONSTANT_ALL), c) {
+         c.MOCS = iris_mocs(NULL, &batch->screen->isl_dev, 0);
+      }
+   }
+#endif
 }
 
 #if GFX_VER >= 12
@@ -1032,13 +1083,9 @@ iris_init_render_context(struct iris_batch *batch)
          reg.DisableRepackingforCompressionMask = true;
       }
    }
-
-   gfx11_upload_pixel_hashing_tables(batch);
 #endif
 
-#if GFX_VERx10 == 120
-   gfx12_upload_pixel_hashing_tables(batch);
-#endif
+   upload_pixel_hashing_tables(batch);
 
    /* 3DSTATE_DRAWING_RECTANGLE is non-pipelined, so we want to avoid
     * changing it dynamically.  We set it to the maximum size here, and
@@ -4288,8 +4335,6 @@ iris_populate_fs_key(const struct iris_context *ice,
    key->force_dual_color_blend =
       screen->driconf.dual_color_blend_by_location &&
       (blend->blend_enables & 1) && blend->dual_color_blending;
-
-   /* TODO: Respect glHint for key->high_quality_derivatives */
 }
 
 static void
@@ -4523,7 +4568,9 @@ iris_store_fs_state(const struct intel_device_info *devinfo,
       ps.VectorMaskEnable = true;
       ps.BindingTableEntryCount = shader->bt.size_bytes / 4;
       ps.FloatingPointMode = prog_data->use_alt_mode;
-      ps.MaximumNumberofThreadsPerPSD = 64 - (GFX_VER == 8 ? 2 : 1);
+      ps.MaximumNumberofThreadsPerPSD = (GFX_VERx10 >= 125 ? 96 - 1 :
+                                         GFX_VER == 8 ? 64 - 2 :
+                                         64 - 1);
 
       ps.PushConstantEnable = prog_data->ubo_ranges[0].length > 0;
 
@@ -5270,6 +5317,13 @@ iris_restore_render_saved_bos(struct iris_context *ice,
                             IRIS_DOMAIN_VF_READ);
       }
    }
+
+#if GFX_VERx10 == 125
+   iris_use_pinned_bo(batch, iris_resource_bo(ice->state.pixel_hashing_tables),
+                      false, IRIS_DOMAIN_NONE);
+#else
+   assert(!ice->state.pixel_hashing_tables);
+#endif
 }
 
 static void
@@ -5374,6 +5428,17 @@ iris_update_surface_base_address(struct iris_batch *batch,
    if (batch->name == IRIS_BATCH_COMPUTE)
       emit_pipeline_select(batch, GPGPU);
 #endif
+
+   if (GFX_VERx10 >= 125) {
+      iris_emit_cmd(batch, GENX(3DSTATE_BINDING_TABLE_POOL_ALLOC), btpa) {
+         btpa.BindingTablePoolBaseAddress = ro_bo(binder->bo, 0);
+         btpa.BindingTablePoolBufferSize = IRIS_BINDER_SIZE / 4096;
+#if GFX_VERx10 < 125
+         btpa.BindingTablePoolEnable = true;
+#endif
+         btpa.MOCS = mocs;
+      }
+   }
 
    flush_after_state_base_change(batch);
    iris_batch_sync_region_end(batch);
@@ -5922,6 +5987,9 @@ iris_upload_dirty_render_state(struct iris_context *ice,
                                    PIPE_CONTROL_STALL_AT_SCOREBOARD);
    }
 
+   if (dirty & IRIS_DIRTY_RENDER_BUFFER)
+      trace_framebuffer_state(&batch->trace, batch, &ice->state.framebuffer);
+
    for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
       if (stage_dirty & (IRIS_STAGE_DIRTY_BINDINGS_VS << stage)) {
          iris_populate_binding_table(ice, batch, stage, false);
@@ -6107,6 +6175,15 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       }
 
       if ((dirty & IRIS_DIRTY_SO_DECL_LIST) && ice->state.streamout) {
+         /* Wa_16011773973:
+          * If SOL is enabled and SO_DECL state has to be programmed,
+          *    1. Send 3D State SOL state with SOL disabled
+          *    2. Send SO_DECL NP state
+          *    3. Send 3D State SOL with SOL Enabled
+          */
+         if (intel_device_info_is_dg2(&batch->screen->devinfo))
+            iris_emit_cmd(batch, GENX(3DSTATE_STREAMOUT), sol);
+
          uint32_t *decl_list =
             ice->state.streamout + GENX(3DSTATE_STREAMOUT_length);
          iris_batch_emit(batch, decl_list, 4 * ((decl_list[0] & 0xff) + 2));
@@ -6331,6 +6408,8 @@ iris_upload_dirty_render_state(struct iris_context *ice,
           * post-sync = store dword operation would be required.( w/a is to
           * have an additional pipe control after the stencil state whenever
           * the surface state bits of this state is changing).
+          *
+          * This also seems sufficient to handle Wa_14014148106.
           */
          iris_emit_pipe_control_write(batch, "WA for stencil state",
                                       PIPE_CONTROL_WRITE_IMMEDIATE,
@@ -6618,6 +6697,9 @@ iris_upload_dirty_render_state(struct iris_context *ice,
             ice->shaders.prog[MESA_SHADER_TESS_EVAL] != NULL ? RR_STRICT :
                                                                RR_FREE;
          vfg.DistributionGranularity = BatchLevelGranularity;
+         /* Wa_14014890652 */
+         if (intel_device_info_is_dg2(&batch->screen->devinfo))
+            vfg.GranularityThresholdDisable = 1;
          vfg.ListCutIndexEnable = draw->primitive_restart;
          /* 192 vertices for TRILIST_ADJ */
          vfg.ListNBatchSizeScale = 0;
@@ -6679,6 +6761,8 @@ iris_upload_render_state(struct iris_context *ice,
                          const struct pipe_draw_start_count_bias *sc)
 {
    bool use_predicate = ice->state.predicate == IRIS_PREDICATE_STATE_USE_BIT;
+
+   trace_intel_begin_draw(&batch->trace, batch);
 
    if (ice->state.dirty & IRIS_DIRTY_VERTEX_BUFFER_FLUSHES)
       flush_vbos(ice, batch);
@@ -6914,6 +6998,8 @@ iris_upload_render_state(struct iris_context *ice,
    }
 
    iris_batch_sync_region_end(batch);
+
+   trace_intel_end_draw(&batch->trace, batch, 0);
 }
 
 static void
@@ -6958,6 +7044,8 @@ iris_upload_compute_walker(struct iris_context *ice,
    const struct brw_cs_dispatch_info dispatch =
       brw_cs_get_dispatch_info(devinfo, cs_prog_data, grid->block);
 
+   trace_intel_begin_compute(&batch->trace, batch);
+
    if (stage_dirty & IRIS_STAGE_DIRTY_CS) {
       iris_emit_cmd(batch, GENX(CFE_STATE), cfe) {
          cfe.MaximumNumberofThreads =
@@ -6997,6 +7085,7 @@ iris_upload_compute_walker(struct iris_context *ice,
       assert(brw_cs_push_const_total_size(cs_prog_data, dispatch.threads) == 0);
    }
 
+   trace_intel_end_compute(&batch->trace, batch, grid->grid[0], grid->grid[1], grid->grid[2]);
 }
 
 #else /* #if GFX_VERx10 >= 125 */
@@ -7019,6 +7108,8 @@ iris_upload_gpgpu_walker(struct iris_context *ice,
    struct brw_cs_prog_data *cs_prog_data = (void *) prog_data;
    const struct brw_cs_dispatch_info dispatch =
       brw_cs_get_dispatch_info(devinfo, cs_prog_data, grid->block);
+
+   trace_intel_begin_compute(&batch->trace, batch);
 
    if ((stage_dirty & IRIS_STAGE_DIRTY_CS) ||
        cs_prog_data->local_size[0] == 0 /* Variable local group size */) {
@@ -7144,6 +7235,8 @@ iris_upload_gpgpu_walker(struct iris_context *ice,
    }
 
    iris_emit_cmd(batch, GENX(MEDIA_STATE_FLUSH), msf);
+
+   trace_intel_end_compute(&batch->trace, batch, grid->grid[0], grid->grid[1], grid->grid[2]);
 }
 
 #endif /* #if GFX_VERx10 >= 125 */
@@ -7212,6 +7305,8 @@ static void
 iris_destroy_state(struct iris_context *ice)
 {
    struct iris_genx_state *genx = ice->state.genx;
+
+   pipe_resource_reference(&ice->state.pixel_hashing_tables, NULL);
 
    pipe_resource_reference(&ice->draw.draw_params.res, NULL);
    pipe_resource_reference(&ice->draw.derived_draw_params.res, NULL);
@@ -7847,7 +7942,7 @@ iris_emit_raw_pipe_control(struct iris_batch *batch,
 
    if (INTEL_DEBUG(DEBUG_PIPE_CONTROL)) {
       fprintf(stderr,
-              "  PC [%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%"PRIx64"]: %s\n",
+              "  PC [%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%"PRIx64"]: %s\n",
               (flags & PIPE_CONTROL_FLUSH_ENABLE) ? "PipeCon " : "",
               (flags & PIPE_CONTROL_CS_STALL) ? "CS " : "",
               (flags & PIPE_CONTROL_STALL_AT_SCOREBOARD) ? "Scoreboard " : "",
@@ -7872,13 +7967,23 @@ iris_emit_raw_pipe_control(struct iris_batch *batch,
               (flags & PIPE_CONTROL_WRITE_DEPTH_COUNT) ? "WriteZCount " : "",
               (flags & PIPE_CONTROL_WRITE_TIMESTAMP) ? "WriteTimestamp " : "",
               (flags & PIPE_CONTROL_FLUSH_HDC) ? "HDC " : "",
+              (flags & PIPE_CONTROL_PSS_STALL_SYNC) ? "PSS " : "",
               imm, reason);
    }
 
    batch_mark_sync_for_pipe_control(batch, flags);
    iris_batch_sync_region_start(batch);
 
+   const bool trace_pc =
+      (flags & (PIPE_CONTROL_CACHE_FLUSH_BITS | PIPE_CONTROL_CACHE_INVALIDATE_BITS)) != 0;
+
+   if (trace_pc)
+      trace_intel_begin_stall(&batch->trace, batch);
+
    iris_emit_cmd(batch, GENX(PIPE_CONTROL), pc) {
+#if GFX_VERx10 >= 125
+      pc.PSSStallSyncEnable = flags & PIPE_CONTROL_PSS_STALL_SYNC;
+#endif
 #if GFX_VER >= 12
       pc.TileCacheFlushEnable = flags & PIPE_CONTROL_TILE_CACHE_FLUSH;
 #endif
@@ -7914,6 +8019,12 @@ iris_emit_raw_pipe_control(struct iris_batch *batch,
          flags & PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE;
       pc.Address = rw_bo(bo, offset, IRIS_DOMAIN_OTHER_WRITE);
       pc.ImmediateData = imm;
+   }
+
+   if (trace_pc) {
+      trace_intel_end_stall(&batch->trace, batch, flags,
+                            iris_utrace_pipe_flush_bit_to_ds_stall_flag,
+                            reason);
    }
 
    iris_batch_sync_region_end(batch);

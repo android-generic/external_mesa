@@ -495,6 +495,7 @@ _mesa_glsl_parse_state::process_version_directive(YYLTYPE *locp, int version,
       this->language_version = version;
 
    this->compat_shader = compat_token_present ||
+                         this->ctx->Const.ForceCompatShaders ||
                          (this->ctx->API == API_OPENGL_COMPAT &&
                           this->language_version == 140) ||
                          (!this->es_shader && this->language_version < 140);
@@ -2315,9 +2316,10 @@ _mesa_glsl_compile_shader(struct gl_context *ctx, struct gl_shader *shader,
    delete state->symbols;
    ralloc_free(state);
 
-   if (ctx->Cache && shader->CompileStatus == COMPILE_SUCCESS) {
+   if (shader->CompileStatus == COMPILE_SUCCESS)
       memcpy(shader->compiled_source_sha1, source_sha1, SHA1_DIGEST_LENGTH);
 
+   if (ctx->Cache && shader->CompileStatus == COMPILE_SUCCESS) {
       char sha1_buf[41];
       disk_cache_put_key(ctx->Cache, shader->disk_cache_sha1);
       if (ctx->_Shader->Flags & GLSL_CACHE_INFO) {
@@ -2386,10 +2388,6 @@ do_common_optimization(exec_list *ir, bool linked,
    if (options->OptimizeForAOS && !linked)
       OPT(opt_flip_matrices, ir);
 
-   if (linked && options->OptimizeForAOS) {
-      OPT(do_vectorize, ir);
-   }
-
    if (linked)
       OPT(do_dead_code, ir, uniform_locations_assigned);
    else
@@ -2424,8 +2422,6 @@ do_common_optimization(exec_list *ir, bool linked,
    if (array_split)
       do_constant_propagation(ir);
    progress |= array_split;
-
-   OPT(optimize_redundant_jumps, ir);
 
    if (options->MaxUnrollIterations) {
       loop_state *ls = analyze_loop_variables(ir);

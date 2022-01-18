@@ -37,7 +37,7 @@ build_nir_fs(void)
    const struct glsl_type *vec4 = glsl_vec4_type();
    nir_variable *f_color; /* vec4, fragment output color */
 
-   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, NULL, "meta_resolve_fs");
+   nir_builder b = radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_resolve_fs");
 
    f_color = nir_variable_create(b.shader, nir_var_shader_out, vec4, "f_color");
    f_color->data.location = FRAG_RESULT_DATA0;
@@ -728,9 +728,9 @@ radv_cmd_buffer_resolve_subpass_hw(struct radv_cmd_buffer *cmd_buffer)
 
       emit_resolve(cmd_buffer, src_img, dst_img, dest_iview->vk_format, &(VkOffset2D){0, 0},
                    &(VkExtent2D){fb->width, fb->height});
-   }
 
-   radv_cmd_buffer_restore_subpass(cmd_buffer, subpass);
+      radv_cmd_buffer_restore_subpass(cmd_buffer, subpass);
+   }
 
    radv_meta_restore(&saved_state, cmd_buffer);
 }
@@ -945,7 +945,7 @@ radv_decompress_resolve_src(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
       };
    }
 
-   struct VkDependencyInfoKHR dep_info = {
+   VkDependencyInfoKHR dep_info = {
       .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR,
       .imageMemoryBarrierCount = 1,
       .pImageMemoryBarriers = &barrier,

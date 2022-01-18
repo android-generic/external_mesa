@@ -495,8 +495,14 @@ radv_device_init_meta(struct radv_device *device)
    if (result != VK_SUCCESS)
       goto fail_fmask_copy;
 
+   result = radv_device_init_meta_etc_decode_state(device, on_demand);
+   if (result != VK_SUCCESS)
+      goto fail_etc_decode;
+
    return VK_SUCCESS;
 
+fail_etc_decode:
+   radv_device_finish_meta_fmask_copy_state(device);
 fail_fmask_copy:
    radv_device_finish_accel_struct_build_state(device);
 fail_accel_struct_build:
@@ -532,6 +538,7 @@ fail_clear:
 void
 radv_device_finish_meta(struct radv_device *device)
 {
+   radv_device_finish_meta_etc_decode_state(device);
    radv_device_finish_accel_struct_build_state(device);
    radv_device_finish_meta_clear_state(device);
    radv_device_finish_meta_resolve_state(device);
@@ -552,6 +559,24 @@ radv_device_finish_meta(struct radv_device *device)
    radv_store_meta_pipeline(device);
    radv_pipeline_cache_finish(&device->meta_state.cache);
    mtx_destroy(&device->meta_state.mtx);
+}
+
+nir_builder PRINTFLIKE(2, 3) radv_meta_init_shader(gl_shader_stage stage, const char *name, ...)
+{
+   nir_builder b = nir_builder_init_simple_shader(stage, NULL, NULL);
+   if (name) {
+      va_list args;
+      va_start(args, name);
+      b.shader->info.name = ralloc_vasprintf(b.shader, name, args);
+      va_end(args);
+   }
+
+   b.shader->info.internal = true;
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   return b;
 }
 
 nir_ssa_def *
@@ -594,7 +619,7 @@ radv_meta_build_nir_vs_generate_vertices(void)
 
    nir_variable *v_position;
 
-   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, NULL, "meta_vs_gen_verts");
+   nir_builder b = radv_meta_init_shader(MESA_SHADER_VERTEX, "meta_vs_gen_verts");
 
    nir_ssa_def *outvec = radv_meta_gen_rect_vertices(&b);
 
@@ -609,9 +634,7 @@ radv_meta_build_nir_vs_generate_vertices(void)
 nir_shader *
 radv_meta_build_nir_fs_noop(void)
 {
-   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, NULL, "meta_noop_fs");
-
-   return b.shader;
+   return radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_noop_fs").shader;
 }
 
 void

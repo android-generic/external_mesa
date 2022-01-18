@@ -29,23 +29,25 @@ def src_decl_list(num_srcs):
    return ', '.join('nir_ssa_def *src' + str(i) for i in range(num_srcs))
 
 def src_list(num_srcs):
-   if num_srcs <= 4:
-      return ', '.join('src' + str(i) if i < num_srcs else 'NULL' for i in range(4))
-   else:
-      return ', '.join('src' + str(i) for i in range(num_srcs))
+   return ', '.join('src' + str(i) for i in range(num_srcs))
+
+def needs_num_components(opcode):
+   return "replicated" in opcode.name
 %>
 
 % for name, opcode in sorted(opcodes.items()):
+% if not needs_num_components(opcode):
 static inline nir_ssa_def *
 nir_${name}(nir_builder *build, ${src_decl_list(opcode.num_inputs)})
 {
 % if opcode.num_inputs <= 4:
-   return nir_build_alu(build, nir_op_${name}, ${src_list(opcode.num_inputs)});
+   return nir_build_alu${opcode.num_inputs}(build, nir_op_${name}, ${src_list(opcode.num_inputs)});
 % else:
    nir_ssa_def *srcs[${opcode.num_inputs}] = {${src_list(opcode.num_inputs)}};
    return nir_build_alu_src_arr(build, nir_op_${name}, srcs);
 % endif
 }
+% endif
 % endfor
 
 % for name, opcode in sorted(INTR_OPCODES.items()):

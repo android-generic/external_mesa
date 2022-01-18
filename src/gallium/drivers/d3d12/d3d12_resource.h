@@ -35,6 +35,8 @@ struct pipe_screen;
 enum d3d12_resource_binding_type {
    D3D12_RESOURCE_BINDING_TYPE_SRV,
    D3D12_RESOURCE_BINDING_TYPE_CBV,
+   D3D12_RESOURCE_BINDING_TYPE_SSBO,
+   D3D12_RESOURCE_BINDING_TYPE_IMAGE,
    D3D12_RESOURCE_BINDING_TYPES
 };
 
@@ -42,6 +44,7 @@ struct d3d12_resource {
    struct threaded_resource base;
    struct d3d12_bo *bo;
    DXGI_FORMAT dxgi_format;
+   enum pipe_format overall_format;
    unsigned mip_levels;
    struct sw_displaytarget *dt;
    unsigned dt_stride;
@@ -54,6 +57,8 @@ struct d3d12_transfer {
    struct threaded_transfer base;
    struct pipe_resource *staging_res;
    void *data;
+   unsigned zs_cpu_copy_stride;
+   unsigned zs_cpu_copy_layer_stride;
 };
 
 static inline struct d3d12_resource *
@@ -103,6 +108,7 @@ static inline bool
 d3d12_subresource_id_uses_layer(enum pipe_texture_target target)
 {
    return target == PIPE_TEXTURE_CUBE ||
+          target == PIPE_TEXTURE_CUBE_ARRAY ||
           target == PIPE_TEXTURE_1D_ARRAY ||
           target == PIPE_TEXTURE_2D_ARRAY;
 }

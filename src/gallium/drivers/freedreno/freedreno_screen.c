@@ -144,6 +144,9 @@ fd_screen_destroy(struct pipe_screen *pscreen)
 {
    struct fd_screen *screen = fd_screen(pscreen);
 
+   if (screen->tess_bo)
+      fd_bo_del(screen->tess_bo);
+
    if (screen->pipe)
       fd_pipe_del(screen->pipe);
 
@@ -265,6 +268,7 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return !fd_screen_get_param(pscreen, PIPE_CAP_TEXTURE_MULTISAMPLE);
 
    case PIPE_CAP_TEXTURE_MULTISAMPLE:
+   case PIPE_CAP_IMAGE_STORE_FORMATTED:
       return is_a5xx(screen) || is_a6xx(screen);
 
    case PIPE_CAP_SURFACE_SAMPLE_COUNT:
@@ -330,11 +334,8 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
          return 120;
 
    case PIPE_CAP_ESSL_FEATURE_LEVEL:
-      /* we can probably enable 320 for a5xx too, but need to test: */
-      if (is_a6xx(screen))
+      if (is_a5xx(screen) || is_a6xx(screen))
          return 320;
-      if (is_a5xx(screen))
-         return 310;
       if (is_ir3(screen))
          return 300;
       return 120;
@@ -508,9 +509,16 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 0xFFFFFFFF;
    case PIPE_CAP_ACCELERATED:
       return 1;
-   case PIPE_CAP_VIDEO_MEMORY:
-      DBG("FINISHME: The value returned is incorrect\n");
-      return 10;
+
+   case PIPE_CAP_VIDEO_MEMORY: {
+      uint64_t system_memory;
+
+      if (!os_get_total_physical_memory(&system_memory))
+         return 0;
+
+      return (int)(system_memory >> 20);
+   }
+
    case PIPE_CAP_UMA:
       return 1;
    case PIPE_CAP_MEMOBJ:
@@ -723,6 +731,8 @@ fd_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
    if (!has_compute(screen))
       return 0;
 
+   struct ir3_compiler *compiler = screen->compiler;
+
 #define RET(x)                                                                 \
    do {                                                                        \
       if (ret)                                                                 \
@@ -779,7 +789,7 @@ fd_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
       RET((uint32_t[]){32}); // TODO
 
    case PIPE_COMPUTE_CAP_MAX_VARIABLE_THREADS_PER_BLOCK:
-      RET((uint64_t[]){1024}); // TODO
+      RET((uint64_t[]){ compiler->max_variable_workgroup_size });
    }
 
    return 0;

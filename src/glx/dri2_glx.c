@@ -309,7 +309,8 @@ dri2DestroyDrawable(__GLXDRIdrawable *base)
 
 static __GLXDRIdrawable *
 dri2CreateDrawable(struct glx_screen *base, XID xDrawable,
-		   GLXDrawable drawable, struct glx_config *config_base)
+                   GLXDrawable drawable, int type,
+                   struct glx_config *config_base)
 {
    struct dri2_drawable *pdraw;
    struct dri2_screen *psc = (struct dri2_screen *) base;
@@ -709,7 +710,7 @@ static void show_fps(struct dri2_drawable *draw)
    struct timeval tv;
    uint64_t current_time;
 
-   gettimeofday(&tv, 0);
+   gettimeofday(&tv, NULL);
    current_time = (uint64_t)tv.tv_sec*1000000 + (uint64_t)tv.tv_usec;
 
    draw->frames++;

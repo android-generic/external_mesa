@@ -49,7 +49,7 @@ enum ir3_driver_param {
    IR3_DP_BASE_GROUP_X = 4,
    IR3_DP_BASE_GROUP_Y = 5,
    IR3_DP_BASE_GROUP_Z = 6,
-   IR3_DP_SUBGROUP_SIZE = 7,
+   IR3_DP_CS_SUBGROUP_SIZE = 7,
    IR3_DP_LOCAL_GROUP_SIZE_X = 8,
    IR3_DP_LOCAL_GROUP_SIZE_Y = 9,
    IR3_DP_LOCAL_GROUP_SIZE_Z = 10,
@@ -70,7 +70,10 @@ enum ir3_driver_param {
    IR3_DP_UCP0_X = 4,
    /* .... */
    IR3_DP_UCP7_W = 35,
-   IR3_DP_VS_COUNT = 36 /* must be aligned to vec4 */
+   IR3_DP_VS_COUNT = 36, /* must be aligned to vec4 */
+
+   /* fragment shader driver params: */
+   IR3_DP_FS_SUBGROUP_SIZE = 0,
 };
 
 #define IR3_MAX_SHADER_BUFFERS  32
@@ -90,6 +93,13 @@ enum ir3_bary {
    IJ_LINEAR_CENTROID,
    IJ_LINEAR_SAMPLE,
    IJ_COUNT,
+};
+
+/* Description of what wavesizes are allowed. */
+enum ir3_wavesize_option {
+   IR3_SINGLE_ONLY,
+   IR3_SINGLE_OR_DOUBLE,
+   IR3_DOUBLE_ONLY,
 };
 
 /**
@@ -299,8 +309,8 @@ struct ir3_shader_key {
           * topology the TES uses, which the TCS needs to know.
           */
 #define IR3_TESS_NONE      0
-#define IR3_TESS_TRIANGLES 1
-#define IR3_TESS_QUADS     2
+#define IR3_TESS_QUADS     1
+#define IR3_TESS_TRIANGLES 2
 #define IR3_TESS_ISOLINES  3
          unsigned tessellation : 2;
 
@@ -344,6 +354,22 @@ ir3_tess_mode(unsigned gl_tess_mode)
       return IR3_TESS_TRIANGLES;
    case GL_QUADS:
       return IR3_TESS_QUADS;
+   default:
+      unreachable("bad tessmode");
+   }
+}
+
+static inline uint32_t
+ir3_tess_factor_stride(unsigned patch_type)
+{
+   /* note: this matches the stride used by ir3's build_tessfactor_base */
+   switch (patch_type) {
+   case IR3_TESS_ISOLINES:
+      return 12;
+   case IR3_TESS_TRIANGLES:
+      return 20;
+   case IR3_TESS_QUADS:
+      return 28;
    default:
       unreachable("bad tessmode");
    }
@@ -522,7 +548,6 @@ struct ir3_shader_variant {
     */
    unsigned branchstack;
 
-   unsigned max_sun;
    unsigned loops;
 
    /* the instructions length is in units of instruction groups
@@ -681,6 +706,9 @@ struct ir3_shader_variant {
    uint16_t local_size[3];
    bool local_size_variable;
 
+   /* Important for compute shader to determine max reg footprint */
+   bool has_barrier;
+
    struct ir3_disasm_info disasm_info;
 };
 
@@ -738,6 +766,17 @@ struct ir3_shader {
    struct ir3_compiler *compiler;
 
    unsigned num_reserved_user_consts;
+
+   /* What API-visible wavesizes are allowed. Even if only double wavesize is
+    * allowed, we may still use the smaller wavesize "under the hood" and the
+    * application simply sees the upper half as always disabled.
+    */
+   enum ir3_wavesize_option api_wavesize;
+
+   /* What wavesizes we're allowed to actually use. If the API wavesize is
+    * single-only, then this must be single-only too.
+    */
+   enum ir3_wavesize_option real_wavesize;
 
    bool nir_finalized;
    struct nir_shader *nir;
@@ -801,9 +840,15 @@ struct ir3_shader_variant *
 ir3_shader_get_variant(struct ir3_shader *shader,
                        const struct ir3_shader_key *key, bool binning_pass,
                        bool keep_ir, bool *created);
+
+struct ir3_shader_options {
+   unsigned reserved_user_consts;
+   enum ir3_wavesize_option api_wavesize, real_wavesize;
+};
+
 struct ir3_shader *
 ir3_shader_from_nir(struct ir3_compiler *compiler, nir_shader *nir,
-                    unsigned reserved_user_consts,
+                    const struct ir3_shader_options *options,
                     struct ir3_stream_output_info *stream_output);
 uint32_t ir3_trim_constlen(struct ir3_shader_variant **variants,
                            const struct ir3_compiler *compiler);

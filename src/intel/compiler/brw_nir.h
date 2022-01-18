@@ -27,6 +27,7 @@
 #include "brw_reg.h"
 #include "compiler/nir/nir.h"
 #include "brw_compiler.h"
+#include "nir_builder.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -101,9 +102,6 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
 
 bool brw_nir_lower_cs_intrinsics(nir_shader *nir);
 bool brw_nir_lower_alpha_to_coverage(nir_shader *shader);
-void brw_nir_lower_legacy_clipping(nir_shader *nir,
-                                   int nr_userclip_plane_consts,
-                                   struct brw_stage_prog_data *prog_data);
 void brw_nir_lower_vs_inputs(nir_shader *nir,
                              bool edgeflag_is_last,
                              const uint8_t *vs_attrib_wa_flags);
@@ -191,6 +189,10 @@ nir_shader *brw_nir_create_passthrough_tcs(void *mem_ctx,
 
 bool brw_nir_move_interpolation_to_top(nir_shader *nir);
 bool brw_nir_demote_sample_qualifiers(nir_shader *nir);
+nir_ssa_def *brw_nir_load_global_const(nir_builder *b,
+                                       nir_intrinsic_instr *load_uniform,
+                                       nir_ssa_def *base_addr,
+                                       unsigned off);
 
 #ifdef __cplusplus
 }

@@ -135,19 +135,18 @@ struct wsi_device {
 
    /* Signals the semaphore such that any wait on the semaphore will wait on
     * any reads or writes on the give memory object.  This is used to
-    * implement the semaphore signal operation in vkAcquireNextImage.
+    * implement the semaphore signal operation in vkAcquireNextImage.  This
+    * requires the driver to implement vk_device::create_sync_for_memory.
     */
-   void (*signal_semaphore_for_memory)(VkDevice device,
-                                       VkSemaphore semaphore,
-                                       VkDeviceMemory memory);
+   bool signal_semaphore_with_memory;
 
    /* Signals the fence such that any wait on the fence will wait on any reads
     * or writes on the give memory object.  This is used to implement the
-    * semaphore signal operation in vkAcquireNextImage.
+    * semaphore signal operation in vkAcquireNextImage.  This requires the
+    * driver to implement vk_device::create_sync_for_memory.  The resulting
+    * vk_sync must support CPU waits.
     */
-   void (*signal_fence_for_memory)(VkDevice device,
-                                   VkFence fence,
-                                   VkDeviceMemory memory);
+   bool signal_fence_with_memory;
 
    /*
     * This sets the ownership for a WSI memory object:
@@ -171,6 +170,12 @@ struct wsi_device {
     */
    bool (*can_present_on_device)(VkPhysicalDevice pdevice, int fd);
 
+   /*
+    * A driver can implement this callback to return a special queue to execute
+    * prime blits.
+    */
+   VkQueue (*get_prime_blit_queue)(VkDevice device);
+
 #define WSI_CB(cb) PFN_vk##cb cb
    WSI_CB(AllocateMemory);
    WSI_CB(AllocateCommandBuffers);
@@ -182,10 +187,12 @@ struct wsi_device {
    WSI_CB(CreateCommandPool);
    WSI_CB(CreateFence);
    WSI_CB(CreateImage);
+   WSI_CB(CreateSemaphore);
    WSI_CB(DestroyBuffer);
    WSI_CB(DestroyCommandPool);
    WSI_CB(DestroyFence);
    WSI_CB(DestroyImage);
+   WSI_CB(DestroySemaphore);
    WSI_CB(EndCommandBuffer);
    WSI_CB(FreeMemory);
    WSI_CB(FreeCommandBuffers);
@@ -250,6 +257,9 @@ VkResult
 wsi_common_get_images(VkSwapchainKHR _swapchain,
                       uint32_t *pSwapchainImageCount,
                       VkImage *pSwapchainImages);
+
+VkImage
+wsi_common_get_image(VkSwapchainKHR _swapchain, uint32_t index);
 
 VkResult
 wsi_common_acquire_next_image2(const struct wsi_device *wsi,

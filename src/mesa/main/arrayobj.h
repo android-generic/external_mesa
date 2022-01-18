@@ -100,15 +100,6 @@ _mesa_set_vao_immutable(struct gl_context *ctx,
                         struct gl_vertex_array_object *vao);
 
 
-/* Returns true if all varying arrays reside in vbos */
-extern bool
-_mesa_all_varyings_in_vbos(const struct gl_vertex_array_object *vao);
-
-/* Returns true if all vbos are unmapped */
-extern bool
-_mesa_all_buffers_are_unmapped(const struct gl_vertex_array_object *vao);
-
-
 extern void
 _mesa_vao_map_arrays(struct gl_context *ctx, struct gl_vertex_array_object *vao,
                      GLbitfield access);
@@ -347,40 +338,6 @@ _mesa_draw_edge_flag_array_enabled(const struct gl_context *ctx)
    return ctx->Array._DrawVAOEnabledAttribs & VERT_BIT_EDGEFLAG;
 }
 
-
-/*
- * API functions
- */
-
-
-void GLAPIENTRY
-_mesa_BindVertexArray_no_error(GLuint id);
-
-void GLAPIENTRY _mesa_BindVertexArray( GLuint id );
-
-void GLAPIENTRY
-_mesa_DeleteVertexArrays_no_error(GLsizei n, const GLuint *ids);
-
-void GLAPIENTRY _mesa_DeleteVertexArrays(GLsizei n, const GLuint *ids);
-
-void GLAPIENTRY
-_mesa_GenVertexArrays_no_error(GLsizei n, GLuint *arrays);
-
-void GLAPIENTRY _mesa_GenVertexArrays(GLsizei n, GLuint *arrays);
-
-void GLAPIENTRY
-_mesa_CreateVertexArrays_no_error(GLsizei n, GLuint *arrays);
-
-void GLAPIENTRY _mesa_CreateVertexArrays(GLsizei n, GLuint *arrays);
-
-GLboolean GLAPIENTRY _mesa_IsVertexArray( GLuint id );
-
-void GLAPIENTRY
-_mesa_VertexArrayElementBuffer_no_error(GLuint vaobj, GLuint buffer);
-
-void GLAPIENTRY _mesa_VertexArrayElementBuffer(GLuint vaobj, GLuint buffer);
-
-void GLAPIENTRY _mesa_GetVertexArrayiv(GLuint vaobj, GLenum pname, GLint *param);
 
 #ifdef __cplusplus
 }

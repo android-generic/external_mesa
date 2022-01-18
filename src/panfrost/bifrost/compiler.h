@@ -356,7 +356,7 @@ bi_is_word_equiv(bi_index left, bi_index right)
 }
 
 #define BI_MAX_DESTS 2
-#define BI_MAX_SRCS 4
+#define BI_MAX_SRCS 5
 
 typedef struct {
         /* Must be first */
@@ -497,6 +497,12 @@ typedef struct {
         };
 } bi_instr;
 
+static inline bool
+bi_is_staging_src(bi_instr *I, unsigned s)
+{
+        return (s == 0 || s == 4) && bi_opcode_props[I->op].sr_read;
+}
+
 /* Represents the assignment of slots for a given bi_tuple */
 
 typedef struct {
@@ -619,15 +625,37 @@ typedef struct bi_block {
         uint8_t pass_flags;
 } bi_block;
 
+/* Subset of pan_shader_info needed per-variant, in order to support IDVS */
+struct bi_shader_info {
+        struct panfrost_ubo_push *push;
+        struct bifrost_shader_info *bifrost;
+        struct panfrost_sysvals *sysvals;
+        unsigned tls_size;
+        unsigned work_reg_count;
+};
+
+/* State of index-driven vertex shading for current shader */
+enum bi_idvs_mode {
+        /* IDVS not in use */
+        BI_IDVS_NONE = 0,
+
+        /* IDVS in use. Compiling a position shader */
+        BI_IDVS_POSITION = 1,
+
+        /* IDVS in use. Compiling a varying shader */
+        BI_IDVS_VARYING = 2,
+};
+
 typedef struct {
        const struct panfrost_compile_inputs *inputs;
        nir_shader *nir;
-       struct pan_shader_info *info;
+       struct bi_shader_info info;
        gl_shader_stage stage;
        struct list_head blocks; /* list of bi_block */
        struct hash_table_u64 *sysval_to_id;
        uint32_t quirks;
        unsigned arch;
+       enum bi_idvs_mode idvs;
 
        /* During NIR->BIR */
        bi_block *current_block;
@@ -711,6 +739,19 @@ bi_temp_reg(bi_context *ctx)
         return bi_get_index(ctx->reg_alloc++, true, 0);
 }
 
+/* NIR booleans are 1-bit (0/1). For now, backend IR booleans are N-bit
+ * (0/~0) where N depends on the context. This requires us to sign-extend
+ * when converting constants from NIR to the backend IR.
+ */
+static inline uint32_t
+bi_extend_constant(uint32_t constant, unsigned bit_size)
+{
+        if (bit_size == 1 && constant != 0)
+                return ~0;
+        else
+                return constant;
+}
+
 /* Inline constants automatically, will be lowered out by bi_lower_fau where a
  * constant is not allowed. load_const_to_scalar gaurantees that this makes
  * sense */
@@ -718,11 +759,13 @@ bi_temp_reg(bi_context *ctx)
 static inline bi_index
 bi_src_index(nir_src *src)
 {
-        if (nir_src_is_const(*src) && nir_src_bit_size(*src) <= 32)
-                return bi_imm_u32(nir_src_as_uint(*src));
-        else if (src->is_ssa)
+        if (nir_src_is_const(*src) && nir_src_bit_size(*src) <= 32) {
+                uint32_t v = nir_src_as_uint(*src);
+
+                return bi_imm_u32(bi_extend_constant(v, nir_src_bit_size(*src)));
+        } else if (src->is_ssa) {
                 return bi_get_index(src->ssa->index, false, 0);
-        else {
+        } else {
                 assert(!src->reg.indirect);
                 return bi_get_index(src->reg.reg->index, true, 0);
         }

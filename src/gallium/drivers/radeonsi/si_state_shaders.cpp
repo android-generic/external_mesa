@@ -22,7 +22,7 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "ac_exp_param.h"
+#include "ac_nir.h"
 #include "ac_shader_util.h"
 #include "compiler/nir/nir_serialize.h"
 #include "nir/tgsi_to_nir.h"
@@ -52,13 +52,87 @@ unsigned si_determine_wave_size(struct si_screen *sscreen, struct si_shader *sha
        (stage == MESA_SHADER_GEOMETRY && !shader->key.ge.as_ngg))
       return 64;
 
-   if (stage == MESA_SHADER_COMPUTE)
-      return sscreen->debug_flags & DBG(W32_CS) ? 32 : 64;
+   /* Small workgroups use Wave32 unconditionally. */
+   if (stage == MESA_SHADER_COMPUTE && info &&
+       !info->base.workgroup_size_variable &&
+       info->base.workgroup_size[0] *
+       info->base.workgroup_size[1] *
+       info->base.workgroup_size[2] <= 32)
+      return 32;
 
-   if (stage == MESA_SHADER_FRAGMENT)
-      return sscreen->debug_flags & DBG(W32_PS) ? 32 : 64;
+   /* Debug flags. */
+   unsigned dbg_wave_size = 0;
+   if (sscreen->debug_flags &
+       (stage == MESA_SHADER_COMPUTE ? DBG(W32_CS) :
+        stage == MESA_SHADER_FRAGMENT ? DBG(W32_PS) | DBG(W32_PS_DISCARD) : DBG(W32_GE)))
+      dbg_wave_size = 32;
 
-   return sscreen->debug_flags & DBG(W32_GE) ? 32 : 64;
+   if (sscreen->debug_flags &
+       (stage == MESA_SHADER_COMPUTE ? DBG(W64_CS) :
+        stage == MESA_SHADER_FRAGMENT ? DBG(W64_PS) : DBG(W64_GE))) {
+      assert(!dbg_wave_size);
+      dbg_wave_size = 64;
+   }
+
+   /* Shader profiles. */
+   unsigned profile_wave_size = 0;
+   if (info && info->options & SI_PROFILE_WAVE32)
+      profile_wave_size = 32;
+
+   if (info && info->options & SI_PROFILE_WAVE64) {
+      assert(!profile_wave_size);
+      profile_wave_size = 64;
+   }
+
+   if (profile_wave_size) {
+      /* Only debug flags override shader profiles. */
+      if (dbg_wave_size)
+         return dbg_wave_size;
+
+      return profile_wave_size;
+   }
+
+   /* LLVM 13 and 14 have a bug that causes compile failures with discard in Wave32
+    * in some cases. Alpha test in Wave32 is luckily unaffected.
+    */
+   if (stage == MESA_SHADER_FRAGMENT && info->base.fs.uses_discard &&
+       !(info && info->options & SI_PROFILE_IGNORE_LLVM_DISCARD_BUG) &&
+       LLVM_VERSION_MAJOR >= 13 && !(sscreen->debug_flags & DBG(W32_PS_DISCARD)))
+      return 64;
+
+   /* Debug flags except w32psdiscard don't override the discard bug workaround,
+    * but they override everything else.
+    */
+   if (dbg_wave_size)
+      return dbg_wave_size;
+
+   /* Pixel shaders without interp instructions don't suffer from reduced interpolation
+    * performance in Wave32, so use Wave32. This helps Piano and Voloplosion.
+    */
+   if (stage == MESA_SHADER_FRAGMENT && !info->num_inputs)
+      return 32;
+
+   /* There are a few very rare cases where VS is better with Wave32, and there are no known
+    * cases where Wave64 is better.
+    */
+   if (stage <= MESA_SHADER_GEOMETRY)
+      return 32;
+
+   /* TODO: Merged shaders must use the same wave size because the driver doesn't recompile
+    * individual shaders of merged shaders to match the wave size between them.
+    */
+   bool merged_shader = shader && !shader->is_gs_copy_shader &&
+                        (shader->key.ge.as_ls || shader->key.ge.as_es ||
+                         stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_GEOMETRY);
+
+   /* Divergent loops in Wave64 can end up having too many iterations in one half of the wave
+    * while the other half is idling but occupying VGPRs, preventing other waves from launching.
+    * Wave32 eliminates the idling half to allow the next wave to start.
+    */
+   if (!merged_shader && info && info->has_divergent_loop)
+      return 32;
+
+   return 64;
 }
 
 /* SHADER_CACHE */
@@ -107,6 +181,8 @@ void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
     */
    if (sel->screen->use_ngg_culling)
       shader_variant_flags |= 1 << 4;
+   if (sel->screen->record_llvm_ir)
+      shader_variant_flags |= 1 << 5;
 
    /* bit gap */
 
@@ -184,7 +260,7 @@ static uint32_t *read_chunk(uint32_t *ptr, void **data, unsigned *size)
  * Return the shader binary in a buffer. The first 4 bytes contain its size
  * as integer.
  */
-static void *si_get_shader_binary(struct si_shader *shader)
+static uint32_t *si_get_shader_binary(struct si_shader *shader)
 {
    /* There is always a size of data followed by the data itself. */
    unsigned llvm_ir_size =
@@ -199,8 +275,8 @@ static void *si_get_shader_binary(struct si_shader *shader)
                    4 + /* CRC32 of the data below */
                    align(sizeof(shader->config), 4) + align(sizeof(shader->info), 4) + 4 +
                    align(shader->binary.elf_size, 4) + 4 + align(llvm_ir_size, 4);
-   void *buffer = CALLOC(1, size);
-   uint32_t *ptr = (uint32_t *)buffer;
+   uint32_t *buffer = (uint32_t*)CALLOC(1, size);
+   uint32_t *ptr = buffer;
 
    if (!buffer)
       return NULL;
@@ -215,7 +291,7 @@ static void *si_get_shader_binary(struct si_shader *shader)
    assert((char *)ptr - (char *)buffer == (ptrdiff_t)size);
 
    /* Compute CRC32. */
-   ptr = (uint32_t *)buffer;
+   ptr = buffer;
    ptr++;
    *ptr = util_hash_crc32(ptr + 1, size - 8);
 
@@ -241,6 +317,29 @@ static bool si_load_shader_binary(struct si_shader *shader, void *binary)
    shader->binary.elf_size = elf_size;
    ptr = read_chunk(ptr, (void **)&shader->binary.llvm_ir_string, &chunk_size);
 
+   if (!shader->is_gs_copy_shader &&
+       shader->selector->info.stage == MESA_SHADER_GEOMETRY && !shader->key.ge.as_ngg) {
+      shader->gs_copy_shader = CALLOC_STRUCT(si_shader);
+      if (!shader->gs_copy_shader)
+         return false;
+
+      shader->gs_copy_shader->is_gs_copy_shader = true;
+
+      if (!si_load_shader_binary(shader->gs_copy_shader, (uint8_t*)binary + size)) {
+         FREE(shader->gs_copy_shader);
+         shader->gs_copy_shader = NULL;
+         return false;
+      }
+
+      util_queue_fence_init(&shader->gs_copy_shader->ready);
+      shader->gs_copy_shader->selector = shader->selector;
+      shader->gs_copy_shader->is_gs_copy_shader = true;
+      shader->gs_copy_shader->wave_size =
+         si_determine_wave_size(shader->selector->screen, shader->gs_copy_shader);
+
+      si_shader_binary_upload(shader->selector->screen, shader->gs_copy_shader, 0);
+   }
+
    return true;
 }
 
@@ -251,7 +350,7 @@ static bool si_load_shader_binary(struct si_shader *shader, void *binary)
 void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[20],
                                    struct si_shader *shader, bool insert_into_disk_cache)
 {
-   void *hw_binary;
+   uint32_t *hw_binary;
    struct hash_entry *entry;
    uint8_t key[CACHE_KEY_SIZE];
    bool memory_cache_full = sscreen->shader_cache_size >= sscreen->shader_cache_max_size;
@@ -267,6 +366,31 @@ void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_s
    if (!hw_binary)
       return;
 
+   unsigned size = *hw_binary;
+
+   if (shader->selector->info.stage == MESA_SHADER_GEOMETRY && !shader->key.ge.as_ngg) {
+      uint32_t *gs_copy_binary = si_get_shader_binary(shader->gs_copy_shader);
+      if (!gs_copy_binary) {
+         FREE(hw_binary);
+         return;
+      }
+
+      /* Combine both binaries. */
+      size += *gs_copy_binary;
+      uint32_t *combined_binary = (uint32_t*)MALLOC(size);
+      if (!combined_binary) {
+         FREE(hw_binary);
+         FREE(gs_copy_binary);
+         return;
+      }
+
+      memcpy(combined_binary, hw_binary, *hw_binary);
+      memcpy(combined_binary + *hw_binary / 4, gs_copy_binary, *gs_copy_binary);
+      FREE(hw_binary);
+      FREE(gs_copy_binary);
+      hw_binary = combined_binary;
+   }
+
    if (!memory_cache_full) {
       if (_mesa_hash_table_insert(sscreen->shader_cache,
                                   mem_dup(ir_sha1_cache_key, 20),
@@ -274,13 +398,13 @@ void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_s
           FREE(hw_binary);
           return;
       }
-      /* The size is stored at the start of the binary */
-      sscreen->shader_cache_size += *(uint32_t*)hw_binary;
+
+      sscreen->shader_cache_size += size;
    }
 
    if (sscreen->disk_shader_cache && insert_into_disk_cache) {
       disk_cache_compute_key(sscreen->disk_shader_cache, ir_sha1_cache_key, 20, key);
-      disk_cache_put(sscreen->disk_shader_cache, key, hw_binary, *((uint32_t *)hw_binary), NULL);
+      disk_cache_put(sscreen->disk_shader_cache, key, hw_binary, size, NULL);
    }
 
    if (memory_cache_full)
@@ -306,10 +430,17 @@ bool si_shader_cache_load_shader(struct si_screen *sscreen, unsigned char ir_sha
    unsigned char sha1[CACHE_KEY_SIZE];
    disk_cache_compute_key(sscreen->disk_shader_cache, ir_sha1_cache_key, 20, sha1);
 
-   size_t binary_size;
-   uint8_t *buffer = (uint8_t*)disk_cache_get(sscreen->disk_shader_cache, sha1, &binary_size);
+   size_t total_size;
+   uint32_t *buffer = (uint32_t*)disk_cache_get(sscreen->disk_shader_cache, sha1, &total_size);
    if (buffer) {
-      if (binary_size >= sizeof(uint32_t) && *((uint32_t *)buffer) == binary_size) {
+      unsigned size = *buffer;
+      unsigned gs_copy_binary_size = 0;
+
+      /* The GS copy shader binary is after the GS binary. */
+      if (shader->selector->info.stage == MESA_SHADER_GEOMETRY && !shader->key.ge.as_ngg)
+         gs_copy_binary_size = buffer[size / 4];
+
+      if (total_size >= sizeof(uint32_t) && size + gs_copy_binary_size == total_size) {
          if (si_load_shader_binary(shader, buffer)) {
             free(buffer);
             si_shader_cache_insert_shader(sscreen, ir_sha1_cache_key, shader, false);
@@ -845,18 +976,35 @@ static void si_emit_shader_gs(struct si_context *sctx)
    radeon_end_update_context_roll(sctx);
 
    /* These don't cause any context rolls. */
-   radeon_begin_again(&sctx->gfx_cs);
-   if (sctx->chip_class >= GFX7) {
-      radeon_opt_set_sh_reg(sctx, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
-                            SI_TRACKED_SPI_SHADER_PGM_RSRC3_GS,
-                            shader->ctx_reg.gs.spi_shader_pgm_rsrc3_gs);
+   if (sctx->screen->info.spi_cu_en_has_effect) {
+      if (sctx->chip_class >= GFX7) {
+         ac_set_reg_cu_en(&sctx->gfx_cs, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
+                          shader->ctx_reg.gs.spi_shader_pgm_rsrc3_gs,
+                          C_00B21C_CU_EN, 0, &sctx->screen->info,
+                          (void (*)(void*, unsigned, uint32_t))radeon_set_sh_reg_func);
+         sctx->tracked_regs.reg_saved &= ~BITFIELD64_BIT(SI_TRACKED_SPI_SHADER_PGM_RSRC3_GS);
+      }
+      if (sctx->chip_class >= GFX10) {
+         ac_set_reg_cu_en(&sctx->gfx_cs, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
+                          shader->ctx_reg.gs.spi_shader_pgm_rsrc4_gs,
+                          C_00B204_CU_EN, 16, &sctx->screen->info,
+                          (void (*)(void*, unsigned, uint32_t))radeon_set_sh_reg_func);
+         sctx->tracked_regs.reg_saved &= ~BITFIELD64_BIT(SI_TRACKED_SPI_SHADER_PGM_RSRC4_GS);
+      }
+   } else {
+      radeon_begin_again(&sctx->gfx_cs);
+      if (sctx->chip_class >= GFX7) {
+         radeon_opt_set_sh_reg(sctx, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
+                               SI_TRACKED_SPI_SHADER_PGM_RSRC3_GS,
+                               shader->ctx_reg.gs.spi_shader_pgm_rsrc3_gs);
+      }
+      if (sctx->chip_class >= GFX10) {
+         radeon_opt_set_sh_reg(sctx, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
+                               SI_TRACKED_SPI_SHADER_PGM_RSRC4_GS,
+                               shader->ctx_reg.gs.spi_shader_pgm_rsrc4_gs);
+      }
+      radeon_end();
    }
-   if (sctx->chip_class >= GFX10) {
-      radeon_opt_set_sh_reg(sctx, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
-                            SI_TRACKED_SPI_SHADER_PGM_RSRC4_GS,
-                            shader->ctx_reg.gs.spi_shader_pgm_rsrc4_gs);
-   }
-   radeon_end();
 }
 
 static void si_shader_gs(struct si_screen *sscreen, struct si_shader *shader)
@@ -904,7 +1052,7 @@ static void si_shader_gs(struct si_screen *sscreen, struct si_shader *shader)
       S_028B90_CNT(MIN2(gs_num_invocations, 127)) | S_028B90_ENABLE(gs_num_invocations > 0);
 
    /* Copy over fields from the GS copy shader to make them easily accessible from GS. */
-   shader->pa_cl_vs_out_cntl = sel->gs_copy_shader->pa_cl_vs_out_cntl;
+   shader->pa_cl_vs_out_cntl = shader->gs_copy_shader->pa_cl_vs_out_cntl;
 
    va = shader->bo->gpu_address;
 
@@ -1055,13 +1203,27 @@ static void gfx10_emit_shader_ngg_tail(struct si_context *sctx, struct si_shader
    radeon_begin_again(&sctx->gfx_cs);
    radeon_opt_set_uconfig_reg(sctx, R_030980_GE_PC_ALLOC, SI_TRACKED_GE_PC_ALLOC,
                               shader->ctx_reg.ngg.ge_pc_alloc);
-   radeon_opt_set_sh_reg(sctx, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
-                         SI_TRACKED_SPI_SHADER_PGM_RSRC3_GS,
-                         shader->ctx_reg.ngg.spi_shader_pgm_rsrc3_gs);
-   radeon_opt_set_sh_reg(sctx, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
-                         SI_TRACKED_SPI_SHADER_PGM_RSRC4_GS,
-                         shader->ctx_reg.ngg.spi_shader_pgm_rsrc4_gs);
-   radeon_end();
+   if (sctx->screen->info.spi_cu_en_has_effect) {
+      radeon_end();
+      ac_set_reg_cu_en(&sctx->gfx_cs, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
+                       shader->ctx_reg.ngg.spi_shader_pgm_rsrc3_gs,
+                       C_00B21C_CU_EN, 0, &sctx->screen->info,
+                       (void (*)(void*, unsigned, uint32_t))radeon_set_sh_reg_func);
+      ac_set_reg_cu_en(&sctx->gfx_cs, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
+                       shader->ctx_reg.ngg.spi_shader_pgm_rsrc4_gs,
+                       C_00B204_CU_EN, 16, &sctx->screen->info,
+                       (void (*)(void*, unsigned, uint32_t))radeon_set_sh_reg_func);
+      sctx->tracked_regs.reg_saved &= ~BITFIELD64_BIT(SI_TRACKED_SPI_SHADER_PGM_RSRC4_GS) &
+                                      ~BITFIELD64_BIT(SI_TRACKED_SPI_SHADER_PGM_RSRC3_GS);
+   } else {
+      radeon_opt_set_sh_reg(sctx, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
+                            SI_TRACKED_SPI_SHADER_PGM_RSRC3_GS,
+                            shader->ctx_reg.ngg.spi_shader_pgm_rsrc3_gs);
+      radeon_opt_set_sh_reg(sctx, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
+                            SI_TRACKED_SPI_SHADER_PGM_RSRC4_GS,
+                            shader->ctx_reg.ngg.spi_shader_pgm_rsrc4_gs);
+      radeon_end();
+   }
 }
 
 static void gfx10_emit_shader_ngg_notess_nogs(struct si_context *sctx)
@@ -1525,8 +1687,10 @@ static void si_shader_vs(struct si_screen *sscreen, struct si_shader *shader,
    oc_lds_en = shader->selector->info.stage == MESA_SHADER_TESS_EVAL ? 1 : 0;
 
    if (sscreen->info.chip_class >= GFX7) {
-      si_pm4_set_reg(pm4, R_00B118_SPI_SHADER_PGM_RSRC3_VS,
-                     S_00B118_CU_EN(cu_mask) | S_00B118_WAVE_LIMIT(0x3F));
+      ac_set_reg_cu_en(pm4, R_00B118_SPI_SHADER_PGM_RSRC3_VS,
+                       S_00B118_CU_EN(cu_mask) | S_00B118_WAVE_LIMIT(0x3F),
+                       C_00B118_CU_EN, 0, &sscreen->info,
+                       (void (*)(void*, unsigned, uint32_t))si_pm4_set_reg);
       si_pm4_set_reg(pm4, R_00B11C_SPI_SHADER_LATE_ALLOC_VS, S_00B11C_LIMIT(late_alloc_wave64));
    }
 
@@ -1797,10 +1961,13 @@ static void si_shader_init_pm4_state(struct si_screen *sscreen, struct si_shader
          si_shader_vs(sscreen, shader, NULL);
       break;
    case MESA_SHADER_GEOMETRY:
-      if (shader->key.ge.as_ngg)
+      if (shader->key.ge.as_ngg) {
          gfx10_shader_ngg(sscreen, shader);
-      else
+      } else {
+         /* VS must be initialized first because GS uses its fields. */
+         si_shader_vs(sscreen, shader->gs_copy_shader, shader->selector);
          si_shader_gs(sscreen, shader);
+      }
       break;
    case MESA_SHADER_FRAGMENT:
       si_shader_ps(sscreen, shader);
@@ -2089,7 +2256,7 @@ static void si_ps_key_update_primtype_shader_rasterizer_framebuffer(struct si_co
    bool is_line = util_prim_is_lines(sctx->current_rast_prim);
 
    key->ps.part.prolog.poly_stipple = rs->poly_stipple_enable && is_poly;
-   key->ps.part.epilog.poly_line_smoothing =
+   key->ps.mono.poly_line_smoothing =
       ((is_poly && rs->poly_smooth) || (is_line && rs->line_smooth)) &&
       sctx->framebuffer.nr_samples <= 1;
 }
@@ -2681,19 +2848,6 @@ static void si_init_shader_selector_async(void *job, void *gdata, int thread_ind
    if (!compiler->passes)
       si_init_compiler(sscreen, compiler);
 
-   /* The GS copy shader is always pre-compiled. */
-   if (sel->info.stage == MESA_SHADER_GEOMETRY &&
-       (!sscreen->use_ngg || !sscreen->use_ngg_streamout || /* also for PRIMITIVES_GENERATED */
-        sel->tess_turns_off_ngg)) {
-      sel->gs_copy_shader = si_generate_gs_copy_shader(sscreen, compiler, sel, debug);
-      if (!sel->gs_copy_shader) {
-         fprintf(stderr, "radeonsi: can't create GS copy shader\n");
-         return;
-      }
-
-      si_shader_vs(sscreen, sel->gs_copy_shader, sel);
-   }
-
    /* Serialize NIR to save memory. Monolithic shader variants
     * have to deserialize NIR before compilation.
     */
@@ -3262,6 +3416,15 @@ static void si_bind_vs_shader(struct pipe_context *ctx, void *state)
                        si_get_vs(sctx)->current);
    si_update_rasterized_prim(sctx);
    si_vs_key_update_inputs(sctx);
+
+   if (sctx->screen->dpbb_allowed) {
+      bool force_off = sel && sel->info.options & SI_PROFILE_VS_NO_BINNING;
+
+      if (force_off != sctx->dpbb_force_off_profile_vs) {
+         sctx->dpbb_force_off_profile_vs = force_off;
+         si_mark_atom_dirty(sctx, &sctx->atoms.s.dpbb_state);
+      }
+   }
 }
 
 static void si_update_tess_uses_prim_id(struct si_context *sctx)
@@ -3481,6 +3644,15 @@ static void si_bind_ps_shader(struct pipe_context *ctx, void *state)
    si_update_ps_inputs_read_or_disabled(sctx);
    si_update_ps_kill_enable(sctx);
    si_update_vrs_flat_shading(sctx);
+
+   if (sctx->screen->dpbb_allowed) {
+      bool force_off = sel && sel->info.options & SI_PROFILE_PS_NO_BINNING;
+
+      if (force_off != sctx->dpbb_force_off_profile_ps) {
+         sctx->dpbb_force_off_profile_ps = force_off;
+         si_mark_atom_dirty(sctx, &sctx->atoms.s.dpbb_state);
+      }
+   }
 }
 
 static void si_delete_shader(struct si_context *sctx, struct si_shader *shader)
@@ -3537,6 +3709,9 @@ static void si_delete_shader(struct si_context *sctx, struct si_shader *shader)
    default:;
    }
 
+   if (shader->gs_copy_shader)
+      si_delete_shader(sctx, shader->gs_copy_shader);
+
    si_shader_selector_reference(sctx, &shader->previous_stage_sel, NULL);
    si_shader_destroy(shader);
    si_pm4_free_state(sctx, &shader->pm4, state_index);
@@ -3570,8 +3745,6 @@ static void si_destroy_shader_selector(struct pipe_context *ctx, void *cso)
       si_delete_shader(sctx, sel->main_shader_part_es);
    if (sel->main_shader_part_ngg)
       si_delete_shader(sctx, sel->main_shader_part_ngg);
-   if (sel->gs_copy_shader)
-      si_delete_shader(sctx, sel->gs_copy_shader);
 
    util_queue_fence_destroy(&sel->ready);
    simple_mtx_destroy(&sel->mutex);
@@ -3699,9 +3872,7 @@ bool si_update_gs_ring_buffers(struct si_context *sctx)
    /* Set ring bindings. */
    if (sctx->esgs_ring) {
       assert(sctx->chip_class <= GFX8);
-      si_set_ring_buffer(sctx, SI_ES_RING_ESGS, sctx->esgs_ring, 0, sctx->esgs_ring->width0, true,
-                         true, 4, 64, 0);
-      si_set_ring_buffer(sctx, SI_GS_RING_ESGS, sctx->esgs_ring, 0, sctx->esgs_ring->width0, false,
+      si_set_ring_buffer(sctx, SI_RING_ESGS, sctx->esgs_ring, 0, sctx->esgs_ring->width0, false,
                          false, 0, 0, 0);
    }
    if (sctx->gsvs_ring) {

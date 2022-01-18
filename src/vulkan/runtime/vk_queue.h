@@ -180,14 +180,23 @@ struct vk_queue_submit {
    uint32_t command_buffer_count;
    uint32_t signal_count;
 
+   uint32_t buffer_bind_count;
+   uint32_t image_opaque_bind_count;
+   uint32_t image_bind_count;
+
    struct vk_sync_wait *waits;
    struct vk_command_buffer **command_buffers;
    struct vk_sync_signal *signals;
+
+   VkSparseBufferMemoryBindInfo *buffer_binds;
+   VkSparseImageOpaqueMemoryBindInfo *image_opaque_binds;
+   VkSparseImageMemoryBindInfo *image_binds;
 
    uint32_t perf_pass_index;
 
    /* Used internally; should be ignored by drivers */
    struct vk_sync **_wait_temps;
+   struct vk_sync *_mem_signal_temp;
    struct vk_sync_timeline_point **_wait_points;
    struct vk_sync_timeline_point **_signal_points;
 };

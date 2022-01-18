@@ -51,7 +51,7 @@ struct radv_meta_saved_state {
    struct radv_scissor_state scissor;
    struct radv_sample_locations_state sample_location;
 
-   char push_constants[128];
+   char push_constants[MAX_PUSH_CONSTANTS_SIZE];
 
    struct radv_render_pass *pass;
    const struct radv_subpass *subpass;
@@ -142,6 +142,9 @@ void radv_device_finish_meta_copy_vrs_htile_state(struct radv_device *device);
 
 VkResult radv_device_init_accel_struct_build_state(struct radv_device *device);
 void radv_device_finish_accel_struct_build_state(struct radv_device *device);
+
+VkResult radv_device_init_meta_etc_decode_state(struct radv_device *device, bool on_demand);
+void radv_device_finish_meta_etc_decode_state(struct radv_device *device);
 
 void radv_meta_save(struct radv_meta_saved_state *saved_state, struct radv_cmd_buffer *cmd_buffer,
                     uint32_t flags);
@@ -261,6 +264,10 @@ uint32_t radv_clear_htile(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 void radv_update_buffer_cp(struct radv_cmd_buffer *cmd_buffer, uint64_t va, const void *data,
                            uint64_t size);
 
+void radv_meta_decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
+                          VkImageLayout layout, const VkImageSubresourceLayers *subresource,
+                          VkOffset3D offset, VkExtent3D extent);
+
 /**
  * Return whether the bound pipeline is the FMASK decompress pass.
  */
@@ -289,6 +296,7 @@ radv_is_dcc_decompress_pipeline(struct radv_cmd_buffer *cmd_buffer)
 /* common nir builder helpers */
 #include "nir/nir_builder.h"
 
+nir_builder PRINTFLIKE(2, 3) radv_meta_init_shader(gl_shader_stage stage, const char *name, ...);
 nir_ssa_def *radv_meta_gen_rect_vertices(nir_builder *vs_b);
 nir_ssa_def *radv_meta_gen_rect_vertices_comp2(nir_builder *vs_b, nir_ssa_def *comp2);
 nir_shader *radv_meta_build_nir_vs_generate_vertices(void);

@@ -522,7 +522,7 @@
     <desc>Memory segment written to by a `STORE` instruction.</desc>
     <value desc="Global or workgroup local memory" default="none">global</value>
     <value desc="Position output (in a position shader)">pos</value>
-    <value desc="Varyings with LEA_ATTR computed addresses">vary</value>
+    <value desc="Varyings with LEA_VARY computed addresses">vary</value>
     <value desc="Thread local storage">tl</value>
   </enum>
 
@@ -581,13 +581,37 @@
       Condition to use for a `MUX` instruction. `neg` checks the sign bit,
       `int_zero` compares to `0x00000000`, `fp_zero` compares to $\pm 0.0$ as
       an IEEE 754 float, and `bit` checks each bit separately. The `bit` mode
-      acts like an imaginary `CSEL.v32i1` instruction, and implements
+      acts like an imaginary `CSEL.v32u1` instruction, and implements
       `bitselect()` in OpenCL.
     </desc>
     <value desc="Negative">neg</value>
     <value desc="Integer zero" default="true">int_zero</value>
     <value desc="Floating point zero">fp_zero</value>
     <value desc="Bitwise">bit</value>
+  </enum>
+
+  <enum name="Sample mode">
+    <desc>
+      Varying interpolation mode, for choosing the correct sample to
+      interpolate at, allowing the `sample` and `centroid` qualifiers to be
+      implemented, as well as the `interpolateAt*` functions.
+    </desc>
+    <value desc="Center">center</value>
+    <value desc="Centroid">centroid</value>
+    <value desc="Sample">sample</value>
+    <value desc="Explicit">explicit</value>
+  </enum>
+
+  <enum name="Update mode">
+    <desc>
+      The Valhall GPU maintains hidden state when interpolating varyings, to
+      allow reusing sample location calculations. The update mode of a varying
+      load controls this hidden state.
+    </desc>
+    <value desc="Store interpolation position">store</value>
+    <value desc="Retrieve interpolation position">retrieve</value>
+    <reserved/>
+    <value desc="Clobber saved position">clobber</value>
   </enum>
 
   <ins name="NOP" title="No operation" dests="0" opcode="0x00" unit="CVT">
@@ -666,8 +690,8 @@
   <group name="CSEL" title="Integer conditional select" dests="1" unit="CVT">
     <ins name="CSEL.u32" opcode="0x150"/>
     <ins name="CSEL.v2u16" opcode="0x151"/>
-    <ins name="CSEL.i32" opcode="0x158"/>
-    <ins name="CSEL.v2i16" opcode="0x159"/>
+    <ins name="CSEL.s32" opcode="0x158"/>
+    <ins name="CSEL.v2s16" opcode="0x159"/>
     <desc>
       Evaluates the given condition and outputs either the true source or the
       false source.
@@ -689,6 +713,8 @@
     <sr_count/>
     <vecsize/>
     <regfmt/>
+    <sample/>
+    <update/>
     <slot/>
     <src/>
     <imm name="index" start="12" size="4"/> <!-- 0 for pointx, 1 for pointy, 2 for fragw, 3 for fragz -->
@@ -701,14 +727,21 @@
     <sr write="true"/>
     <vecsize/>
     <sr_count/>
-    <regfmt/>
+    <mod name="half" start="24" size="1"/>
+    <mod name="smooth" start="25" size="1"/>
+    <sample/>
+    <update/>
     <slot/>
     <src/>
-    <src/>
-    <imm name="index" start="20" size="4"/>
+    <imm name="index" start="16" size="8"/>
   </group>
 
   <ins name="LD_ATTR_IMM" title="Load immediate attribute" opcode="0x66" unit="LS">
+    <desc>
+      Load `vecsize` components from the attribute descriptor at entry `index`
+      of resource table `table` at index (vertex ID, instance ID), converting
+      to the specified register format.
+    </desc>
     <sr_count/>
     <vecsize/>
     <regfmt/>
@@ -717,6 +750,7 @@
     <src>Vertex ID</src>
     <src>Instance ID</src>
     <imm name="index" start="20" size="4"/>
+    <imm name="table" start="16" size="4"/>
   </ins>
 
   <ins name="LEA_IMAGE_IMM" title="Load effective address of image texel" opcode="0x67" unit="LS">
@@ -890,15 +924,15 @@
     <src>Index</src>
   </ins>
 
-  <ins name="LEA_ATTR" title="Load effective address" opcode="0x5E" unit="LS">
+  <ins name="LEA_VARY" title="Load varying effective address" opcode="0x5E" unit="LS">
     <desc>
       Loads the effective address of the position buffer (in a position shader)
       or the varying buffer (in a varying shader). That is, the base pointer
       plus the vertex's linear ID (the first source) times the buffer's
-      per-vertex stride. `LEA_ATTR` should be executed once in a
+      per-vertex stride. `LEA_VARY` should be executed once in a
       position/varying shader, with the linear ID preloaded as `r59`. Each
       position/varying store can then be constructed as `STORE` with the base
-      address sourced from the 64-bit destination of `LEA_ATTR` and an
+      address sourced from the 64-bit destination of `LEA_VARY` and an
       appropriately computed offset. Varying stores bypass the usual conversion
       hardware for attributes; this diverges from earlier Mali hardware.
     </desc>
@@ -1545,8 +1579,11 @@
     <mod name="left" start="128" size="1" implied="true"/>
     <desc>
       Right shifts its first source by a specified amount and bitwise ANDs it with the
-      second source, optionally inverting the second source or the result.
+      second source, optionally inverting the second source or the result. If
+      `signed` is set, the hardware performs an arithmetic right shift; otherwise,
+      it performs an unsigned right shift.
     </desc>
+    <mod name="signed" start="34" size="1"/>
     <not_result/>
     <src widen="true">A</src>
     <src lanes="true" size="8">shift</src>
@@ -1577,8 +1614,11 @@
     <mod name="left" start="128" size="1" implied="true"/>
     <desc>
       Right shifts its first source by a specified amount and bitwise ORs it with the
-      second source, optionally inverting the second source or the result.
-    </desc>
+      second source, optionally inverting the second source or the result. If
+      `signed` is set, the hardware performs an arithmetic right shift; otherwise,
+      it performs an unsigned right shift.
+   </desc>
+    <mod name="signed" start="34" size="1"/>
     <not_result/>
     <src widen="true">A</src>
     <src lanes="true" size="8">shift</src>
@@ -1609,8 +1649,11 @@
     <mod name="left" start="128" size="1" implied="true"/>
     <desc>
       Right shifts its first source by a specified amount and bitwise XORs it with the
-      second source, optionally inverting the second source or the result.
+      second source, optionally inverting the second source or the result. If
+      `signed` is set, the hardware performs an arithmetic right shift; otherwise,
+      it performs an unsigned right shift.
     </desc>
+    <mod name="signed" start="34" size="1"/>
     <not_result/>
     <src widen="true">A</src>
     <src lanes="true" size="8">shift</src>

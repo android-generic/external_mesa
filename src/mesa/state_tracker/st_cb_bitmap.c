@@ -137,7 +137,7 @@ make_bitmap_texture(struct gl_context *ctx, GLsizei width, GLsizei height,
     */
    pt = st_texture_create(st, st->internal_target, st->bitmap.tex_format,
                           0, width, height, 1, 1, 0,
-                          PIPE_BIND_SAMPLER_VIEW);
+                          PIPE_BIND_SAMPLER_VIEW, false);
    if (!pt) {
       _mesa_unmap_pbo_source(ctx, unpack);
       return NULL;
@@ -363,7 +363,8 @@ reset_cache(struct st_context *st)
                                       st->bitmap.tex_format, 0,
                                       BITMAP_CACHE_WIDTH, BITMAP_CACHE_HEIGHT,
                                       1, 1, 0,
-				      PIPE_BIND_SAMPLER_VIEW);
+                                      PIPE_BIND_SAMPLER_VIEW,
+                                      false);
 }
 
 
@@ -593,14 +594,10 @@ init_bitmap_state(struct st_context *st)
    reset_cache(st);
 }
 
-
-/**
- * Called via ctx->Driver.Bitmap()
- */
-static void
+void
 st_Bitmap(struct gl_context *ctx, GLint x, GLint y,
           GLsizei width, GLsizei height,
-          const struct gl_pixelstore_attrib *unpack, const GLubyte *bitmap )
+          const struct gl_pixelstore_attrib *unpack, const GLubyte *bitmap)
 {
    struct st_context *st = st_context(ctx);
    struct pipe_resource *pt;
@@ -644,11 +641,7 @@ st_Bitmap(struct gl_context *ctx, GLint x, GLint y,
    }
 }
 
-
-/**
- * Called via ctx->Driver.DrawAtlasBitmap()
- */
-static void
+void
 st_DrawAtlasBitmaps(struct gl_context *ctx,
                     const struct gl_bitmap_atlas *atlas,
                     GLuint count, const GLubyte *ids)
@@ -780,17 +773,6 @@ out:
    /* We uploaded modified constants, need to invalidate them. */
    st->dirty |= ST_NEW_FS_CONSTANTS;
 }
-
-
-
-/** Per-context init */
-void
-st_init_bitmap_functions(struct dd_function_table *functions)
-{
-   functions->Bitmap = st_Bitmap;
-   functions->DrawAtlasBitmaps = st_DrawAtlasBitmaps;
-}
-
 
 /** Per-context tear-down */
 void

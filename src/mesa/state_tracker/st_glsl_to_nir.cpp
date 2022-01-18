@@ -30,7 +30,6 @@
 #include "program/program.h"
 #include "program/prog_statevars.h"
 #include "program/prog_parameter.h"
-#include "program/ir_to_mesa.h"
 #include "main/context.h"
 #include "main/mtypes.h"
 #include "main/errors.h"
@@ -219,9 +218,6 @@ st_nir_assign_uniform_locations(struct gl_context *ctx,
          }
       } else if (uniform->state_slots) {
          const gl_state_index16 *const stateTokens = uniform->state_slots[0].tokens;
-         /* This state reference has already been setup by ir_to_mesa, but we'll
-          * get the same index back here.
-          */
 
          unsigned comps;
          if (glsl_type_is_struct_or_ifc(type)) {
@@ -766,7 +762,7 @@ st_link_nir(struct gl_context *ctx,
             _mesa_log("\n\n");
          }
 
-         prog->nir = glsl_to_nir(st->ctx, shader_program, shader->Stage, options);
+         prog->nir = glsl_to_nir(&st->ctx->Const, shader_program, shader->Stage, options);
       }
 
       memcpy(prog->nir->info.source_sha1, shader->linked_source_sha1,
@@ -800,10 +796,11 @@ st_link_nir(struct gl_context *ctx,
       static const gl_nir_linker_options opts = {
          true /*fill_parameters */
       };
-      if (!gl_nir_link_spirv(ctx, shader_program, &opts))
+      if (!gl_nir_link_spirv(&ctx->Const, shader_program, &opts))
          return GL_FALSE;
    } else {
-      if (!gl_nir_link_glsl(ctx, shader_program))
+      if (!gl_nir_link_glsl(&ctx->Const, &ctx->Extensions,
+                            shader_program))
          return GL_FALSE;
    }
 
@@ -813,7 +810,7 @@ st_link_nir(struct gl_context *ctx,
       _mesa_update_shader_textures_used(shader_program, prog);
    }
 
-   nir_build_program_resource_list(ctx, shader_program,
+   nir_build_program_resource_list(&ctx->Const, shader_program,
                                    shader_program->data->spirv);
 
    for (unsigned i = 0; i < num_shaders; i++) {

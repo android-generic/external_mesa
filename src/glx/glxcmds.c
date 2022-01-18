@@ -762,7 +762,7 @@ glXCreateGLXPixmap(Display * dpy, XVisualInfo * vis, Pixmap pixmap)
          return xid;
 
       config = glx_config_find_visual(psc->visuals, vis->visualid);
-      pdraw = psc->driScreen->createDrawable(psc, pixmap, xid, config);
+      pdraw = psc->driScreen->createDrawable(psc, pixmap, xid, GLX_PIXMAP_BIT, config);
       if (pdraw == NULL) {
          fprintf(stderr, "failed to create pixmap\n");
          xid = None;
@@ -1035,6 +1035,7 @@ fbconfigs_compatible(const struct glx_config * const a,
    MATCH_MASK(drawableType);
    MATCH_MASK(renderType);
    MATCH_DONT_CARE(sRGBCapable);
+   MATCH_DONT_CARE(floatComponentsNV);
 
    /* There is a bug in a few of the XFree86 DDX drivers.  They contain
     * visuals with a "transparent type" of 0 when they really mean GLX_NONE.

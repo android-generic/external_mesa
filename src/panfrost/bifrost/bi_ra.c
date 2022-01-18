@@ -318,6 +318,11 @@ bi_allocate_registers(bi_context *ctx, bool *success, bool full_regs)
                                 unsigned node = bi_get_node(ins->src[0]);
                                 assert(node < node_count);
                                 l->solutions[node] = 0;
+
+                                /* Dual source blend input in r4-r7 */
+                                node = bi_get_node(ins->src[4]);
+                                if (node < node_count)
+                                        l->solutions[node] = 4;
                         }
 
                         if (dest < node_count)
@@ -520,7 +525,7 @@ bi_register_allocate(bi_context *ctx)
         unsigned iter_count = 1000; /* max iterations */
 
         /* Number of bytes of memory we've spilled into */
-        unsigned spill_count = ctx->info->tls_size;
+        unsigned spill_count = ctx->info.tls_size;
 
         /* Try with reduced register pressure to improve thread count on v7 */
         if (ctx->arch == 7) {
@@ -528,7 +533,7 @@ bi_register_allocate(bi_context *ctx)
                 l = bi_allocate_registers(ctx, &success, false);
 
                 if (success) {
-                        ctx->info->work_reg_count = 32;
+                        ctx->info.work_reg_count = 32;
                 } else {
                         lcra_free(l);
                         l = NULL;
@@ -541,7 +546,7 @@ bi_register_allocate(bi_context *ctx)
                 l = bi_allocate_registers(ctx, &success, true);
 
                 if (success) {
-                        ctx->info->work_reg_count = 64;
+                        ctx->info.work_reg_count = 64;
                 } else {
                         signed spill_node = bi_choose_spill_node(ctx, l);
                         lcra_free(l);
@@ -559,7 +564,7 @@ bi_register_allocate(bi_context *ctx)
         assert(success);
         assert(l != NULL);
 
-        ctx->info->tls_size = spill_count;
+        ctx->info.tls_size = spill_count;
         bi_install_registers(ctx, l);
 
         lcra_free(l);

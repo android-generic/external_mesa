@@ -722,10 +722,15 @@ dri2_wl_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
                                                 &surface_dmabuf_feedback_listener,
                                                 dri2_surf);
 
-      if (dmabuf_feedback_init(&dri2_surf->pending_dmabuf_feedback) < 0)
+      if (dmabuf_feedback_init(&dri2_surf->pending_dmabuf_feedback) < 0) {
+         zwp_linux_dmabuf_feedback_v1_destroy(dri2_surf->wl_dmabuf_feedback);
          goto cleanup_surf_wrapper;
-      if (dmabuf_feedback_init(&dri2_surf->dmabuf_feedback) < 0)
-         goto cleanup_pending_dmabuf_feedback;
+      }
+      if (dmabuf_feedback_init(&dri2_surf->dmabuf_feedback) < 0) {
+         dmabuf_feedback_fini(&dri2_surf->pending_dmabuf_feedback);
+         zwp_linux_dmabuf_feedback_v1_destroy(dri2_surf->wl_dmabuf_feedback);
+         goto cleanup_surf_wrapper;
+      }
 
       if (roundtrip(dri2_dpy) < 0)
          goto cleanup_dmabuf_feedback;
@@ -748,7 +753,6 @@ dri2_wl_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    if (dri2_surf->wl_dmabuf_feedback) {
       zwp_linux_dmabuf_feedback_v1_destroy(dri2_surf->wl_dmabuf_feedback);
       dmabuf_feedback_fini(&dri2_surf->dmabuf_feedback);
- cleanup_pending_dmabuf_feedback:
       dmabuf_feedback_fini(&dri2_surf->pending_dmabuf_feedback);
    }
  cleanup_surf_wrapper:
@@ -1092,6 +1096,12 @@ back_bo_to_dri_buffer(struct dri2_egl_surface *dri2_surf, __DRIbuffer *buffer)
    buffer->flags = 0;
 }
 
+/* Value chosen empirically as a compromise between avoiding frequent
+ * reallocations and extended time of increased memory consumption due to
+ * unused buffers being kept.
+ */
+#define BUFFER_TRIM_AGE_HYSTERESIS 20
+
 static int
 update_buffers(struct dri2_egl_surface *dri2_surf)
 {
@@ -1121,10 +1131,13 @@ update_buffers(struct dri2_egl_surface *dri2_surf)
 
    /* If we have an extra unlocked buffer at this point, we had to do triple
     * buffering for a while, but now can go back to just double buffering.
-    * That means we can free any unlocked buffer now. */
+    * That means we can free any unlocked buffer now. To avoid toggling between
+    * going back to double buffering and needing to allocate another buffer too
+    * fast we let the unneeded buffer sit around for a short while. */
    for (int i = 0; i < ARRAY_SIZE(dri2_surf->color_buffers); i++) {
       if (!dri2_surf->color_buffers[i].locked &&
-          dri2_surf->color_buffers[i].wl_buffer) {
+          dri2_surf->color_buffers[i].wl_buffer &&
+          dri2_surf->color_buffers[i].age > BUFFER_TRIM_AGE_HYSTERESIS) {
          wl_buffer_destroy(dri2_surf->color_buffers[i].wl_buffer);
          dri2_dpy->image->destroyImage(dri2_surf->color_buffers[i].dri_image);
          if (dri2_dpy->is_different_gpu)
@@ -2087,6 +2100,9 @@ dri2_initialize_wayland_drm(_EGLDisplay *disp)
    /* We couldn't retrieve a render node from the dma-buf feedback (or the
     * feedback was not advertised at all), so we must fallback to wl_drm. */
    if (dri2_dpy->fd == -1) {
+      /* wl_drm not advertised by compositor, so can't continue */
+      if (dri2_dpy->wl_drm_name == 0)
+         goto cleanup;
       wl_drm_bind(dri2_dpy);
 
       if (dri2_dpy->wl_drm == NULL)
@@ -2314,10 +2330,13 @@ swrast_update_buffers(struct dri2_egl_surface *dri2_surf)
 
    /* If we have an extra unlocked buffer at this point, we had to do triple
     * buffering for a while, but now can go back to just double buffering.
-    * That means we can free any unlocked buffer now. */
+    * That means we can free any unlocked buffer now. To avoid toggling between
+    * going back to double buffering and needing to allocate another buffer too
+    * fast we let the unneeded buffer sit around for a short while. */
    for (int i = 0; i < ARRAY_SIZE(dri2_surf->color_buffers); i++) {
       if (!dri2_surf->color_buffers[i].locked &&
-          dri2_surf->color_buffers[i].wl_buffer) {
+          dri2_surf->color_buffers[i].wl_buffer &&
+          dri2_surf->color_buffers[i].age > BUFFER_TRIM_AGE_HYSTERESIS) {
          wl_buffer_destroy(dri2_surf->color_buffers[i].wl_buffer);
          munmap(dri2_surf->color_buffers[i].data,
                 dri2_surf->color_buffers[i].data_size);
