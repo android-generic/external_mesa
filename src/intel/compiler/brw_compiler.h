@@ -26,7 +26,6 @@
 
 #include <stdio.h>
 #include "dev/intel_device_info.h"
-#include "main/glheader.h"
 #include "main/config.h"
 #include "util/ralloc.h"
 #include "util/u_math.h"
@@ -328,6 +327,7 @@ struct brw_vs_prog_key {
     * the VUE, even if they aren't written by the vertex shader.
     */
    uint8_t point_coord_replace;
+   unsigned clamp_pointsize:1;
 };
 
 /** The program key for Tessellation Control Shaders. */
@@ -335,7 +335,7 @@ struct brw_tcs_prog_key
 {
    struct brw_base_prog_key base;
 
-   GLenum tes_primitive_mode;
+   enum tess_primitive_mode _tes_primitive_mode;
 
    unsigned input_vertices;
 
@@ -367,6 +367,7 @@ struct brw_tes_prog_key
     * clip distances.
     */
    unsigned nr_userclip_plane_consts:4;
+   unsigned clamp_pointsize:1;
 };
 
 /** The program key for Geometry Shaders. */
@@ -382,6 +383,7 @@ struct brw_gs_prog_key
     * clip distances.
     */
    unsigned nr_userclip_plane_consts:4;
+   unsigned clamp_pointsize:1;
 };
 
 struct brw_task_prog_key
@@ -1278,8 +1280,8 @@ struct brw_vue_prog_data {
 struct brw_vs_prog_data {
    struct brw_vue_prog_data base;
 
-   GLbitfield64 inputs_read;
-   GLbitfield64 double_inputs_read;
+   uint64_t inputs_read;
+   uint64_t double_inputs_read;
 
    unsigned nr_attribute_slots;
 

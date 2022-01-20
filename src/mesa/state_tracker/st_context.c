@@ -42,15 +42,12 @@
 #include "st_debug.h"
 #include "st_cb_bitmap.h"
 #include "st_cb_clear.h"
-#include "st_cb_condrender.h"
 #include "st_cb_drawpixels.h"
 #include "st_cb_drawtex.h"
 #include "st_cb_eglimage.h"
 #include "st_cb_feedback.h"
-#include "st_cb_perfmon.h"
 #include "st_cb_perfquery.h"
 #include "st_cb_program.h"
-#include "st_cb_queryobj.h"
 #include "st_cb_flush.h"
 #include "st_atom.h"
 #include "st_draw.h"
@@ -424,7 +421,6 @@ st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
    st_destroy_bitmap(st);
    st_destroy_drawpix(st);
    st_destroy_drawtex(st);
-   st_destroy_perfmon(st);
    st_destroy_pbo_helpers(st);
    st_destroy_bound_texture_handles(st);
    st_destroy_bound_image_handles(st);
@@ -438,7 +434,7 @@ st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
    if (st->pipe && destroy_pipe)
       st->pipe->destroy(st->pipe);
 
-   free(st);
+   FREE(st);
 }
 
 
@@ -495,6 +491,16 @@ st_init_driver_flags(struct st_context *st)
                                 ST_NEW_FS_STATE | ST_NEW_CS_STATE;
 }
 
+static bool
+st_have_perfmon(struct st_context *st)
+{
+   struct pipe_screen *screen = st->screen;
+
+   if (!screen->get_driver_query_info || !screen->get_driver_query_group_info)
+      return false;
+
+   return screen->get_driver_query_group_info(screen, 0, NULL) != 0;
+}
 
 static struct st_context *
 st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
@@ -502,7 +508,7 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
 {
    struct pipe_screen *screen = pipe->screen;
    uint i;
-   struct st_context *st = ST_CALLOC_STRUCT( st_context);
+   struct st_context *st = CALLOC_STRUCT( st_context);
 
    util_cpu_detect();
 
@@ -985,7 +991,7 @@ destroy_tex_sampler_cb(void *data, void *userData)
    struct gl_texture_object *texObj = (struct gl_texture_object *) data;
    struct st_context *st = (struct st_context *) userData;
 
-   st_texture_release_context_sampler_view(st, st_texture_object(texObj));
+   st_texture_release_context_sampler_view(st, texObj);
 }
 
 static void
@@ -997,7 +1003,7 @@ destroy_framebuffer_attachment_sampler_cb(void *data, void *userData)
     for (unsigned i = 0; i < BUFFER_COUNT; i++) {
       struct gl_renderbuffer_attachment *att = &glfb->Attachment[i];
       if (att->Texture) {
-        st_texture_release_context_sampler_view(st, st_texture_object(att->Texture));
+        st_texture_release_context_sampler_view(st, att->Texture);
       }
    }
 }
@@ -1035,8 +1041,8 @@ st_destroy_context(struct st_context *st)
     * context.
     */
    for (unsigned i = 0; i < NUM_TEXTURE_TARGETS; i++) {
-      struct st_texture_object *stObj =
-         st_texture_object(ctx->Shared->FallbackTex[i]);
+      struct gl_texture_object *stObj =
+         ctx->Shared->FallbackTex[i];
       if (stObj) {
          st_texture_release_context_sampler_view(st, stObj);
       }

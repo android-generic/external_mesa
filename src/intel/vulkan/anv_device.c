@@ -353,7 +353,7 @@ anv_gather_meminfo(struct anv_physical_device *device, int fd, bool update)
 	                sizeof(struct drm_i915_memory_region_info)];
 
    struct drm_i915_query_memory_regions *mem_regions =
-      intel_i915_query_alloc(fd, DRM_I915_QUERY_MEMORY_REGIONS);
+      intel_i915_query_alloc(fd, DRM_I915_QUERY_MEMORY_REGIONS, NULL);
    if (mem_regions == NULL) {
       if (device->info.has_local_mem) {
          return vk_errorf(device, VK_ERROR_INCOMPATIBLE_DRIVER,
@@ -4653,8 +4653,14 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion)
     *
     *    - Loader interface v4 differs from v3 in:
     *        - The ICD must implement vk_icdGetPhysicalDeviceProcAddr().
+    * 
+    *    - Loader interface v5 differs from v4 in:
+    *        - The ICD must support Vulkan API version 1.1 and must not return 
+    *          VK_ERROR_INCOMPATIBLE_DRIVER from vkCreateInstance() unless a
+    *          Vulkan Loader with interface v4 or smaller is being used and the
+    *          application provides an API version that is greater than 1.0.
     */
-   *pSupportedVersion = MIN2(*pSupportedVersion, 4u);
+   *pSupportedVersion = MIN2(*pSupportedVersion, 5u);
    return VK_SUCCESS;
 }
 

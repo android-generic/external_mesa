@@ -982,8 +982,6 @@ zink_set_vertex_buffers(struct pipe_context *pctx,
             res->vbo_bind_mask |= BITFIELD_BIT(start_slot + i);
             update_res_bind_count(ctx, res, false, false);
             ctx_vb->stride = vb->stride;
-            if (need_state_change)
-               ctx->gfx_pipeline_state.vertex_strides[start_slot + i] = vb->stride;
             ctx_vb->buffer_offset = vb->buffer_offset;
             /* always barrier before possible rebind */
             zink_resource_buffer_barrier(ctx, res, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
@@ -3346,10 +3344,11 @@ zink_flush_resource(struct pipe_context *pctx,
                     struct pipe_resource *pres)
 {
    struct zink_context *ctx = zink_context(pctx);
+   struct zink_resource *res = zink_resource(pres);
    /* TODO: this is not futureproof and should be updated once proper
     * WSI support is added
     */
-   if (pres->bind & (PIPE_BIND_SHARED | PIPE_BIND_SCANOUT))
+   if (res->scanout_obj && (pres->bind & (PIPE_BIND_SHARED | PIPE_BIND_SCANOUT)))
       pipe_resource_reference(&ctx->batch.state->flush_res, pres);
 }
 
@@ -4117,7 +4116,9 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.clear_render_target = zink_clear_render_target;
    ctx->base.clear_depth_stencil = zink_clear_depth_stencil;
 
+   ctx->base.create_fence_fd = zink_create_fence_fd;
    ctx->base.fence_server_sync = zink_fence_server_sync;
+   ctx->base.fence_server_signal = zink_fence_server_signal;
    ctx->base.flush = zink_flush;
    ctx->base.memory_barrier = zink_memory_barrier;
    ctx->base.texture_barrier = zink_texture_barrier;

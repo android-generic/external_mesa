@@ -3315,6 +3315,8 @@ fail:
          device->ws->ctx_destroy(device->hw_ctx[i]);
    }
 
+   mtx_destroy(&device->overallocation_mutex);
+
    vk_device_finish(&device->vk);
    vk_free(&device->vk.alloc, device);
    return result;
@@ -3350,6 +3352,8 @@ radv_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       if (device->hw_ctx[i])
          device->ws->ctx_destroy(device->hw_ctx[i]);
    }
+
+   mtx_destroy(&device->overallocation_mutex);
 
    radv_device_finish_meta(device);
 
@@ -6193,8 +6197,14 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion)
     *
     *    - Loader interface v4 differs from v3 in:
     *        - The ICD must implement vk_icdGetPhysicalDeviceProcAddr().
+    * 
+    *    - Loader interface v5 differs from v4 in:
+    *        - The ICD must support Vulkan API version 1.1 and must not return 
+    *          VK_ERROR_INCOMPATIBLE_DRIVER from vkCreateInstance() unless a
+    *          Vulkan Loader with interface v4 or smaller is being used and the
+    *          application provides an API version that is greater than 1.0.
     */
-   *pSupportedVersion = MIN2(*pSupportedVersion, 4u);
+   *pSupportedVersion = MIN2(*pSupportedVersion, 5u);
    return VK_SUCCESS;
 }
 

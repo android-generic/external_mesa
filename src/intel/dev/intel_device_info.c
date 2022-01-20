@@ -433,6 +433,7 @@ static const struct intel_device_info intel_device_info_hsw_gt3 = {
    .max_tes_threads = 504,                          \
    .max_gs_threads = 504,                           \
    .max_wm_threads = 384,                           \
+   .max_threads_per_psd = 64,                       \
    .timestamp_frequency = 12500000,                 \
    .max_constant_urb_size_kb = 32,                  \
    .cs_prefetch_size = 512
@@ -542,6 +543,7 @@ static const struct intel_device_info intel_device_info_chv = {
    .max_gs_threads = 336,                           \
    .max_tcs_threads = 336,                          \
    .max_tes_threads = 336,                          \
+   .max_threads_per_psd = 64,                       \
    .max_cs_threads = 56,                            \
    .timestamp_frequency = 12000000,                 \
    .cs_prefetch_size = 512,                         \
@@ -828,6 +830,7 @@ static const struct intel_device_info intel_device_info_cfl_gt3 = {
    .max_gs_threads = 224,                           \
    .max_tcs_threads = 224,                          \
    .max_tes_threads = 364,                          \
+   .max_threads_per_psd = 64,                       \
    .max_cs_threads = 56,                            \
    .cs_prefetch_size = 512
 
@@ -950,6 +953,7 @@ static const struct intel_device_info intel_device_info_ehl_2x4 = {
    .max_gs_threads = 336,                           \
    .max_tcs_threads = 336,                          \
    .max_tes_threads = 546,                          \
+   .max_threads_per_psd = 64,                       \
    .max_cs_threads = 112, /* threads per DSS */     \
    .urb = {                                         \
       GFX12_URB_MIN_MAX_ENTRIES,                    \
@@ -1041,7 +1045,8 @@ static const struct intel_device_info intel_device_info_sg1 = {
    /* (Sub)slice info comes from the kernel topology info */    \
    XEHP_FEATURES(0, 1, 0),                                      \
    .num_subslices = dual_subslices(1),                          \
-   .has_lsc = true
+   .has_lsc = true,                                             \
+   .apply_hwconfig = true
 
 UNUSED static const struct intel_device_info intel_device_info_dg2_g10 = {
    DG2_FEATURES,
@@ -1113,7 +1118,8 @@ update_pixel_pipes(struct intel_device_info *devinfo)
       const unsigned offset = p * ppipe_bits;
       const unsigned subslice_idx = offset /
          devinfo->max_subslices_per_slice * devinfo->subslice_slice_stride;
-      const unsigned ppipe_mask = BITFIELD_RANGE(offset % 8, ppipe_bits);
+      const unsigned ppipe_mask =
+         BITFIELD_RANGE(offset % devinfo->max_subslices_per_slice, ppipe_bits);
 
       if (subslice_idx < ARRAY_SIZE(devinfo->subslice_masks))
          devinfo->ppipe_subslices[p] =
@@ -1523,7 +1529,7 @@ static bool
 query_topology(struct intel_device_info *devinfo, int fd)
 {
    struct drm_i915_query_topology_info *topo_info =
-      intel_i915_query_alloc(fd, DRM_I915_QUERY_TOPOLOGY_INFO);
+      intel_i915_query_alloc(fd, DRM_I915_QUERY_TOPOLOGY_INFO, NULL);
    if (topo_info == NULL)
       return false;
 

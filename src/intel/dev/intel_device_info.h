@@ -268,6 +268,8 @@ struct intel_device_info
     */
    unsigned max_wm_threads;
 
+   unsigned max_threads_per_psd;
+
    /**
     * Maximum Compute Shader threads.
     *
@@ -369,6 +371,11 @@ struct intel_device_info
     * no_hw is true when the pci_device_id has been overridden
     */
    bool no_hw;
+
+   /**
+    * apply_hwconfig is true when the platform should apply hwconfig values
+    */
+   bool apply_hwconfig;
    /** @} */
 };
 

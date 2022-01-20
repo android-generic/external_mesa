@@ -777,13 +777,8 @@ get_programiv(struct gl_context *ctx, GLuint program, GLenum pname,
       *params = _mesa_longest_attribute_name_length(shProg);
       return;
    case GL_ACTIVE_UNIFORMS: {
-      unsigned i;
-      const unsigned num_uniforms =
-         shProg->data->NumUniformStorage - shProg->data->NumHiddenUniforms;
-      for (*params = 0, i = 0; i < num_uniforms; i++) {
-         if (!shProg->data->UniformStorage[i].is_shader_storage)
-            (*params)++;
-      }
+      _mesa_GetProgramInterfaceiv(program, GL_UNIFORM, GL_ACTIVE_RESOURCES,
+                                  params);
       return;
    }
    case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
@@ -1007,8 +1002,22 @@ get_programiv(struct gl_context *ctx, GLuint program, GLenum pname,
       if (!has_tess)
          break;
       if (check_tes_query(ctx, shProg)) {
-         *params = shProg->_LinkedShaders[MESA_SHADER_TESS_EVAL]->
-            Program->info.tess.primitive_mode;
+         const struct gl_linked_shader *tes =
+            shProg->_LinkedShaders[MESA_SHADER_TESS_EVAL];
+         switch (tes->Program->info.tess._primitive_mode) {
+         case TESS_PRIMITIVE_TRIANGLES:
+            *params = GL_TRIANGLES;
+            break;
+         case TESS_PRIMITIVE_QUADS:
+            *params = GL_QUADS;
+            break;
+         case TESS_PRIMITIVE_ISOLINES:
+            *params = GL_ISOLINES;
+            break;
+         case TESS_PRIMITIVE_UNSPECIFIED:
+            *params = 0;
+            break;
+         }
       }
       return;
    case GL_TESS_GEN_SPACING:

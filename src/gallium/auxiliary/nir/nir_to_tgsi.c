@@ -1338,6 +1338,7 @@ ntt_emit_load_ubo(struct ntt_compile *c, nir_intrinsic_instr *instr)
       /* !PIPE_CAP_LOAD_CONSTBUF: Just emit it as a vec4 reference to the const
        * file.
        */
+      src.Index = nir_intrinsic_base(instr);
 
       if (nir_src_is_const(instr->src[1])) {
          src.Index += ntt_src_as_uint(c, instr->src[1]);
@@ -2571,6 +2572,21 @@ ntt_optimize_nir(struct nir_shader *s, struct pipe_screen *screen)
       NIR_PASS(progress, s, nir_opt_vectorize, ntt_should_vectorize_instr, NULL);
       NIR_PASS(progress, s, nir_opt_undef);
       NIR_PASS(progress, s, nir_opt_loop_unroll);
+
+      /* Try to fold addressing math into ubo_vec4's base to avoid load_consts
+       * and ALU ops for it.
+       */
+      static const nir_opt_offsets_options offset_options = {
+         .ubo_vec4_max = ~0,
+
+         /* No const offset in TGSI for shared accesses. */
+         .shared_max = 0,
+
+         /* unused intrinsics */
+         .uniform_max = 0,
+         .buffer_max = 0,
+      };
+      NIR_PASS(progress, s, nir_opt_offsets, &offset_options);
 
    } while (progress);
 }

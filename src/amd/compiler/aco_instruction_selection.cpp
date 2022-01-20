@@ -3286,8 +3286,8 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
    case nir_op_unpack_half_2x16_split_y: {
       Temp src = get_alu_src(ctx, instr->src[0]);
       if (src.regClass() == s1)
-         src =
-            bld.sop2(aco_opcode::s_lshr_b32, bld.def(s1), bld.def(s1, scc), src, Operand::c32(16u));
+         src = bld.pseudo(aco_opcode::p_extract, bld.def(s1), bld.def(s1, scc), src,
+                          Operand::c32(1u), Operand::c32(16u), Operand::zero());
       else
          src =
             bld.pseudo(aco_opcode::p_split_vector, bld.def(v2b), bld.def(v2b), src).def(1).getTemp();
@@ -5391,7 +5391,7 @@ visit_load_tess_coord(isel_context* ctx, nir_intrinsic_instr* instr)
    Operand tes_v(get_arg(ctx, ctx->args->ac.tes_v));
    Operand tes_w = Operand::zero();
 
-   if (ctx->shader->info.tess.primitive_mode == GL_TRIANGLES) {
+   if (ctx->shader->info.tess._primitive_mode == TESS_PRIMITIVE_TRIANGLES) {
       Temp tmp = bld.vop2(aco_opcode::v_add_f32, bld.def(v1), tes_u, tes_v);
       tmp = bld.vop2(aco_opcode::v_sub_f32, bld.def(v1), Operand::c32(0x3f800000u /* 1.0f */), tmp);
       tes_w = Operand(tmp);

@@ -30,7 +30,6 @@
 
 #include "util/hash_table.h"
 #include "compiler/glsl/list.h"
-#include "GL/gl.h" /* GLenum */
 #include "util/list.h"
 #include "util/log.h"
 #include "util/ralloc.h"
@@ -5257,6 +5256,9 @@ bool nir_opt_move(nir_shader *shader, nir_move_options options);
 typedef struct {
    /** nir_load_uniform max base offset */
    uint32_t uniform_max;
+
+   /** nir_load_ubo_vec4 max base offset */
+   uint32_t ubo_vec4_max;
 
    /** nir_var_mem_shared max base offset */
    uint32_t shared_max;

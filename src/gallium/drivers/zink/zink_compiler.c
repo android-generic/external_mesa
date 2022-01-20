@@ -1606,17 +1606,27 @@ handle_bindless_var(nir_shader *nir, nir_variable *var, const struct glsl_type *
 }
 
 static enum pipe_prim_type
-gl_prim_to_pipe(unsigned primitive_type)
+prim_to_pipe(enum shader_prim primitive_type)
 {
    switch (primitive_type) {
-   case GL_POINTS:
+   case SHADER_PRIM_POINTS:
       return PIPE_PRIM_POINTS;
-   case GL_LINES:
-   case GL_LINE_LOOP:
-   case GL_LINE_STRIP:
-   case GL_LINES_ADJACENCY:
-   case GL_LINE_STRIP_ADJACENCY:
-   case GL_ISOLINES:
+   case SHADER_PRIM_LINES:
+   case SHADER_PRIM_LINE_LOOP:
+   case SHADER_PRIM_LINE_STRIP:
+   case SHADER_PRIM_LINES_ADJACENCY:
+   case SHADER_PRIM_LINE_STRIP_ADJACENCY:
+      return PIPE_PRIM_LINES;
+   default:
+      return PIPE_PRIM_TRIANGLES;
+   }
+}
+
+static enum pipe_prim_type
+tess_prim_to_pipe(enum tess_primitive_mode prim_mode)
+{
+   switch (prim_mode) {
+   case TESS_PRIMITIVE_ISOLINES:
       return PIPE_PRIM_LINES;
    default:
       return PIPE_PRIM_TRIANGLES;
@@ -1628,9 +1638,9 @@ get_shader_base_prim_type(struct nir_shader *nir)
 {
    switch (nir->info.stage) {
    case MESA_SHADER_GEOMETRY:
-      return gl_prim_to_pipe(nir->info.gs.output_primitive);
+      return prim_to_pipe(nir->info.gs.output_primitive);
    case MESA_SHADER_TESS_EVAL:
-      return nir->info.tess.point_mode ? PIPE_PRIM_POINTS : gl_prim_to_pipe(nir->info.tess.primitive_mode);
+      return nir->info.tess.point_mode ? PIPE_PRIM_POINTS : tess_prim_to_pipe(nir->info.tess._primitive_mode);
    default:
       break;
    }
