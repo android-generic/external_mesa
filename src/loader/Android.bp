@@ -33,7 +33,6 @@ cc_library_static {
     cflags: [
         "-DHAVE_LIBDRM",
         "-DMAJOR_IN_SYSMACROS",
-        "-DPREFER_IRIS",
         "-Wno-missing-field-initializers",
         "-Wno-sign-compare",
     ],
@@ -45,7 +44,6 @@ cc_library_static {
     srcs: [
         "loader_dri_helper.c",
         "loader.c",
-        "pci_id_driver_map.c",
     ],
 
     multilib: {
