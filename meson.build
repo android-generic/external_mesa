@@ -532,6 +532,7 @@ if not have_mtls_dialect
     endif
   endif
 endif
+endif
 
 if with_platform_windows and with_shared_glapi
   # Windows doesn't support DLL exports/imports being TLS variables. When using shared
