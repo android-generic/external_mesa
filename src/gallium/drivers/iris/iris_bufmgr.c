@@ -594,19 +594,26 @@ iris_slab_free(void *priv, struct pb_slab *pslab)
 
    assert(!slab->bo->aux_map_address);
 
-   if (aux_map_ctx) {
-      /* Since we're freeing the whole slab, all buffers allocated out of it
-       * must be reclaimable.  We require buffers to be idle to be reclaimed
-       * (see iris_can_reclaim_slab()), so we know all entries must be idle.
-       * Therefore, we can safely unmap their aux table entries.
-       */
-      for (unsigned i = 0; i < pslab->num_entries; i++) {
-         struct iris_bo *bo = &slab->entries[i];
-         if (bo->aux_map_address) {
-            intel_aux_map_unmap_range(aux_map_ctx, bo->address, bo->size);
-            bo->aux_map_address = 0;
+   /* Since we're freeing the whole slab, all buffers allocated out of it
+    * must be reclaimable.  We require buffers to be idle to be reclaimed
+    * (see iris_can_reclaim_slab()), so we know all entries must be idle.
+    * Therefore, we can safely unmap their aux table entries.
+    */
+   for (unsigned i = 0; i < pslab->num_entries; i++) {
+      struct iris_bo *bo = &slab->entries[i];
+      if (aux_map_ctx && bo->aux_map_address) {
+         intel_aux_map_unmap_range(aux_map_ctx, bo->address, bo->size);
+         bo->aux_map_address = 0;
+      }
+
+      /* Unref read/write dependency syncobjs and free the array. */
+      for (int d = 0; d < bo->deps_size; d++) {
+         for (int b = 0; b < IRIS_BATCH_COUNT; b++) {
+            iris_syncobj_reference(bufmgr, &bo->deps[d].write_syncobjs[b], NULL);
+            iris_syncobj_reference(bufmgr, &bo->deps[d].read_syncobjs[b], NULL);
          }
       }
+      free(bo->deps);
    }
 
    iris_bo_unreference(slab->bo);
@@ -1656,6 +1663,16 @@ iris_bufmgr_destroy(struct iris_bufmgr *bufmgr)
    /* Free any cached buffer objects we were going to reuse */
    for (int i = 0; i < bufmgr->num_buckets; i++) {
       struct bo_cache_bucket *bucket = &bufmgr->cache_bucket[i];
+
+      list_for_each_entry_safe(struct iris_bo, bo, &bucket->head, head) {
+         list_del(&bo->head);
+
+         bo_free(bo);
+      }
+   }
+
+   for (int i = 0; i < bufmgr->num_local_buckets; i++) {
+      struct bo_cache_bucket *bucket = &bufmgr->local_cache_bucket[i];
 
       list_for_each_entry_safe(struct iris_bo, bo, &bucket->head, head) {
          list_del(&bo->head);

@@ -194,6 +194,12 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
    nir_validate_shader(nir,
                        "Validate before feeding NIR to the DXIL compiler");
 
+   const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
+      .frag_coord = true,
+      .point_coord = true,
+   };
+   NIR_PASS_V(nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
+
    NIR_PASS_V(nir, nir_lower_system_values);
 
    if (conf->zero_based_vertex_instance_id) {
@@ -290,6 +296,7 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
    NIR_PASS_V(nir, dxil_nir_split_clip_cull_distance);
    NIR_PASS_V(nir, dxil_nir_lower_loads_stores_to_dxil);
    NIR_PASS_V(nir, dxil_nir_create_bare_samplers);
+   NIR_PASS_V(nir, dxil_nir_lower_bool_input);
 
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 

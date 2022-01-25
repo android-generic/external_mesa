@@ -1386,10 +1386,10 @@ redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *data)
    int sampler_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
    if (sampler_idx == -1) {
       /* No derefs, must be using indices */
-      struct hash_entry *hash_entry = _mesa_hash_table_u64_search(data, tex->sampler_index);
+      nir_variable *bare_sampler = _mesa_hash_table_u64_search(data, tex->sampler_index);
 
       /* Already have a bare sampler here */
-      if (hash_entry)
+      if (bare_sampler)
          return false;
 
       nir_variable *typed_sampler = NULL;
@@ -1408,7 +1408,7 @@ redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *data)
 
       /* Clone the typed sampler to a bare sampler and we're done */
       assert(typed_sampler);
-      nir_variable *bare_sampler = nir_variable_clone(typed_sampler, b->shader);
+      bare_sampler = nir_variable_clone(typed_sampler, b->shader);
       bare_sampler->type = get_bare_samplers_for_type(typed_sampler->type);
       nir_shader_add_variable(b->shader, bare_sampler);
       _mesa_hash_table_u64_insert(data, tex->sampler_index, bare_sampler);
@@ -1428,11 +1428,8 @@ redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *data)
       return false;
    }
 
-   struct hash_entry *hash_entry = _mesa_hash_table_u64_search(data, old_var->data.binding);
-   nir_variable *new_var;
-   if (hash_entry) {
-      new_var = hash_entry->data;
-   } else {
+   nir_variable *new_var = _mesa_hash_table_u64_search(data, old_var->data.binding);
+   if (!new_var) {
       new_var = nir_variable_clone(old_var, b->shader);
       new_var->type = get_bare_samplers_for_type(old_var->type);
       nir_shader_add_variable(b->shader, new_var);
@@ -1465,6 +1462,54 @@ dxil_nir_create_bare_samplers(nir_shader *nir)
    return progress;
 }
 
+
+static bool
+lower_bool_input_filter(const nir_instr *instr,
+                        UNUSED const void *_options)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   if (intr->intrinsic == nir_intrinsic_load_front_face)
+      return true;
+
+   if (intr->intrinsic == nir_intrinsic_load_deref) {
+      nir_deref_instr *deref = nir_instr_as_deref(intr->src[0].ssa->parent_instr);
+      nir_variable *var = nir_deref_instr_get_variable(deref);
+      return var->data.mode == nir_var_shader_in &&
+             glsl_get_base_type(var->type) == GLSL_TYPE_BOOL;
+   }
+
+   return false;
+}
+
+static nir_ssa_def *
+lower_bool_input_impl(nir_builder *b, nir_instr *instr,
+                      UNUSED void *_options)
+{
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+
+   if (intr->intrinsic == nir_intrinsic_load_deref) {
+      nir_deref_instr *deref = nir_instr_as_deref(intr->src[0].ssa->parent_instr);
+      nir_variable *var = nir_deref_instr_get_variable(deref);
+
+      /* rewrite var->type */
+      var->type = glsl_vector_type(GLSL_TYPE_UINT,
+                                   glsl_get_vector_elements(var->type));
+      deref->type = var->type;
+   }
+
+   intr->dest.ssa.bit_size = 32;
+   return nir_i2b1(b, &intr->dest.ssa);
+}
+
+bool
+dxil_nir_lower_bool_input(struct nir_shader *s)
+{
+   return nir_shader_lower_instructions(s, lower_bool_input_filter,
+                                        lower_bool_input_impl, NULL);
+}
 
 /* Comparison function to sort io values so that first come normal varyings,
  * then system values, and then system generated values.

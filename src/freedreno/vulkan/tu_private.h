@@ -60,6 +60,7 @@
 #include "vk_dispatch_table.h"
 #include "vk_extensions.h"
 #include "vk_instance.h"
+#include "vk_log.h"
 #include "vk_physical_device.h"
 #include "vk_shader_module.h"
 #include "wsi_common.h"
@@ -100,6 +101,7 @@ typedef uint32_t xcb_window_t;
 #define MAX_RTS 8
 #define MAX_VSC_PIPES 32
 #define MAX_VIEWPORTS 16
+#define MAX_VIEWPORT_SIZE (1 << 14)
 #define MAX_SCISSORS 16
 #define MAX_DISCARD_RECTANGLES 4
 #define MAX_PUSH_CONSTANTS_SIZE 128
@@ -134,25 +136,21 @@ typedef uint32_t xcb_window_t;
 struct tu_instance;
 
 VkResult
-__vk_errorf(struct tu_instance *instance,
-            VkResult error,
-            bool force_print,
-            const char *file,
-            int line,
-            const char *format,
-            ...) PRINTFLIKE(6, 7);
-
-#define vk_error(instance, error)                                            \
-   __vk_errorf(instance, error, false, __FILE__, __LINE__, NULL);
-#define vk_errorf(instance, error, format, ...)                              \
-   __vk_errorf(instance, error, false, __FILE__, __LINE__, format, ##__VA_ARGS__);
+__vk_startup_errorf(struct tu_instance *instance,
+                    VkResult error,
+                    bool force_print,
+                    const char *file,
+                    int line,
+                    const char *format,
+                    ...) PRINTFLIKE(6, 7);
 
 /* Prints startup errors if TU_DEBUG=startup is set or on a debug driver
  * build.
  */
 #define vk_startup_errorf(instance, error, format, ...) \
-   __vk_errorf(instance, error, instance->debug_flags & TU_DEBUG_STARTUP, \
-               __FILE__, __LINE__, format, ##__VA_ARGS__)
+   __vk_startup_errorf(instance, error, \
+                       instance->debug_flags & TU_DEBUG_STARTUP, \
+                       __FILE__, __LINE__, format, ##__VA_ARGS__)
 
 void
 __tu_finishme(const char *file, int line, const char *format, ...)
@@ -1017,11 +1015,14 @@ struct tu_cmd_state
    const struct tu_framebuffer *framebuffer;
    VkRect2D render_area;
 
+   const struct tu_image_view **attachments;
+
    bool xfb_used;
    bool has_tess;
    bool has_subpass_predication;
    bool predication_active;
    bool disable_gmem;
+   enum a5xx_line_mode line_mode;
 
    struct tu_lrz_state lrz;
 
@@ -1213,6 +1214,8 @@ struct tu_pipeline
 
    bool rb_depth_cntl_disable;
 
+   enum a5xx_line_mode line_mode;
+
    /* draw states for the pipeline */
    struct tu_draw_state load_state, rast_state, blend_state;
 
@@ -1282,7 +1285,8 @@ tu6_emit_depth_bias(struct tu_cs *cs,
                     float clamp,
                     float slope_factor);
 
-void tu6_emit_msaa(struct tu_cs *cs, VkSampleCountFlagBits samples);
+void tu6_emit_msaa(struct tu_cs *cs, VkSampleCountFlagBits samples,
+                   enum a5xx_line_mode line_mode);
 
 void tu6_emit_window_scissor(struct tu_cs *cs, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2);
 
@@ -1329,8 +1333,8 @@ struct tu_image_view;
 void
 tu_resolve_sysmem(struct tu_cmd_buffer *cmd,
                   struct tu_cs *cs,
-                  struct tu_image_view *src,
-                  struct tu_image_view *dst,
+                  const struct tu_image_view *src,
+                  const struct tu_image_view *dst,
                   uint32_t layer_mask,
                   uint32_t layers,
                   const VkRect2D *rect);
@@ -1364,22 +1368,18 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
                          uint32_t a,
                          uint32_t gmem_a);
 
-enum tu_supported_formats {
-   FMT_VERTEX = 1,
-   FMT_TEXTURE = 2,
-   FMT_COLOR = 4,
-};
-
 struct tu_native_format
 {
    enum a6xx_format fmt : 8;
    enum a3xx_color_swap swap : 8;
    enum a6xx_tile_mode tile_mode : 8;
-   enum tu_supported_formats supported : 8;
 };
 
+bool tu6_format_vtx_supported(VkFormat format);
 struct tu_native_format tu6_format_vtx(VkFormat format);
+bool tu6_format_color_supported(VkFormat format);
 struct tu_native_format tu6_format_color(VkFormat format, enum a6xx_tile_mode tile_mode);
+bool tu6_format_texture_supported(VkFormat format);
 struct tu_native_format tu6_format_texture(VkFormat format, enum a6xx_tile_mode tile_mode);
 
 static inline enum a6xx_format

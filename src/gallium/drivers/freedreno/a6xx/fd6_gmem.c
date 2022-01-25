@@ -81,7 +81,6 @@ emit_mrt(struct fd_ringbuffer *ring, struct pipe_framebuffer_state *pfb,
    unsigned max_layer_index = 0;
 
    for (i = 0; i < pfb->nr_cbufs; i++) {
-      enum a6xx_format format = 0;
       enum a3xx_color_swap swap = WZYX;
       bool sint = false, uint = false;
       struct fd_resource *rsc = NULL;
@@ -89,7 +88,6 @@ emit_mrt(struct fd_ringbuffer *ring, struct pipe_framebuffer_state *pfb,
       uint32_t stride = 0;
       uint32_t array_stride = 0;
       uint32_t offset;
-      uint32_t tile_mode;
 
       if (!pfb->cbufs[i])
          continue;
@@ -102,7 +100,8 @@ emit_mrt(struct fd_ringbuffer *ring, struct pipe_framebuffer_state *pfb,
 
       uint32_t base = gmem ? gmem->cbuf_base[i] : 0;
       slice = fd_resource_slice(rsc, psurf->u.tex.level);
-      format = fd6_pipe2color(pformat);
+      uint32_t tile_mode = fd_resource_tile_mode(psurf->texture, psurf->u.tex.level);
+      enum a6xx_format format = fd6_color_format(pformat, tile_mode);
       sint = util_format_is_pure_sint(pformat);
       uint = util_format_is_pure_uint(pformat);
 
@@ -114,9 +113,8 @@ emit_mrt(struct fd_ringbuffer *ring, struct pipe_framebuffer_state *pfb,
 
       stride = fd_resource_pitch(rsc, psurf->u.tex.level);
       array_stride = fd_resource_layer_stride(rsc, psurf->u.tex.level);
-      swap = fd6_resource_swap(rsc, pformat);
+      swap = fd6_color_swap(pformat, rsc->layout.tile_mode);
 
-      tile_mode = fd_resource_tile_mode(psurf->texture, psurf->u.tex.level);
       max_layer_index = psurf->u.tex.last_layer - psurf->u.tex.first_layer;
 
       debug_assert((offset + slice->size0) <= fd_bo_size(rsc->bo));
@@ -987,12 +985,12 @@ emit_blit(struct fd_batch *batch, struct fd_ringbuffer *ring, uint32_t base,
 
    debug_assert(psurf->u.tex.first_layer == psurf->u.tex.last_layer);
 
-   enum a6xx_format format = fd6_pipe2color(pfmt);
+   uint32_t tile_mode = fd_resource_tile_mode(&rsc->b.b, psurf->u.tex.level);
+   enum a6xx_format format = fd6_color_format(pfmt, tile_mode);
    uint32_t stride = fd_resource_pitch(rsc, psurf->u.tex.level);
    uint32_t size = fd_resource_slice(rsc, psurf->u.tex.level)->size0;
-   enum a3xx_color_swap swap = fd6_resource_swap(rsc, pfmt);
+   enum a3xx_color_swap swap = fd6_color_swap(pfmt, rsc->layout.tile_mode);
    enum a3xx_msaa_samples samples = fd_msaa_samples(rsc->b.b.nr_samples);
-   uint32_t tile_mode = fd_resource_tile_mode(&rsc->b.b, psurf->u.tex.level);
 
    OUT_REG(ring,
            A6XX_RB_BLIT_DST_INFO(.tile_mode = tile_mode, .samples = samples,
@@ -1052,7 +1050,7 @@ emit_clears(struct fd_batch *batch, struct fd_ringbuffer *ring)
 
          // XXX I think RB_CLEAR_COLOR_DWn wants to take into account SWAP??
          union pipe_color_union swapped;
-         switch (fd6_pipe2swap(pfmt)) {
+         switch (fd6_color_swap(pfmt, TILE6_LINEAR)) {
          case WZYX:
             swapped.ui[0] = color->ui[0];
             swapped.ui[1] = color->ui[1];
@@ -1085,7 +1083,7 @@ emit_clears(struct fd_batch *batch, struct fd_ringbuffer *ring)
          OUT_RING(ring,
                   A6XX_RB_BLIT_DST_INFO_TILE_MODE(TILE6_LINEAR) |
                      A6XX_RB_BLIT_DST_INFO_SAMPLES(samples) |
-                     A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(fd6_pipe2color(pfmt)));
+                     A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(fd6_color_format(pfmt, TILE6_LINEAR)));
 
          OUT_PKT4(ring, REG_A6XX_RB_BLIT_INFO, 1);
          OUT_RING(ring,
@@ -1137,7 +1135,7 @@ emit_clears(struct fd_batch *batch, struct fd_ringbuffer *ring)
       OUT_RING(ring,
                A6XX_RB_BLIT_DST_INFO_TILE_MODE(TILE6_LINEAR) |
                   A6XX_RB_BLIT_DST_INFO_SAMPLES(samples) |
-                  A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(fd6_pipe2color(pfmt)));
+                  A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(fd6_color_format(pfmt, TILE6_LINEAR)));
 
       OUT_PKT4(ring, REG_A6XX_RB_BLIT_INFO, 1);
       OUT_RING(ring, A6XX_RB_BLIT_INFO_GMEM |
@@ -1301,6 +1299,22 @@ needs_resolve(struct pipe_surface *psurf)
           (psurf->nr_samples != psurf->texture->nr_samples);
 }
 
+/**
+ * Returns the UNKNOWN_8C01 value for handling partial depth/stencil
+ * clear/stores to Z24S8.
+ */
+static uint32_t
+fd6_unknown_8c01(enum pipe_format format, unsigned buffers)
+{
+   if (format == PIPE_FORMAT_Z24_UNORM_S8_UINT) {
+      if (buffers == FD_BUFFER_DEPTH)
+         return 0x08000041;
+      else if (buffers == FD_BUFFER_STENCIL)
+         return 0x00084001;
+   }
+   return 0;
+}
+
 static void
 emit_resolve_blit(struct fd_batch *batch, struct fd_ringbuffer *ring,
                   uint32_t base, struct pipe_surface *psurf,
@@ -1320,7 +1334,12 @@ emit_resolve_blit(struct fd_batch *batch, struct fd_ringbuffer *ring,
     */
    if (needs_resolve(psurf) && !blit_can_resolve(psurf->format) &&
        (buffer != FD_BUFFER_STENCIL)) {
-      fd6_resolve_tile(batch, ring, base, psurf);
+      /* We could potentially use fd6_unknown_8c01() to handle partial z/s
+       * resolve to packed z/s, but we would need a corresponding ability in the
+       * !resolve case below, so batch_draw_tracking_for_dirty_bits() has us
+       * just do a restore of the other channel for partial packed z/s writes.
+       */
+      fd6_resolve_tile(batch, ring, base, psurf, 0);
       return;
    }
 
@@ -1479,7 +1498,7 @@ emit_sysmem_clears(struct fd_batch *batch, struct fd_ringbuffer *ring) assert_dt
             continue;
 
          fd6_clear_surface(ctx, ring, pfb->cbufs[i], pfb->width, pfb->height,
-                           &color);
+                           &color, 0);
       }
    }
    if (buffers & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL)) {
@@ -1491,12 +1510,11 @@ emit_sysmem_clears(struct fd_batch *batch, struct fd_ringbuffer *ring) assert_dt
             ? &fd_resource(pfb->zsbuf->texture)->stencil->b.b
             : NULL;
 
-      if ((has_depth && (buffers & PIPE_CLEAR_DEPTH)) ||
-          (!separate_stencil && (buffers & PIPE_CLEAR_STENCIL))) {
+      if ((buffers & PIPE_CLEAR_DEPTH) || (!separate_stencil && (buffers & PIPE_CLEAR_STENCIL))) {
          value.f[0] = batch->clear_depth;
          value.ui[1] = batch->clear_stencil;
          fd6_clear_surface(ctx, ring, pfb->zsbuf, pfb->width, pfb->height,
-                           &value);
+                           &value, fd6_unknown_8c01(pfb->zsbuf->format, buffers));
       }
 
       if (separate_stencil && (buffers & PIPE_CLEAR_STENCIL)) {
@@ -1507,7 +1525,7 @@ emit_sysmem_clears(struct fd_batch *batch, struct fd_ringbuffer *ring) assert_dt
          stencil_surf.texture = separate_stencil;
 
          fd6_clear_surface(ctx, ring, &stencil_surf, pfb->width, pfb->height,
-                           &value);
+                           &value, 0);
       }
    }
 

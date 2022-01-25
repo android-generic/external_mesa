@@ -149,13 +149,7 @@ build_occlusion_query_shader(struct radv_device *device)
    nir_ssa_def *dst_buf = radv_meta_load_descriptor(&b, 0, 0);
    nir_ssa_def *src_buf = radv_meta_load_descriptor(&b, 0, 1);
 
-   nir_ssa_def *invoc_id = nir_load_local_invocation_id(&b);
-   nir_ssa_def *wg_id = nir_load_workgroup_id(&b, 32);
-   nir_ssa_def *block_size =
-      nir_imm_ivec4(&b, b.shader->info.workgroup_size[0], b.shader->info.workgroup_size[1],
-                    b.shader->info.workgroup_size[2], 0);
-   nir_ssa_def *global_id = nir_iadd(&b, nir_imul(&b, wg_id, block_size), invoc_id);
-   global_id = nir_channel(&b, global_id, 0); // We only care about x here.
+   nir_ssa_def *global_id = get_global_ids(&b, 1);
 
    nir_ssa_def *input_stride = nir_imm_int(&b, db_count * 16);
    nir_ssa_def *input_base = nir_imul(&b, input_stride, global_id);
@@ -290,13 +284,7 @@ build_pipeline_statistics_query_shader(struct radv_device *device)
    nir_ssa_def *dst_buf = radv_meta_load_descriptor(&b, 0, 0);
    nir_ssa_def *src_buf = radv_meta_load_descriptor(&b, 0, 1);
 
-   nir_ssa_def *invoc_id = nir_load_local_invocation_id(&b);
-   nir_ssa_def *wg_id = nir_load_workgroup_id(&b, 32);
-   nir_ssa_def *block_size =
-      nir_imm_ivec4(&b, b.shader->info.workgroup_size[0], b.shader->info.workgroup_size[1],
-                    b.shader->info.workgroup_size[2], 0);
-   nir_ssa_def *global_id = nir_iadd(&b, nir_imul(&b, wg_id, block_size), invoc_id);
-   global_id = nir_channel(&b, global_id, 0); // We only care about x here.
+   nir_ssa_def *global_id = get_global_ids(&b, 1);
 
    nir_ssa_def *input_stride = nir_imm_int(&b, pipelinestat_block_size * 2);
    nir_ssa_def *input_base = nir_imul(&b, input_stride, global_id);
@@ -441,13 +429,7 @@ build_tfb_query_shader(struct radv_device *device)
    nir_ssa_def *src_buf = radv_meta_load_descriptor(&b, 0, 1);
 
    /* Compute global ID. */
-   nir_ssa_def *invoc_id = nir_load_local_invocation_id(&b);
-   nir_ssa_def *wg_id = nir_load_workgroup_id(&b, 32);
-   nir_ssa_def *block_size =
-      nir_imm_ivec4(&b, b.shader->info.workgroup_size[0], b.shader->info.workgroup_size[1],
-                    b.shader->info.workgroup_size[2], 0);
-   nir_ssa_def *global_id = nir_iadd(&b, nir_imul(&b, wg_id, block_size), invoc_id);
-   global_id = nir_channel(&b, global_id, 0); // We only care about x here.
+   nir_ssa_def *global_id = get_global_ids(&b, 1);
 
    /* Compute src/dst strides. */
    nir_ssa_def *input_stride = nir_imm_int(&b, 32);
@@ -571,13 +553,7 @@ build_timestamp_query_shader(struct radv_device *device)
    nir_ssa_def *src_buf = radv_meta_load_descriptor(&b, 0, 1);
 
    /* Compute global ID. */
-   nir_ssa_def *invoc_id = nir_load_local_invocation_id(&b);
-   nir_ssa_def *wg_id = nir_load_workgroup_id(&b, 32);
-   nir_ssa_def *block_size =
-      nir_imm_ivec4(&b, b.shader->info.workgroup_size[0], b.shader->info.workgroup_size[1],
-                    b.shader->info.workgroup_size[2], 0);
-   nir_ssa_def *global_id = nir_iadd(&b, nir_imul(&b, wg_id, block_size), invoc_id);
-   global_id = nir_channel(&b, global_id, 0); // We only care about x here.
+   nir_ssa_def *global_id = get_global_ids(&b, 1);
 
    /* Compute src/dst strides. */
    nir_ssa_def *input_stride = nir_imm_int(&b, 8);
@@ -830,8 +806,8 @@ static void
 radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkPipeline *pipeline,
                   struct radeon_winsys_bo *src_bo, struct radeon_winsys_bo *dst_bo,
                   uint64_t src_offset, uint64_t dst_offset, uint32_t src_stride,
-                  uint32_t dst_stride, uint32_t count, uint32_t flags, uint32_t pipeline_stats_mask,
-                  uint32_t avail_offset)
+                  uint32_t dst_stride, size_t dst_size, uint32_t count, uint32_t flags,
+                  uint32_t pipeline_stats_mask, uint32_t avail_offset)
 {
    struct radv_device *device = cmd_buffer->device;
    struct radv_meta_saved_state saved_state;
@@ -857,7 +833,7 @@ radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkPipeline *pipeline,
    cmd_buffer->state.predicating = false;
 
    uint64_t src_buffer_size = MAX2(src_stride * count, avail_offset + 4 * count - src_offset);
-   uint64_t dst_buffer_size = count == 1 ? src_stride : dst_stride * count;
+   uint64_t dst_buffer_size = dst_stride * (count - 1) + dst_size;
 
    radv_buffer_init(&src_buffer, device, src_bo, src_buffer_size, src_offset);
    radv_buffer_init(&dst_buffer, device, dst_bo, dst_buffer_size, dst_offset);
@@ -952,7 +928,7 @@ radv_CreateQueryPool(VkDevice _device, const VkQueryPoolCreateInfo *pCreateInfo,
       vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*pool), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
 
    if (!pool)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    vk_object_base_init(&device->vk, &pool->base, VK_OBJECT_TYPE_QUERY_POOL);
 
@@ -987,13 +963,13 @@ radv_CreateQueryPool(VkDevice _device, const VkQueryPoolCreateInfo *pCreateInfo,
                                                RADV_BO_PRIORITY_QUERY_POOL, 0, &pool->bo);
    if (result != VK_SUCCESS) {
       radv_destroy_query_pool(device, pAllocator, pool);
-      return vk_error(device->instance, result);
+      return vk_error(device, result);
    }
 
    pool->ptr = device->ws->buffer_map(pool->bo);
    if (!pool->ptr) {
       radv_destroy_query_pool(device, pAllocator, pool);
-      return vk_error(device->instance, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
    *pQueryPool = radv_query_pool_to_handle(pool);
@@ -1208,6 +1184,29 @@ emit_query_flush(struct radv_cmd_buffer *cmd_buffer, struct radv_query_pool *poo
    }
 }
 
+static size_t
+radv_query_result_size(const struct radv_query_pool *pool, VkQueryResultFlags flags)
+{
+   unsigned values = (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ? 1 : 0;
+   switch (pool->type) {
+   case VK_QUERY_TYPE_TIMESTAMP:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR:
+   case VK_QUERY_TYPE_OCCLUSION:
+      values += 1;
+      break;
+   case VK_QUERY_TYPE_PIPELINE_STATISTICS:
+      values += util_bitcount(pool->pipeline_stats_mask);
+      break;
+   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
+      values += 2;
+      break;
+   default:
+      unreachable("trying to get size of unhandled query type");
+   }
+   return values * ((flags & VK_QUERY_RESULT_64_BIT) ? 8 : 4);
+}
+
 void
 radv_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
                              uint32_t firstQuery, uint32_t queryCount, VkBuffer dstBuffer,
@@ -1219,7 +1218,11 @@ radv_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPoo
    struct radeon_cmdbuf *cs = cmd_buffer->cs;
    uint64_t va = radv_buffer_get_va(pool->bo);
    uint64_t dest_va = radv_buffer_get_va(dst_buffer->bo);
+   size_t dst_size = radv_query_result_size(pool, flags);
    dest_va += dst_buffer->offset + dstOffset;
+
+   if (!queryCount)
+      return;
 
    radv_cs_add_buffer(cmd_buffer->device->ws, cmd_buffer->cs, pool->bo);
    radv_cs_add_buffer(cmd_buffer->device->ws, cmd_buffer->cs, dst_buffer->bo);
@@ -1251,8 +1254,8 @@ radv_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPoo
       }
       radv_query_shader(cmd_buffer, &cmd_buffer->device->meta_state.query.occlusion_query_pipeline,
                         pool->bo, dst_buffer->bo, firstQuery * pool->stride,
-                        dst_buffer->offset + dstOffset, pool->stride, stride, queryCount, flags, 0,
-                        0);
+                        dst_buffer->offset + dstOffset, pool->stride, stride, dst_size, queryCount,
+                        flags, 0, 0);
       break;
    case VK_QUERY_TYPE_PIPELINE_STATISTICS:
       if (flags & VK_QUERY_RESULT_WAIT_BIT) {
@@ -1267,11 +1270,11 @@ radv_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPoo
             radv_cp_wait_mem(cs, WAIT_REG_MEM_EQUAL, avail_va, 1, 0xffffffff);
          }
       }
-      radv_query_shader(cmd_buffer,
-                        &cmd_buffer->device->meta_state.query.pipeline_statistics_query_pipeline,
-                        pool->bo, dst_buffer->bo, firstQuery * pool->stride,
-                        dst_buffer->offset + dstOffset, pool->stride, stride, queryCount, flags,
-                        pool->pipeline_stats_mask, pool->availability_offset + 4 * firstQuery);
+      radv_query_shader(
+         cmd_buffer, &cmd_buffer->device->meta_state.query.pipeline_statistics_query_pipeline,
+         pool->bo, dst_buffer->bo, firstQuery * pool->stride, dst_buffer->offset + dstOffset,
+         pool->stride, stride, dst_size, queryCount, flags, pool->pipeline_stats_mask,
+         pool->availability_offset + 4 * firstQuery);
       break;
    case VK_QUERY_TYPE_TIMESTAMP:
    case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
@@ -1293,8 +1296,8 @@ radv_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPoo
 
       radv_query_shader(cmd_buffer, &cmd_buffer->device->meta_state.query.timestamp_query_pipeline,
                         pool->bo, dst_buffer->bo, firstQuery * pool->stride,
-                        dst_buffer->offset + dstOffset, pool->stride, stride, queryCount, flags, 0,
-                        0);
+                        dst_buffer->offset + dstOffset, pool->stride, stride, dst_size, queryCount,
+                        flags, 0, 0);
       break;
    case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
       if (flags & VK_QUERY_RESULT_WAIT_BIT) {
@@ -1314,8 +1317,8 @@ radv_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPoo
 
       radv_query_shader(cmd_buffer, &cmd_buffer->device->meta_state.query.tfb_query_pipeline,
                         pool->bo, dst_buffer->bo, firstQuery * pool->stride,
-                        dst_buffer->offset + dstOffset, pool->stride, stride, queryCount, flags, 0,
-                        0);
+                        dst_buffer->offset + dstOffset, pool->stride, stride, dst_size, queryCount,
+                        flags, 0, 0);
       break;
    default:
       unreachable("trying to get results of unhandled query type");

@@ -218,7 +218,10 @@ panfrost_create_surface(struct pipe_context *pipe,
                         struct pipe_resource *pt,
                         const struct pipe_surface *surf_tmpl)
 {
+        struct panfrost_context *ctx = pan_context(pipe);
         struct pipe_surface *ps = NULL;
+
+        pan_legalize_afbc_format(ctx, pan_resource(pt), surf_tmpl->format);
 
         ps = CALLOC_STRUCT(pipe_surface);
 
@@ -355,8 +358,8 @@ panfrost_should_afbc(struct panfrost_device *dev,
         if (pres->base.bind & ~valid_binding)
                 return false;
 
-        /* AFBC introduced with Mali T760 */
-        if (dev->quirks & MIDGARD_NO_AFBC)
+        /* AFBC support is optional */
+        if (!dev->has_afbc)
                 return false;
 
         /* AFBC<-->staging is expensive */
@@ -836,7 +839,8 @@ panfrost_ptr_map(struct pipe_context *pctx,
         struct panfrost_context *ctx = pan_context(pctx);
         struct panfrost_device *dev = pan_device(pctx->screen);
         struct panfrost_resource *rsrc = pan_resource(resource);
-        int bytes_per_pixel = util_format_get_blocksize(rsrc->image.layout.format);
+        enum pipe_format format = rsrc->image.layout.format;
+        int bytes_per_block = util_format_get_blocksize(format);
         struct panfrost_bo *bo = rsrc->image.data.bo;
 
         /* Can't map tiled/compressed directly */
@@ -967,9 +971,17 @@ panfrost_ptr_map(struct pipe_context *pctx,
                 }
         }
 
+        /* For access to compressed textures, we want the (x, y, w, h)
+         * region-of-interest in blocks, not pixels. Then we compute the stride
+         * between rows of blocks as the width in blocks times the width per
+         * block, etc.
+         */
+        struct pipe_box box_blocks;
+        u_box_pixels_to_blocks(&box_blocks, box, format);
+
         if (rsrc->image.layout.modifier == DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED) {
-                transfer->base.stride = box->width * bytes_per_pixel;
-                transfer->base.layer_stride = transfer->base.stride * box->height;
+                transfer->base.stride = box_blocks.width * bytes_per_block;
+                transfer->base.layer_stride = transfer->base.stride * box_blocks.height;
                 transfer->map = ralloc_size(transfer, transfer->base.layer_stride * box->depth);
                 assert(box->depth == 1);
 
@@ -1010,9 +1022,9 @@ panfrost_ptr_map(struct pipe_context *pctx,
 
                 return bo->ptr.cpu
                        + rsrc->image.layout.slices[level].offset
-                       + transfer->base.box.z * transfer->base.layer_stride
-                       + transfer->base.box.y * rsrc->image.layout.slices[level].line_stride
-                       + transfer->base.box.x * bytes_per_pixel;
+                       + box->z * transfer->base.layer_stride
+                       + box_blocks.y * rsrc->image.layout.slices[level].line_stride
+                       + box_blocks.x * bytes_per_block;
         }
 }
 
@@ -1065,6 +1077,29 @@ pan_resource_modifier_convert(struct panfrost_context *ctx,
         panfrost_resource_setup(pan_device(ctx->base.screen), rsrc, modifier,
                                 blit.dst.format);
         pipe_resource_reference(&tmp_prsrc, NULL);
+}
+
+/* Validate that an AFBC resource may be used as a particular format. If it may
+ * not, decompress it on the fly. Failure to do so can produce wrong results or
+ * invalid data faults when sampling or rendering to AFBC */
+
+void
+pan_legalize_afbc_format(struct panfrost_context *ctx,
+                         struct panfrost_resource *rsrc,
+                         enum pipe_format format)
+{
+        struct panfrost_device *dev = pan_device(ctx->base.screen);
+
+        if (!drm_is_afbc(rsrc->image.layout.modifier))
+                return;
+
+        if (panfrost_afbc_format(dev, pan_blit_format(rsrc->base.format)) ==
+            panfrost_afbc_format(dev, pan_blit_format(format)))
+                return;
+
+        pan_resource_modifier_convert(ctx, rsrc,
+                        DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED,
+                        "Reinterpreting AFBC surface as incompatible format");
 }
 
 static bool

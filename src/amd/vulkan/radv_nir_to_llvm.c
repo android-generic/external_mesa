@@ -111,8 +111,10 @@ create_llvm_function(struct ac_llvm_context *ctx, LLVMModuleRef module, LLVMBuil
 static void
 load_descriptor_sets(struct radv_shader_context *ctx)
 {
+   struct radv_userdata_locations *user_sgprs_locs = &ctx->args->shader_info->user_sgprs_locs;
    uint32_t mask = ctx->args->shader_info->desc_set_used_mask;
-   if (ctx->args->shader_info->need_indirect_descriptor_sets) {
+
+   if (user_sgprs_locs->shader_data[AC_UD_INDIRECT_DESCRIPTOR_SETS].sgpr_idx != -1) {
       LLVMValueRef desc_sets = ac_get_arg(&ctx->ac, ctx->args->descriptor_sets[0]);
       while (mask) {
          int i = u_bit_scan(&mask);
@@ -497,6 +499,9 @@ radv_get_sampler_desc(struct ac_shader_abi *abi, unsigned descriptor_set, unsign
 
    assert(base_index < layout->binding_count);
 
+   if (binding->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && desc_type == AC_DESC_FMASK)
+      return NULL;
+
    switch (desc_type) {
    case AC_DESC_IMAGE:
       type = ctx->ac.v8i32;
@@ -601,14 +606,14 @@ radv_get_sampler_desc(struct ac_shader_abi *abi, unsigned descriptor_set, unsign
 static LLVMValueRef
 adjust_vertex_fetch_alpha(struct radv_shader_context *ctx, unsigned adjustment, LLVMValueRef alpha)
 {
-   if (adjustment == AC_FETCH_FORMAT_NONE)
+   if (adjustment == ALPHA_ADJUST_NONE)
       return alpha;
 
    LLVMValueRef c30 = LLVMConstInt(ctx->ac.i32, 30, 0);
 
    alpha = LLVMBuildBitCast(ctx->ac.builder, alpha, ctx->ac.f32, "");
 
-   if (adjustment == AC_FETCH_FORMAT_SSCALED)
+   if (adjustment == ALPHA_ADJUST_SSCALED)
       alpha = LLVMBuildFPToUI(ctx->ac.builder, alpha, ctx->ac.i32, "");
    else
       alpha = ac_to_integer(&ctx->ac, alpha);
@@ -621,17 +626,17 @@ adjust_vertex_fetch_alpha(struct radv_shader_context *ctx, unsigned adjustment, 
     */
    alpha =
       LLVMBuildShl(ctx->ac.builder, alpha,
-                   adjustment == AC_FETCH_FORMAT_SNORM ? LLVMConstInt(ctx->ac.i32, 7, 0) : c30, "");
+                   adjustment == ALPHA_ADJUST_SNORM ? LLVMConstInt(ctx->ac.i32, 7, 0) : c30, "");
    alpha = LLVMBuildAShr(ctx->ac.builder, alpha, c30, "");
 
    /* Convert back to the right type. */
-   if (adjustment == AC_FETCH_FORMAT_SNORM) {
+   if (adjustment == ALPHA_ADJUST_SNORM) {
       LLVMValueRef clamp;
       LLVMValueRef neg_one = LLVMConstReal(ctx->ac.f32, -1.0);
       alpha = LLVMBuildSIToFP(ctx->ac.builder, alpha, ctx->ac.f32, "");
       clamp = LLVMBuildFCmp(ctx->ac.builder, LLVMRealULT, alpha, neg_one, "");
       alpha = LLVMBuildSelect(ctx->ac.builder, clamp, neg_one, alpha, "");
-   } else if (adjustment == AC_FETCH_FORMAT_SSCALED) {
+   } else if (adjustment == ALPHA_ADJUST_SSCALED) {
       alpha = LLVMBuildSIToFP(ctx->ac.builder, alpha, ctx->ac.f32, "");
    }
 
@@ -1181,8 +1186,6 @@ radv_build_param_exports(struct radv_shader_context *ctx, struct radv_shader_out
                          unsigned noutput, struct radv_vs_output_info *outinfo,
                          bool export_clip_dists)
 {
-   unsigned param_count = 0;
-
    for (unsigned i = 0; i < noutput; i++) {
       unsigned slot_name = outputs[i].slot_name;
       unsigned usage_mask = outputs[i].usage_mask;
@@ -1196,7 +1199,8 @@ radv_build_param_exports(struct radv_shader_context *ctx, struct radv_shader_out
           !export_clip_dists)
          continue;
 
-      radv_export_param(ctx, param_count, outputs[i].values, usage_mask);
+      radv_export_param(ctx, outinfo->vs_output_param_offset[slot_name], outputs[i].values,
+                        usage_mask);
    }
 }
 
@@ -1662,7 +1666,6 @@ handle_ngg_outputs_post_2(struct radv_shader_context *ctx)
       handle_vs_outputs_post(ctx, false, outinfo->export_clip_dists, outinfo);
 
       if (outinfo->export_prim_id) {
-         unsigned param_count = outinfo->param_exports;
          LLVMValueRef values[4];
 
          if (ctx->stage == MESA_SHADER_VERTEX) {
@@ -1680,7 +1683,8 @@ handle_ngg_outputs_post_2(struct radv_shader_context *ctx)
          for (unsigned j = 1; j < 4; j++)
             values[j] = ctx->ac.f32_0;
 
-         radv_export_param(ctx, param_count, values, 0x1);
+         radv_export_param(ctx, outinfo->vs_output_param_offset[VARYING_SLOT_PRIMITIVE_ID], values,
+                           0x1);
       }
    }
    ac_build_endif(&ctx->ac, 6002);
@@ -2388,7 +2392,7 @@ ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm, struct nir_shader *co
 
    enum ac_float_mode float_mode = AC_FLOAT_MODE_DEFAULT;
 
-   if (args->shader_info->float_controls_mode & FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32) {
+   if (shaders[0]->info.float_controls_execution_mode & FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32) {
       float_mode = AC_FLOAT_MODE_DENORM_FLUSH_TO_ZERO;
    }
 
@@ -2681,13 +2685,6 @@ radv_compile_nir_shader(struct ac_llvm_compiler *ac_llvm, struct radv_shader_bin
    ac_compile_llvm_module(ac_llvm, llvm_module, rbinary, nir[nir_count - 1]->info.stage,
                           radv_get_shader_name(args->shader_info, nir[nir_count - 1]->info.stage),
                           args->options);
-
-   /* Determine the ES type (VS or TES) for the GS on GFX9. */
-   if (args->options->chip_class >= GFX9) {
-      if (nir_count == 2 && nir[1]->info.stage == MESA_SHADER_GEOMETRY) {
-         args->shader_info->gs.es_type = nir[0]->info.stage;
-      }
-   }
 }
 
 static void

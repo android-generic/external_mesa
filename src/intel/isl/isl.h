@@ -1255,6 +1255,8 @@ struct isl_device {
       uint8_t clear_value_offset;
    } ss;
 
+   uint64_t max_buffer_size;
+
    /**
     * Describes the layout of the depth/stencil/hiz commands as emitted by
     * isl_emit_depth_stencil_hiz.
@@ -1818,6 +1820,7 @@ bool isl_formats_are_ccs_e_compatible(const struct intel_device_info *devinfo,
                                       enum isl_format format1,
                                       enum isl_format format2);
 uint8_t isl_format_get_aux_map_encoding(enum isl_format format);
+uint8_t isl_get_render_compression_format(enum isl_format format);
 
 bool isl_format_has_unorm_channel(enum isl_format fmt) ATTRIBUTE_CONST;
 bool isl_format_has_snorm_channel(enum isl_format fmt) ATTRIBUTE_CONST;

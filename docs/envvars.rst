@@ -618,8 +618,6 @@ RADV driver environment variables
       force all allocated buffers to be referenced in submissions
    ``checkir``
       validate the LLVM IR before LLVM compiles the shader
-   ``errors``
-      display more info about errors
    ``forcecompress``
       Enables DCC,FMASK,CMASK,HTILE in situations where the driver supports it
       but normally does not deem it beneficial.
@@ -659,6 +657,8 @@ RADV driver environment variables
       disable memory shaders cache
    ``nongg``
       disable NGG for GFX10+
+   ``nonggc``
+      disable NGG culling on GPUs where it's enabled by default (GFX10.3+ only).
    ``nooutoforder``
       disable out-of-order rasterization
    ``notccompatcmask``
@@ -670,6 +670,8 @@ RADV driver environment variables
       disable VRS for flat shading (only on GFX10.3+)
    ``preoptir``
       dump LLVM IR before any optimizations
+   ``prologs``
+      dump vertex shader prologs
    ``shaders``
       dump shaders
    ``shaderstats``
@@ -702,6 +704,9 @@ RADV driver environment variables
       enable wave32 for compute shaders (GFX10+)
    ``dccmsaa``
       enable DCC for MSAA images
+   ``force_emulate_rt``
+      forces ray-tracing to be emulated in software,
+      even if there is hardware support.
    ``gewave32``
       enable wave32 for vertex/tess/geometry shaders (GFX10+)
    ``localbos``
@@ -711,7 +716,7 @@ RADV driver environment variables
    ``pswave32``
       enable wave32 for pixel shaders (GFX10+)
    ``nggc``
-      enable NGG culling on GFX10+ GPUs.
+      enable NGG culling on GPUs where it's not enabled by default (GFX10.1 only).
    ``rt``
       enable rt extensions whose implementation is still experimental.
    ``sam``

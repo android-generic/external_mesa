@@ -190,7 +190,6 @@ static const struct spirv_to_nir_options default_spirv_options =  {
    .phys_ssbo_addr_format = nir_address_format_64bit_global,
    .push_const_addr_format = nir_address_format_logical,
    .shared_addr_format = nir_address_format_32bit_offset,
-   .frag_coord_is_sysval = false,
 };
 
 const nir_shader_compiler_options v3dv_nir_options = {
@@ -466,6 +465,12 @@ shader_module_compile_to_nir(struct v3dv_device *device,
       nir_validate_shader(nir, "nir module");
    }
    assert(nir->info.stage == broadcom_shader_stage_to_gl(stage->stage));
+
+   const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
+      .frag_coord = true,
+      .point_coord = true,
+   };
+   NIR_PASS_V(nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
 
    if (unlikely(V3D_DEBUG & (V3D_DEBUG_NIR |
                              v3d_debug_flag_for_shader_stage(
@@ -1407,7 +1412,11 @@ pipeline_stage_create_binning(const struct v3dv_pipeline_stage *src,
    p_stage->stage = bin_stage;
    p_stage->entrypoint = src->entrypoint;
    p_stage->module = src->module;
-   p_stage->nir = src->nir ? nir_shader_clone(NULL, src->nir) : NULL;
+   /* For binning shaders we will clone the NIR code from the corresponding
+    * render shader later, when we call pipeline_compile_xxx_shader. This way
+    * we only have to run the relevant NIR lowerings once for render shaders
+    */
+   p_stage->nir = NULL;
    p_stage->spec_info = src->spec_info;
    p_stage->feedback = (VkPipelineCreationFeedbackEXT) { 0 };
    memcpy(p_stage->shader_sha1, src->shader_sha1, 20);
@@ -3044,7 +3053,7 @@ graphics_pipeline_create(VkDevice _device,
                                VK_OBJECT_TYPE_PIPELINE);
 
    if (pipeline == NULL)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    result = pipeline_init(pipeline, device, cache,
                           pCreateInfo,
@@ -3279,7 +3288,7 @@ compute_pipeline_create(VkDevice _device,
    pipeline = vk_object_zalloc(&device->vk, pAllocator, sizeof(*pipeline),
                                VK_OBJECT_TYPE_PIPELINE);
    if (pipeline == NULL)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    result = compute_pipeline_init(pipeline, device, cache,
                                   pCreateInfo, pAllocator);

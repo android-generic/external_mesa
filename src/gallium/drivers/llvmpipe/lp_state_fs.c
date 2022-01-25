@@ -452,10 +452,13 @@ static LLVMValueRef fs_interp(const struct lp_build_fs_iface *iface,
 }
 
 static void fs_fb_fetch(const struct lp_build_fs_iface *iface,
-                                struct lp_build_context *bld,
-                                unsigned cbuf,
-                                LLVMValueRef result[4])
+                        struct lp_build_context *bld,
+                        int location,
+                        LLVMValueRef result[4])
 {
+   assert(location >= FRAG_RESULT_DATA0 && location <= FRAG_RESULT_DATA7);
+   const int cbuf = location - FRAG_RESULT_DATA0;
+
    struct lp_build_fs_llvm_iface *fs_iface = (struct lp_build_fs_llvm_iface *)iface;
    struct gallivm_state *gallivm = bld->gallivm;
    LLVMBuilderRef builder = gallivm->builder;
@@ -1709,6 +1712,15 @@ scale_bits(struct gallivm_state *gallivm,
       int delta_bits = src_bits - dst_bits;
 
       if (delta_bits <= dst_bits) {
+
+         if (dst_bits == 4) {
+            struct lp_type flt_type = lp_type_float_vec(32, src_type.length * 32);
+
+            result = lp_build_unsigned_norm_to_float(gallivm, src_bits, flt_type, src);
+            result = lp_build_clamped_float_to_unsigned_norm(gallivm, flt_type, dst_bits, result);
+            return result;
+         }
+
          /*
           * Approximate the rescaling with a single shift.
           *

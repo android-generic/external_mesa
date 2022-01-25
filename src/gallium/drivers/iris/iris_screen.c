@@ -572,10 +572,7 @@ iris_get_compute_param(struct pipe_screen *pscreen,
       RET((uint32_t []) { 400 }); /* TODO */
 
    case PIPE_COMPUTE_CAP_MAX_COMPUTE_UNITS: {
-      unsigned total_num_subslices = 0;
-      for (unsigned i = 0; i < devinfo->num_slices; i++)
-         total_num_subslices += devinfo->num_subslices[i];
-      RET((uint32_t []) { total_num_subslices });
+      RET((uint32_t []) { intel_device_info_subslice_total(devinfo) });
    }
 
    case PIPE_COMPUTE_CAP_MAX_PRIVATE_SIZE:
@@ -705,7 +702,7 @@ iris_shader_perf_log(void *data, unsigned *id, const char *fmt, ...)
    va_list args;
    va_start(args, fmt);
 
-   if (INTEL_DEBUG & DEBUG_PERF) {
+   if (INTEL_DEBUG(DEBUG_PERF)) {
       va_list args_copy;
       va_copy(args_copy, args);
       vfprintf(stderr, fmt, args_copy);

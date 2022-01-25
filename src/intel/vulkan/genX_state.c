@@ -156,11 +156,12 @@ static VkResult
 init_render_queue_state(struct anv_queue *queue)
 {
    struct anv_device *device = queue->device;
-   struct anv_batch batch;
-
    uint32_t cmds[64];
-   batch.start = batch.next = cmds;
-   batch.end = (void *) cmds + sizeof(cmds);
+   struct anv_batch batch = {
+      .start = cmds,
+      .next = cmds,
+      .end = (void *) cmds + sizeof(cmds),
+   };
 
    anv_batch_emit(&batch, GENX(PIPELINE_SELECT), ps) {
 #if GFX_VER >= 9
@@ -341,7 +342,7 @@ genX(init_device_state)(struct anv_device *device)
          res = init_render_queue_state(queue);
          break;
       default:
-         res = vk_error(VK_ERROR_INITIALIZATION_FAILED);
+         res = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
          break;
       }
       if (res != VK_SUCCESS)
@@ -708,7 +709,7 @@ VkResult genX(CreateSampler)(
    sampler = vk_object_zalloc(&device->vk, pAllocator, sizeof(*sampler),
                               VK_OBJECT_TYPE_SAMPLER);
    if (!sampler)
-      return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    sampler->n_planes = 1;
 

@@ -414,6 +414,35 @@ else
   with_xlib_lease = _xlib_lease == 'enabled'
 endif
 
+if with_platform_wayland
+  c_args += '-DVK_USE_PLATFORM_WAYLAND_KHR'
+  #add this once aco and other places can build with it
+  #cpp_args += '-DVK_USE_PLATFORM_WAYLAND_KHR'
+endif
+if with_platform_x11
+  c_args += ['-DVK_USE_PLATFORM_XCB_KHR', '-DVK_USE_PLATFORM_XLIB_KHR']
+  #add this once aco and other places can build with it
+  #cpp_args += ['-DVK_USE_PLATFORM_XCB_KHR', '-DVK_USE_PLATFORM_XLIB_KHR']
+endif
+if with_platform_windows
+  c_args += '-DVK_USE_PLATFORM_WIN32_KHR'
+  #add this once aco and other places can build with it
+  #cpp_args += '-DVK_USE_PLATFORM_WIN32_KHR'
+endif
+if with_platform_android
+  c_args += '-DVK_USE_PLATFORM_ANDROID_KHR'
+  cpp_args += '-DVK_USE_PLATFORM_ANDROID_KHR'
+endif
+if with_xlib_lease
+  c_args += '-DVK_USE_PLATFORM_XLIB_XRANDR_EXT'
+  #add this once aco and other places can build with it
+  #cpp_args += '-DVK_USE_PLATFORM_XLIB_XRANDR_EXT'
+endif
+if system_has_kms_drm and not with_platform_android
+  c_args += '-DVK_USE_PLATFORM_DISPLAY_KHR'
+  cpp_args += '-DVK_USE_PLATFORM_DISPLAY_KHR'
+endif
+
 _egl = get_option('egl')
 if _egl == 'true'
   _egl = 'enabled'
@@ -1095,7 +1124,6 @@ else
     '-Werror=incompatible-pointer-types',
     '-Werror=int-conversion',
     '-Wimplicit-fallthrough',
-    '-Werror=thread-safety',
     '-Wno-missing-field-initializers',
     '-Wno-format-truncation',
     '-fno-math-errno',
@@ -1106,6 +1134,10 @@ else
   # MinGW chokes on format specifiers and I can't get it all working
   if not (cc.get_id() == 'gcc' and host_machine.system() == 'windows')
     _trial += ['-Werror=format', '-Wformat-security']
+  endif
+  # FreeBSD annotated <pthread.h> but Mesa isn't ready
+  if not (cc.get_id() == 'clang' and host_machine.system() == 'freebsd')
+    _trial += ['-Werror=thread-safety']
   endif
   foreach a : _trial
     if cc.has_argument(a)
@@ -1179,11 +1211,22 @@ if host_machine.system() == 'windows'
     endif
   else
     add_project_link_arguments(
-      '-Wl,--nxcompat',
-      '-Wl,--dynamicbase',
-      '-static-libgcc',
-      '-static-libstdc++',
-      language : ['c', 'cpp'],
+      cc.get_supported_link_arguments(
+        '-Wl,--nxcompat',
+        '-Wl,--dynamicbase',
+        '-static-libgcc',
+        '-static-libstdc++',
+      ),
+      language : ['c'],
+    )
+    add_project_link_arguments(
+      cpp.get_supported_link_arguments(
+        '-Wl,--nxcompat',
+        '-Wl,--dynamicbase',
+        '-static-libgcc',
+        '-static-libstdc++',
+      ),
+      language : ['cpp'],
     )
   endif
 endif
@@ -2221,10 +2264,6 @@ if with_egl
   lines += 'EGL drivers:     ' + ' '.join(egl_drivers)
 endif
 if with_egl or with_any_vk
-  _platforms += 'surfaceless'
-  if with_gbm and not with_platform_android
-    _platforms += 'drm'
-  endif
   lines += 'EGL/Vulkan/VL platforms:   ' + ' '.join(_platforms)
 endif
 lines += 'GBM:             ' + (with_gbm ? 'yes' : 'no')

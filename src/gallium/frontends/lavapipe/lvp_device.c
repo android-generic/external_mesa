@@ -26,6 +26,8 @@
 #include "pipe-loader/pipe_loader.h"
 #include "git_sha1.h"
 #include "vk_util.h"
+#include "pipe/p_config.h"
+#include "pipe/p_defines.h"
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
 #include "frontend/drisw_api.h"
@@ -40,8 +42,7 @@
 #if defined(VK_USE_PLATFORM_WAYLAND_KHR) || \
     defined(VK_USE_PLATFORM_WIN32_KHR) || \
     defined(VK_USE_PLATFORM_XCB_KHR) || \
-    defined(VK_USE_PLATFORM_XLIB_KHR) || \
-    defined(VK_USE_PLATFORM_DISPLAY_KHR)
+    defined(VK_USE_PLATFORM_XLIB_KHR)
 #define LVP_USE_WSI_PLATFORM
 #endif
 #define LVP_API_VERSION VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)
@@ -76,15 +77,6 @@ static const struct vk_instance_extension_table lvp_instance_extensions_supporte
 #ifdef VK_USE_PLATFORM_XLIB_KHR
    .KHR_xlib_surface                         = true,
 #endif
-#ifdef VK_USE_PLATFORM_XLIB_XRANDR_EXT
-   .EXT_acquire_xlib_display                 = true,
-#endif
-#ifdef VK_USE_PLATFORM_DISPLAY_KHR
-   .KHR_display                              = true,
-   .KHR_get_display_properties2              = true,
-   .EXT_direct_mode_display                  = true,
-   .EXT_display_surface_counter              = true,
-#endif
 };
 
 static const struct vk_device_extension_table lvp_device_extensions_supported = {
@@ -102,6 +94,9 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .KHR_driver_properties                 = true,
    .KHR_external_fence                    = true,
    .KHR_external_memory                   = true,
+#ifdef PIPE_MEMORY_FD
+   .KHR_external_memory_fd                = true,
+#endif
    .KHR_external_semaphore                = true,
    .KHR_shader_float_controls             = true,
    .KHR_get_memory_requirements2          = true,
@@ -130,6 +125,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .KHR_timeline_semaphore                = true,
    .KHR_uniform_buffer_standard_layout    = true,
    .KHR_variable_pointers                 = true,
+   .EXT_4444_formats                      = true,
    .EXT_calibrated_timestamps             = true,
    .EXT_color_write_enable                = true,
    .EXT_conditional_rendering             = true,
@@ -168,6 +164,8 @@ lvp_physical_device_init(struct lvp_physical_device *device,
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &lvp_physical_device_entrypoints, true);
+   vk_physical_device_dispatch_table_from_entrypoints(
+      &dispatch_table, &wsi_physical_device_entrypoints, false);
    result = vk_physical_device_init(&device->vk, &instance->vk,
                                     NULL, &dispatch_table);
    if (result != VK_SUCCESS) {
@@ -223,6 +221,8 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateInstance(
    struct vk_instance_dispatch_table dispatch_table;
    vk_instance_dispatch_table_from_entrypoints(
       &dispatch_table, &lvp_instance_entrypoints, true);
+   vk_instance_dispatch_table_from_entrypoints(
+      &dispatch_table, &wsi_instance_entrypoints, false);
 
    result = vk_instance_init(&instance->vk,
                              &lvp_instance_extensions_supported,
@@ -610,6 +610,13 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceFeatures2(
          VkPhysicalDeviceExtendedDynamicStateFeaturesEXT *features =
             (VkPhysicalDeviceExtendedDynamicStateFeaturesEXT*)ext;
          features->extendedDynamicState = true;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT: {
+         VkPhysicalDevice4444FormatsFeaturesEXT *features =
+            (VkPhysicalDevice4444FormatsFeaturesEXT*)ext;
+         features->formatA4R4G4B4 = true;
+         features->formatA4B4G4R4 = true;
          break;
       }
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT: {
@@ -1413,13 +1420,15 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
    struct vk_device_dispatch_table dispatch_table;
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
       &lvp_device_entrypoints, true);
+   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
+      &wsi_device_entrypoints, false);
    VkResult result = vk_device_init(&device->vk,
                                     &physical_device->vk,
                                     &dispatch_table, pCreateInfo,
                                     pAllocator);
    if (result != VK_SUCCESS) {
       vk_free(&device->vk.alloc, device);
-      return vk_error(instance, result);
+      return result;
    }
 
    device->instance = (struct lvp_instance *)physical_device->vk.instance;
@@ -1622,9 +1631,11 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
 {
    LVP_FROM_HANDLE(lvp_device, device, _device);
    struct lvp_device_memory *mem;
+   const VkExportMemoryAllocateInfo *export_info = NULL;
+   const VkImportMemoryFdInfoKHR *import_info = NULL;
+   const VkImportMemoryHostPointerInfoEXT *host_ptr_info = NULL;
+   VkResult error = VK_ERROR_OUT_OF_DEVICE_MEMORY;
    assert(pAllocateInfo->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
-   const VkImportMemoryHostPointerInfoEXT *host_ptr_info =
-      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
 
    if (pAllocateInfo->allocationSize == 0) {
       /* Apparently, this is allowed */
@@ -1632,24 +1643,80 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
       return VK_SUCCESS;
    }
 
+   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
+      switch ((unsigned)ext->sType) {
+      case VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT:
+         host_ptr_info = (VkImportMemoryHostPointerInfoEXT*)ext;
+         assert(host_ptr_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT);
+         break;
+      case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
+         export_info = (VkExportMemoryAllocateInfo*)ext;
+         assert(export_info->handleTypes == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
+         break;
+      case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
+         import_info = (VkImportMemoryFdInfoKHR*)ext;
+         assert(import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
+         break;
+      default:
+         break;
+      }
+   }
+
+#ifdef PIPE_MEMORY_FD
+   if (import_info != NULL && import_info->fd < 0) {
+      return vk_error(device->instance, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
+#endif
+
    mem = vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*mem), 8,
                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (mem == NULL)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    vk_object_base_init(&device->vk, &mem->base,
                        VK_OBJECT_TYPE_DEVICE_MEMORY);
 
-   if (!host_ptr_info) {
+   mem->memory_type = LVP_DEVICE_MEMORY_TYPE_DEFAULT;
+   mem->backed_fd = -1;
+
+   if (host_ptr_info) {
+      mem->pmem = host_ptr_info->pHostPointer;
+      mem->memory_type = LVP_DEVICE_MEMORY_TYPE_USER_PTR;
+   }
+#ifdef PIPE_MEMORY_FD
+   else if(import_info) {
+      uint64_t size;
+      if(!device->pscreen->import_memory_fd(device->pscreen, import_info->fd, &mem->pmem, &size)) {
+         close(import_info->fd);
+         error = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+         goto fail;
+      }
+      if(size < pAllocateInfo->allocationSize) {
+         device->pscreen->free_memory_fd(device->pscreen, mem->pmem);
+         close(import_info->fd);
+         goto fail;
+      }
+      if (export_info) {
+         mem->backed_fd = import_info->fd;
+      }
+      else {
+         close(import_info->fd);
+      }
+      mem->memory_type = LVP_DEVICE_MEMORY_TYPE_OPAQUE_FD;
+   }
+   else if (export_info) {
+      mem->pmem = device->pscreen->allocate_memory_fd(device->pscreen, pAllocateInfo->allocationSize, &mem->backed_fd);
+      if (!mem->pmem || mem->backed_fd < 0) {
+         goto fail;
+      }
+      mem->memory_type = LVP_DEVICE_MEMORY_TYPE_OPAQUE_FD;
+   }
+#endif
+   else {
       mem->pmem = device->pscreen->allocate_memory(device->pscreen, pAllocateInfo->allocationSize);
       if (!mem->pmem) {
-         vk_free2(&device->vk.alloc, pAllocator, mem);
-         return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto fail;
       }
-      mem->is_user_ptr = false;
-   } else {
-      mem->is_user_ptr = true;
-      mem->pmem = host_ptr_info->pHostPointer;
    }
 
    mem->type_index = pAllocateInfo->memoryTypeIndex;
@@ -1657,6 +1724,10 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_AllocateMemory(
    *pMem = lvp_device_memory_to_handle(mem);
 
    return VK_SUCCESS;
+
+fail:
+   vk_free2(&device->vk.alloc, pAllocator, mem);
+   return vk_error(device, error);
 }
 
 VKAPI_ATTR void VKAPI_CALL lvp_FreeMemory(
@@ -1670,8 +1741,21 @@ VKAPI_ATTR void VKAPI_CALL lvp_FreeMemory(
    if (mem == NULL)
       return;
 
-   if (!mem->is_user_ptr)
+   switch(mem->memory_type) {
+   case LVP_DEVICE_MEMORY_TYPE_DEFAULT:
       device->pscreen->free_memory(device->pscreen, mem->pmem);
+      break;
+#ifdef PIPE_MEMORY_FD
+   case LVP_DEVICE_MEMORY_TYPE_OPAQUE_FD:
+      device->pscreen->free_memory_fd(device->pscreen, mem->pmem);
+      if(mem->backed_fd >= 0)
+         close(mem->backed_fd);
+      break;
+#endif
+   case LVP_DEVICE_MEMORY_TYPE_USER_PTR:
+   default:
+      break;
+   }
    vk_object_base_finish(&mem->base);
    vk_free2(&device->vk.alloc, pAllocator, mem);
 
@@ -1893,7 +1977,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_BindImageMemory2(VkDevice _device,
              * report this as the *closest* allowed error-code. It's not ideal,
              * but it's unlikely that anyone will care too much.
              */
-            return vk_error(device->instance, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          }
          image->pmem = mem->pmem;
          image->memory_offset = bind_info->memoryOffset;
@@ -1901,6 +1985,42 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_BindImageMemory2(VkDevice _device,
    }
    return VK_SUCCESS;
 }
+
+#ifdef PIPE_MEMORY_FD
+
+VkResult
+lvp_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo, int *pFD)
+{
+   LVP_FROM_HANDLE(lvp_device_memory, memory, pGetFdInfo->memory);
+
+   assert(pGetFdInfo->sType == VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR);
+   assert(pGetFdInfo->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
+
+   *pFD = dup(memory->backed_fd);
+   assert(*pFD >= 0);
+   return VK_SUCCESS;
+}
+
+VkResult
+lvp_GetMemoryFdPropertiesKHR(VkDevice _device,
+                             VkExternalMemoryHandleTypeFlagBits handleType,
+                             int fd,
+                             VkMemoryFdPropertiesKHR *pMemoryFdProperties)
+{
+   LVP_FROM_HANDLE(lvp_device, device, _device);
+
+   assert(pMemoryFdProperties->sType == VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR);
+
+   if(handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) {
+      // There is only one memoryType so select this one
+      pMemoryFdProperties->memoryTypeBits = 1;
+   }
+   else
+      return vk_error(device->instance, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   return VK_SUCCESS;
+}
+
+#endif
 
 VKAPI_ATTR VkResult VKAPI_CALL lvp_QueueBindSparse(
    VkQueue                                     queue,
@@ -1924,7 +2044,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateFence(
    fence = vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*fence), 8,
                      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (fence == NULL)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    vk_object_base_init(&device->vk, &fence->base, VK_OBJECT_TYPE_FENCE);
    util_queue_fence_init(&fence->fence);
    fence->signalled = (pCreateInfo->flags & VK_FENCE_CREATE_SIGNALED_BIT) == VK_FENCE_CREATE_SIGNALED_BIT;
@@ -2027,7 +2147,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateFramebuffer(
    framebuffer = vk_alloc2(&device->vk.alloc, pAllocator, size, 8,
                            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (framebuffer == NULL)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    vk_object_base_init(&device->vk, &framebuffer->base,
                        VK_OBJECT_TYPE_FRAMEBUFFER);
@@ -2081,7 +2201,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_WaitForFences(
          struct lvp_fence *f = lvp_fence_from_handle(pFences[i]);
 
          /* this is an unsubmitted fence: immediately bail out */
-         if (!f->timeline)
+         if (!f->timeline && !f->signalled)
             return VK_TIMEOUT;
          if (!fence || f->timeline > fence->timeline)
             fence = f;
@@ -2090,6 +2210,8 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_WaitForFences(
       /* find lowest timeline id */
       for (unsigned i = 0; i < fenceCount; i++) {
          struct lvp_fence *f = lvp_fence_from_handle(pFences[i]);
+         if (f->signalled)
+            return VK_SUCCESS;
          if (f->timeline && (!fence || f->timeline < fence->timeline))
             fence = f;
       }
@@ -2134,7 +2256,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateSemaphore(
                                           VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
 
    if (!sema)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    vk_object_base_init(&device->vk, &sema->base,
                        VK_OBJECT_TYPE_SEMAPHORE);
 
@@ -2229,7 +2351,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateEvent(
                                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
 
    if (!event)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    vk_object_base_init(&device->vk, &event->base, VK_OBJECT_TYPE_EVENT);
    *pEvent = lvp_event_to_handle(event);
@@ -2303,7 +2425,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateSampler(
    sampler = vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*sampler), 8,
                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!sampler)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    vk_object_base_init(&device->vk, &sampler->base,
                        VK_OBJECT_TYPE_SAMPLER);

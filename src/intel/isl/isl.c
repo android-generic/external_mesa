@@ -99,7 +99,11 @@ static void
 isl_device_setup_mocs(struct isl_device *dev)
 {
    if (dev->info->ver >= 12) {
-      if (dev->info->is_dg1) {
+      if (dev->info->is_dg2) {
+         /* L3CC=WB; BSpec: 45101 */
+         dev->mocs.internal = 3 << 1;
+         dev->mocs.external = 3 << 1;
+      } else if (dev->info->is_dg1) {
          /* L3CC=WB */
          dev->mocs.internal = 5 << 1;
          /* Displayables on DG1 are free to cache in L3 since L3 is transient
@@ -263,6 +267,21 @@ isl_device_init(struct isl_device *dev,
    } else {
       dev->ds.stencil_offset = 0;
       dev->ds.hiz_offset = 0;
+   }
+
+   if (ISL_GFX_VER(dev) >= 7) {
+      /* From the IVB PRM, SURFACE_STATE::Height,
+       *
+       *    For typed buffer and structured buffer surfaces, the number
+       *    of entries in the buffer ranges from 1 to 2^27. For raw buffer
+       *    surfaces, the number of entries in the buffer is the number of bytes
+       *    which can range from 1 to 2^30.
+       *
+       * This limit is only concerned with raw buffers.
+       */
+      dev->max_buffer_size = 1ull << 30;
+   } else {
+      dev->max_buffer_size = 1ull << 27;
    }
 
    isl_device_setup_mocs(dev);
@@ -1562,10 +1581,20 @@ isl_calc_row_pitch_alignment(const struct isl_device *dev,
     *    "When using linear memory, this must be at least 64 byte aligned."
     *
     * However, when displaying on NVIDIA and recent AMD GPUs via PRIME,
-    * we need a larger pitch of 256 bytes.  We do that just in case.
+    * we need a larger pitch of 256 bytes.
+    *
+    * If the ISL caller didn't specify a row_pitch_B, then we should assume
+    * the NVIDIA/AMD requirements. Otherwise, if we have a specified
+    * row_pitch_B, this is probably because the caller is trying to import a
+    * buffer. In that case we limit the minimum row pitch to the Intel HW
+    * requirement.
     */
-   if (surf_info->usage & ISL_SURF_USAGE_DISPLAY_BIT)
-      alignment = isl_align(alignment, 256);
+   if (surf_info->usage & ISL_SURF_USAGE_DISPLAY_BIT) {
+      if (surf_info->row_pitch_B == 0)
+         alignment = isl_align(alignment, 256);
+      else
+         alignment = isl_align(alignment, 64);
+   }
 
    return alignment;
 }
@@ -3381,6 +3410,106 @@ isl_format_get_aux_map_encoding(enum isl_format format)
    case ISL_FORMAT_YCRCB_SWAPY: return 0xB;
    default:
       unreachable("Unsupported aux-map format!");
+      return 0;
+   }
+}
+
+/*
+ * Returns compression format encoding for Unified Lossless Compression
+ */
+uint8_t
+isl_get_render_compression_format(enum isl_format format)
+{
+   /* From the Bspec, Enumeration_RenderCompressionFormat section (53726): */
+   switch(format) {
+   case ISL_FORMAT_R32G32B32A32_FLOAT:
+   case ISL_FORMAT_R32G32B32X32_FLOAT:
+   case ISL_FORMAT_R32G32B32A32_SINT:
+      return 0x0;
+   case ISL_FORMAT_R32G32B32A32_UINT:
+      return 0x1;
+   case ISL_FORMAT_R32G32_FLOAT:
+   case ISL_FORMAT_R32G32_SINT:
+      return 0x2;
+   case ISL_FORMAT_R32G32_UINT:
+      return 0x3;
+   case ISL_FORMAT_R16G16B16A16_UNORM:
+   case ISL_FORMAT_R16G16B16X16_UNORM:
+   case ISL_FORMAT_R16G16B16A16_UINT:
+      return 0x4;
+   case ISL_FORMAT_R16G16B16A16_SNORM:
+   case ISL_FORMAT_R16G16B16A16_SINT:
+   case ISL_FORMAT_R16G16B16A16_FLOAT:
+   case ISL_FORMAT_R16G16B16X16_FLOAT:
+      return 0x5;
+   case ISL_FORMAT_R16G16_UNORM:
+   case ISL_FORMAT_R16G16_UINT:
+      return 0x6;
+   case ISL_FORMAT_R16G16_SNORM:
+   case ISL_FORMAT_R16G16_SINT:
+   case ISL_FORMAT_R16G16_FLOAT:
+      return 0x7;
+   case ISL_FORMAT_B8G8R8A8_UNORM:
+   case ISL_FORMAT_B8G8R8X8_UNORM:
+   case ISL_FORMAT_B8G8R8A8_UNORM_SRGB:
+   case ISL_FORMAT_B8G8R8X8_UNORM_SRGB:
+   case ISL_FORMAT_R8G8B8A8_UNORM:
+   case ISL_FORMAT_R8G8B8X8_UNORM:
+   case ISL_FORMAT_R8G8B8A8_UNORM_SRGB:
+   case ISL_FORMAT_R8G8B8X8_UNORM_SRGB:
+   case ISL_FORMAT_R8G8B8A8_UINT:
+      return 0x8;
+   case ISL_FORMAT_R8G8B8A8_SNORM:
+   case ISL_FORMAT_R8G8B8A8_SINT:
+      return 0x9;
+   case ISL_FORMAT_B5G6R5_UNORM:
+   case ISL_FORMAT_B5G6R5_UNORM_SRGB:
+   case ISL_FORMAT_B5G5R5A1_UNORM:
+   case ISL_FORMAT_B5G5R5A1_UNORM_SRGB:
+   case ISL_FORMAT_B4G4R4A4_UNORM:
+   case ISL_FORMAT_B4G4R4A4_UNORM_SRGB:
+   case ISL_FORMAT_B5G5R5X1_UNORM:
+   case ISL_FORMAT_B5G5R5X1_UNORM_SRGB:
+   case ISL_FORMAT_A1B5G5R5_UNORM:
+   case ISL_FORMAT_A4B4G4R4_UNORM:
+   case ISL_FORMAT_R8G8_UNORM:
+   case ISL_FORMAT_R8G8_UINT:
+      return 0xA;
+   case ISL_FORMAT_R8G8_SNORM:
+   case ISL_FORMAT_R8G8_SINT:
+      return 0xB;
+   case ISL_FORMAT_R10G10B10A2_UNORM:
+   case ISL_FORMAT_R10G10B10A2_UNORM_SRGB:
+   case ISL_FORMAT_R10G10B10_FLOAT_A2_UNORM:
+   case ISL_FORMAT_R10G10B10A2_UINT:
+   case ISL_FORMAT_B10G10R10A2_UNORM:
+   case ISL_FORMAT_B10G10R10X2_UNORM:
+   case ISL_FORMAT_B10G10R10A2_UNORM_SRGB:
+      return 0xC;
+   case ISL_FORMAT_R11G11B10_FLOAT:
+      return 0xD;
+   case ISL_FORMAT_R32_SINT:
+   case ISL_FORMAT_R32_FLOAT:
+      return 0x10;
+   case ISL_FORMAT_R32_UINT:
+   case ISL_FORMAT_R24_UNORM_X8_TYPELESS:
+      return 0x11;
+   case ISL_FORMAT_R16_UNORM:
+   case ISL_FORMAT_R16_UINT:
+      return 0x14;
+   case ISL_FORMAT_R16_SNORM:
+   case ISL_FORMAT_R16_SINT:
+   case ISL_FORMAT_R16_FLOAT:
+      return 0x15;
+   case ISL_FORMAT_R8_UNORM:
+   case ISL_FORMAT_R8_UINT:
+   case ISL_FORMAT_A8_UNORM:
+      return 0x18;
+   case ISL_FORMAT_R8_SNORM:
+   case ISL_FORMAT_R8_SINT:
+      return 0x19;
+   default:
+      unreachable("Unsupported render compression format!");
       return 0;
    }
 }

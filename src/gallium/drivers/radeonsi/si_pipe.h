@@ -219,7 +219,6 @@ enum
    DBG_ALWAYS_NGG_CULLING_ALL,
    DBG_ALWAYS_NGG_CULLING_TESS,
    DBG_NO_NGG_CULLING,
-   DBG_NO_FAST_LAUNCH,
    DBG_SWITCH_ON_EOP,
    DBG_NO_OUT_OF_ORDER,
    DBG_NO_DPBB,
@@ -235,6 +234,7 @@ enum
    DBG_DCC_STORE,
    DBG_NO_DCC_MSAA,
    DBG_NO_FMASK,
+   DBG_NO_DMA,
 
    DBG_TMZ,
    DBG_SQTT,
@@ -360,7 +360,7 @@ struct si_texture {
    float depth_clear_value[RADEON_SURF_MAX_LEVELS];
    uint8_t stencil_clear_value[RADEON_SURF_MAX_LEVELS];
    uint16_t depth_cleared_level_mask_once; /* if it was cleared at least once */
-   uint16_t depth_cleared_level_mask;     /* track if it was cleared (not 100% accurate) */
+   uint16_t depth_cleared_level_mask;     /* track if it's cleared (can be false negative) */
    uint16_t stencil_cleared_level_mask; /* if it was cleared at least once */
    uint16_t dirty_level_mask;         /* each bit says if that mipmap is compressed */
    uint16_t stencil_dirty_level_mask; /* each bit says if that mipmap is compressed */
@@ -374,6 +374,7 @@ struct si_texture {
    bool db_compatible : 1;
    bool can_sample_z : 1;
    bool can_sample_s : 1;
+   bool need_flush_after_depth_decompression: 1;
 
    /* We need to track DCC dirtiness, because st/dri usually calls
     * flush_resource twice per frame (not a bug) and we don't wanna
@@ -564,6 +565,10 @@ struct si_screen {
     * It must be locked prior to using and flushed before unlocking. */
    struct pipe_context *aux_context;
    simple_mtx_t aux_context_lock;
+
+   /* Async compute context for DRI_PRIME copies. */
+   struct pipe_context *async_compute_context;
+   simple_mtx_t async_compute_context_lock;
 
    /* This must be in the screen, because UE4 uses one context for
     * compilation and another one for rendering.
@@ -898,6 +903,7 @@ struct si_context {
    struct radeon_winsys *ws;
    struct radeon_winsys_ctx *ctx;
    struct radeon_cmdbuf gfx_cs; /* compute IB if graphics is disabled */
+   struct radeon_cmdbuf *sdma_cs;
    struct pipe_fence_handle *last_gfx_fence;
    struct si_resource *eop_bug_scratch;
    struct si_resource *eop_bug_scratch_tmz;
@@ -1428,6 +1434,8 @@ struct pipe_fence_handle *si_create_fence(struct pipe_context *ctx,
 /* si_get.c */
 void si_init_screen_get_functions(struct si_screen *sscreen);
 
+bool si_sdma_copy_image(struct si_context *ctx, struct si_texture *dst, struct si_texture *src);
+
 /* si_gfx_cs.c */
 void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_handle **fence);
 void si_allocate_gds(struct si_context *ctx);
@@ -1455,6 +1463,7 @@ void si_init_compute_functions(struct si_context *sctx);
 
 /* si_pipe.c */
 void si_init_compiler(struct si_screen *sscreen, struct ac_llvm_compiler *compiler);
+void si_init_aux_async_compute_ctx(struct si_screen *sscreen);
 
 /* si_perfcounters.c */
 void si_init_perfcounters(struct si_screen *screen);
@@ -1944,15 +1953,12 @@ static inline void radeon_add_to_gfx_buffer_list_check_mem(struct si_context *sc
 }
 
 static inline unsigned si_get_wave_size(struct si_screen *sscreen,
-                                        gl_shader_stage stage, bool ngg, bool es,
-                                        bool gs_fast_launch)
+                                        gl_shader_stage stage, bool ngg, bool es)
 {
    if (stage == MESA_SHADER_COMPUTE)
       return sscreen->compute_wave_size;
    else if (stage == MESA_SHADER_FRAGMENT)
       return sscreen->ps_wave_size;
-   else if (gs_fast_launch)
-      return 32; /* GS fast launch hangs with Wave64, so always use Wave32. */
    else if ((stage == MESA_SHADER_VERTEX && es && !ngg) ||
             (stage == MESA_SHADER_TESS_EVAL && es && !ngg) ||
             (stage == MESA_SHADER_GEOMETRY && !ngg)) /* legacy GS only supports Wave64 */
@@ -1965,8 +1971,7 @@ static inline unsigned si_get_shader_wave_size(struct si_shader *shader)
 {
    return si_get_wave_size(shader->selector->screen, shader->selector->info.stage,
                            shader->key.as_ngg,
-                           shader->key.as_es,
-                           shader->key.opt.ngg_culling & SI_NGG_CULL_GS_FAST_LAUNCH_ALL);
+                           shader->key.as_es);
 }
 
 static inline void si_select_draw_vbo(struct si_context *sctx)

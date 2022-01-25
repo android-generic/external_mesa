@@ -89,7 +89,7 @@ struct zwp_linux_dmabuf_v1;
 #include "util/u_vector.h"
 #include "util/bitset.h"
 
-#define EGL_DRI2_MAX_FORMATS 10
+#define EGL_DRI2_MAX_FORMATS 11
 
 struct wl_buffer;
 
@@ -302,6 +302,7 @@ struct dri2_egl_surface
    struct wl_drm         *wl_drm_wrapper;
    struct wl_callback    *throttle_callback;
    int                    format;
+   bool                   resized;
 #endif
 
 #ifdef HAVE_DRM_PLATFORM

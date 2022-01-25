@@ -1103,11 +1103,11 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
    case nir_texop_tex_prefetch:
       fprintf(fp, "tex (pre-dispatchable) ");
       break;
-   case nir_texop_fragment_fetch:
-      fprintf(fp, "fragment_fetch ");
+   case nir_texop_fragment_fetch_amd:
+      fprintf(fp, "fragment_fetch_amd ");
       break;
-   case nir_texop_fragment_mask_fetch:
-      fprintf(fp, "fragment_mask_fetch ");
+   case nir_texop_fragment_mask_fetch_amd:
+      fprintf(fp, "fragment_mask_fetch_amd ");
       break;
    default:
       unreachable("Invalid texture operation");
@@ -1264,7 +1264,7 @@ print_load_const_instr(nir_load_const_instr *instr, print_state *state)
 
       switch (instr->def.bit_size) {
       case 64:
-         fprintf(fp, "0x%16" PRIx64 " /* %f */", instr->value[i].u64,
+         fprintf(fp, "0x%016" PRIx64 " /* %f */", instr->value[i].u64,
                  instr->value[i].f64);
          break;
       case 32:

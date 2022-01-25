@@ -25,62 +25,29 @@ COPYRIGHT=u"""
 
 import argparse
 import os
-import re
 from collections import OrderedDict, namedtuple
 import xml.etree.ElementTree as et
 
 from mako.template import Template
 
-# Mesa-local imports must be declared in meson variable
-# '{file_without_suffix}_depend_files'.
-from vk_extensions import *
-from vk_dispatch_table_gen import get_entrypoints_from_xml, EntrypointParam
-
-TEMPLATE_H = Template(COPYRIGHT + """\
-/* This file generated from ${filename}, don't edit directly. */
-
-#pragma once
-
-#define VK_PROTOTYPES
-#include <vulkan/vulkan.h>
-#include "vk_physical_device.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-VkResult
-vk_physical_device_check_device_features(struct vk_physical_device *physical_device,
-                                         const VkDeviceCreateInfo *pCreateInfo);
-
-#ifdef __cplusplus
-}
-#endif
-""", output_encoding='utf-8')
-
 TEMPLATE_C = Template(COPYRIGHT + """
 /* This file generated from ${filename}, don't edit directly. */
 
-#include "${header}"
-
-#define VK_PROTOTYPES
-#include <vulkan/vulkan.h>
-
-#include "vk_dispatch_table.h"
+#include "vk_log.h"
 #include "vk_physical_device.h"
 #include "vk_util.h"
 
 static VkResult
-check_physical_device_features(const VkPhysicalDeviceFeatures *supported,
-                               const VkPhysicalDeviceFeatures *enabled)
+check_physical_device_features(struct vk_physical_device *physical_device,
+                               const VkPhysicalDeviceFeatures *supported,
+                               const VkPhysicalDeviceFeatures *enabled,
+                               const char *struct_name)
 {
-   const VkBool32 *supported_feature = (const VkBool32 *) supported;
-   const VkBool32 *enabled_feature = (const VkBool32 *) enabled;
-   unsigned num_features = sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32);
-   for (uint32_t i = 0; i < num_features; i++) {
-      if (enabled_feature[i] && !supported_feature[i])
-         return VK_ERROR_FEATURE_NOT_PRESENT;
-   }
+% for flag in pdev_features:
+   if (enabled->${flag} && !supported->${flag})
+      return vk_errorf(physical_device, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "%s.%s not supported", struct_name, "${flag}");
+% endfor
 
    return VK_SUCCESS;
 }
@@ -130,8 +97,10 @@ vk_physical_device_check_device_features(struct vk_physical_device *physical_dev
 
    if (pCreateInfo->pEnabledFeatures) {
       VkResult result =
-        check_physical_device_features(&supported_features2.features,
-                                       pCreateInfo->pEnabledFeatures);
+        check_physical_device_features(physical_device,
+                                       &supported_features2.features,
+                                       pCreateInfo->pEnabledFeatures,
+                                       "VkPhysicalDeviceFeatures");
       if (result != VK_SUCCESS)
          return result;
    }
@@ -143,8 +112,10 @@ vk_physical_device_check_device_features(struct vk_physical_device *physical_dev
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2: {
          const VkPhysicalDeviceFeatures2 *features2 = (const void *)feat;
          VkResult result =
-            check_physical_device_features(&supported_features2.features,
-                                           &features2->features);
+            check_physical_device_features(physical_device,
+                                           &supported_features2.features,
+                                           &features2->features,
+                                           "VkPhysicalDeviceFeatures2.features");
          if (result != VK_SUCCESS)
             return result;
         break;
@@ -155,7 +126,8 @@ vk_physical_device_check_device_features(struct vk_physical_device *physical_dev
          ${f.name} *b = (${f.name} *) feat;
 % for flag in f.vk_flags:
          if (b->${flag} && !a->${flag})
-            return VK_ERROR_FEATURE_NOT_PRESENT;
+            return vk_errorf(physical_device, VK_ERROR_FEATURE_NOT_PRESENT,
+                             "%s.%s not supported", "${f.name}", "${flag}");
 % endfor
          break;
       }
@@ -170,6 +142,21 @@ vk_physical_device_check_device_features(struct vk_physical_device *physical_dev
 """, output_encoding='utf-8')
 
 Feature = namedtuple('Feature', 'name vk_type vk_flags')
+
+def get_pdev_features(doc):
+    for _type in doc.findall('./types/type'):
+        if _type.attrib.get('name') != 'VkPhysicalDeviceFeatures':
+            continue
+
+        flags = []
+
+        for p in _type.findall('./member'):
+            assert p.find('./type').text == 'VkBool32'
+            flags.append(p.find('./name').text)
+
+        return flags
+
+    return None
 
 def get_features(doc):
     features = OrderedDict()
@@ -216,38 +203,35 @@ def get_features(doc):
     return features.values()
 
 def get_features_from_xml(xml_files):
+    pdev_features = None
     features = []
 
     for filename in xml_files:
         doc = et.parse(filename)
         features += get_features(doc)
+        if not pdev_features:
+            pdev_features = get_pdev_features(doc)
 
-    return features
+    return pdev_features, features
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--out-c', required=True, help='Output C file.')
-    parser.add_argument('--out-h', required=True, help='Output H file.')
     parser.add_argument('--xml',
                         help='Vulkan API XML file.',
                         required=True, action='append', dest='xml_files')
     args = parser.parse_args()
 
-    features = get_features_from_xml(args.xml_files)
-
-    assert os.path.dirname(args.out_c) == os.path.dirname(args.out_h)
+    pdev_features, features = get_features_from_xml(args.xml_files)
 
     environment = {
-        'header': os.path.basename(args.out_h),
         'filename': os.path.basename(__file__),
+        'pdev_features': pdev_features,
         'features': features,
     }
 
     try:
-        with open(args.out_h, 'wb') as f:
-            guard = os.path.basename(args.out_h).replace('.', '_').upper()
-            f.write(TEMPLATE_H.render(guard=guard, **environment))
         with open(args.out_c, 'wb') as f:
             f.write(TEMPLATE_C.render(**environment))
     except Exception:

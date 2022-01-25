@@ -472,7 +472,9 @@ struct pipe_surface
  */
 struct pipe_sampler_view
 {
-   struct pipe_reference reference;
+   /* Put the refcount on its own cache line to prevent "False sharing". */
+   EXCLUSIVE_CACHELINE(struct pipe_reference reference);
+
    enum pipe_format format:15;      /**< typed PIPE_FORMAT_x */
    enum pipe_texture_target target:5; /**< PIPE_TEXTURE_x */
    unsigned swizzle_r:3;         /**< PIPE_SWIZZLE_x for red component */
@@ -543,7 +545,8 @@ struct pipe_box
  */
 struct pipe_resource
 {
-   struct pipe_reference reference;
+   /* Put the refcount on its own cache line to prevent "False sharing". */
+   EXCLUSIVE_CACHELINE(struct pipe_reference reference);
 
    unsigned width0; /**< Used by both buffers and textures. */
    uint16_t height0; /* Textures: The maximum height/depth/array_size is 16k. */
@@ -900,6 +903,7 @@ struct pipe_blit_info
    bool render_condition_enable; /**< whether the blit should honor the
                                  current render condition */
    bool alpha_blend; /* dst.rgb = src.rgb * src.a + dst.rgb * (1 - src.a) */
+   bool is_dri_blit_image;
 };
 
 /**

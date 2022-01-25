@@ -771,12 +771,12 @@ crocus_calculate_urb_fence(struct crocus_batch *batch, unsigned csize,
             exit(1);
          }
 
-         if (INTEL_DEBUG & (DEBUG_URB|DEBUG_PERF))
+         if (INTEL_DEBUG(DEBUG_URB|DEBUG_PERF))
             fprintf(stderr, "URB CONSTRAINED\n");
       }
 
 done:
-      if (INTEL_DEBUG & DEBUG_URB)
+      if (INTEL_DEBUG(DEBUG_URB))
          fprintf(stderr,
                  "URB fence: %d ..VS.. %d ..GS.. %d ..CLP.. %d ..SF.. %d ..CS.. %d\n",
                  ice->urb.vs_start,
@@ -1197,7 +1197,7 @@ emit_l3_state(struct crocus_batch *batch, bool compute)
       compute ? batch->screen->l3_config_cs : batch->screen->l3_config_3d;
 
    setup_l3_config(batch, cfg);
-   if (INTEL_DEBUG & DEBUG_L3) {
+   if (INTEL_DEBUG(DEBUG_L3)) {
       intel_dump_l3_config(cfg, stderr);
    }
 }
@@ -4750,6 +4750,22 @@ crocus_populate_gs_key(const struct crocus_context *ice,
       key->nr_userclip_plane_consts = cso_rast->num_clip_plane_consts;
 }
 
+static inline GLenum
+compare_func_to_gl(enum pipe_compare_func pipe_func)
+{
+   static const unsigned map[] = {
+      [PIPE_FUNC_NEVER]    = GL_NEVER,
+      [PIPE_FUNC_LESS]     = GL_LESS,
+      [PIPE_FUNC_EQUAL]    = GL_EQUAL,
+      [PIPE_FUNC_LEQUAL]   = GL_LEQUAL,
+      [PIPE_FUNC_GREATER]  = GL_GREATER,
+      [PIPE_FUNC_NOTEQUAL] = GL_NOTEQUAL,
+      [PIPE_FUNC_GEQUAL]   = GL_GEQUAL,
+      [PIPE_FUNC_ALWAYS]   = GL_ALWAYS,
+   };
+   return map[pipe_func];
+}
+
 /**
  * Populate FS program key fields based on the current state.
  */
@@ -4836,7 +4852,7 @@ crocus_populate_fs_key(const struct crocus_context *ice,
 
 #if GFX_VER <= 5
    if (fb->nr_cbufs > 1 && zsa->cso.alpha_enabled) {
-      key->alpha_test_func = zsa->cso.alpha_func;
+      key->alpha_test_func = compare_func_to_gl(zsa->cso.alpha_func);
       key->alpha_test_ref = zsa->cso.alpha_ref_value;
    }
 #endif
@@ -5876,8 +5892,10 @@ crocus_upload_dirty_render_state(struct crocus_context *ice,
      bool ret = crocus_calculate_urb_fence(batch, ice->curbe.total_size,
                                            brw_vue_prog_data(ice->shaders.prog[MESA_SHADER_VERTEX]->prog_data)->urb_entry_size,
                                            ((struct brw_sf_prog_data *)ice->shaders.sf_prog->prog_data)->urb_entry_size);
-     if (ret)
-        dirty |= CROCUS_DIRTY_GEN5_PIPELINED_POINTERS;
+     if (ret) {
+	dirty |= CROCUS_DIRTY_GEN5_PIPELINED_POINTERS | CROCUS_DIRTY_RASTER | CROCUS_DIRTY_CLIP;
+	stage_dirty |= CROCUS_STAGE_DIRTY_GS | CROCUS_STAGE_DIRTY_VS;
+     }
    }
 #endif
    if (dirty & CROCUS_DIRTY_CC_VIEWPORT) {
@@ -8807,7 +8825,7 @@ crocus_emit_raw_pipe_control(struct crocus_batch *batch,
 
    /* Emit --------------------------------------------------------------- */
 
-   if (INTEL_DEBUG & DEBUG_PIPE_CONTROL) {
+   if (INTEL_DEBUG(DEBUG_PIPE_CONTROL)) {
       fprintf(stderr,
               "  PC [%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%"PRIx64"]: %s\n",
               (flags & PIPE_CONTROL_FLUSH_ENABLE) ? "PipeCon " : "",

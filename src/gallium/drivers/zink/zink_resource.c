@@ -108,15 +108,18 @@ zink_resource_destroy(struct pipe_screen *pscreen,
    if (pres->target == PIPE_BUFFER) {
       util_range_destroy(&res->valid_buffer_range);
       util_idalloc_mt_free(&screen->buffer_ids, res->base.buffer_id_unique);
+      assert(!_mesa_hash_table_num_entries(&res->bufferview_cache));
       simple_mtx_destroy(&res->bufferview_mtx);
-   } else
+   } else {
+      assert(!_mesa_hash_table_num_entries(&res->surface_cache));
       simple_mtx_destroy(&res->surface_mtx);
+   }
    /* no need to do anything for the caches, these objects own the resource lifetimes */
 
    zink_resource_object_reference(screen, &res->obj, NULL);
    zink_resource_object_reference(screen, &res->scanout_obj, NULL);
    threaded_resource_deinit(pres);
-   FREE(res);
+   ralloc_free(res);
 }
 
 static VkImageAspectFlags
@@ -220,10 +223,9 @@ get_image_usage_for_feats(struct zink_screen *screen, VkFormatFeatureFlags feats
       if (feats & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT && (bind & (PIPE_BIND_LINEAR | PIPE_BIND_SHARED)) != (PIPE_BIND_LINEAR | PIPE_BIND_SHARED))
          usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
-      if ((templ->nr_samples <= 1 || screen->info.feats.features.shaderStorageImageMultisample) &&
-          (bind & PIPE_BIND_SHADER_IMAGE)) {
-         if (feats & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)
-            usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+      if ((feats & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && (bind & PIPE_BIND_SHADER_IMAGE)) {
+         assert(templ->nr_samples <= 1 || screen->info.feats.features.shaderStorageImageMultisample);
+         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
       }
    }
 
@@ -338,8 +340,6 @@ create_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe
 
    case PIPE_TEXTURE_CUBE:
    case PIPE_TEXTURE_CUBE_ARRAY:
-      ici->flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-      FALLTHROUGH;
    case PIPE_TEXTURE_2D:
    case PIPE_TEXTURE_2D_ARRAY:
    case PIPE_TEXTURE_RECT:
@@ -348,8 +348,7 @@ create_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe
 
    case PIPE_TEXTURE_3D:
       ici->imageType = VK_IMAGE_TYPE_3D;
-      if (bind & PIPE_BIND_RENDER_TARGET)
-         ici->flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+      ici->flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
       break;
 
    case PIPE_BUFFER:
@@ -373,23 +372,17 @@ create_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe
    ici->samples = templ->nr_samples ? templ->nr_samples : VK_SAMPLE_COUNT_1_BIT;
    ici->tiling = modifiers_count ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : bind & PIPE_BIND_LINEAR ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
    ici->sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-   ici->initialLayout = dmabuf ? VK_IMAGE_LAYOUT_PREINITIALIZED : VK_IMAGE_LAYOUT_UNDEFINED;
+   ici->initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-   if (templ->target == PIPE_TEXTURE_CUBE ||
-       templ->target == PIPE_TEXTURE_CUBE_ARRAY ||
-       (templ->target == PIPE_TEXTURE_2D_ARRAY &&
-        ici->extent.width == ici->extent.height &&
-        ici->arrayLayers >= 6)) {
-      VkImageFormatProperties props;
-      if (vkGetPhysicalDeviceImageFormatProperties(screen->pdev, ici->format,
-                                                   ici->imageType, ici->tiling,
-                                                   ici->usage, ici->flags |
-                                                   VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
-                                                   &props) == VK_SUCCESS) {
-         if (props.sampleCounts & ici->samples)
-            ici->flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-      }
-   }
+   /* sampleCounts will be set to VK_SAMPLE_COUNT_1_BIT if at least one of the following conditions is true:
+    * - flags contains VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT
+    *
+    * 44.1.1. Supported Sample Counts
+    */
+   bool want_cube = ici->samples == 1 &&
+                    (templ->target == PIPE_TEXTURE_CUBE ||
+                    templ->target == PIPE_TEXTURE_CUBE_ARRAY ||
+                    (templ->target == PIPE_TEXTURE_2D_ARRAY && ici->extent.width == ici->extent.height && ici->arrayLayers >= 6));
 
    if (templ->target == PIPE_TEXTURE_CUBE)
       ici->arrayLayers *= 6;
@@ -432,6 +425,11 @@ create_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe
       if (ici->tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
          tried[ici->tiling] = true;
    }
+   if (want_cube) {
+      ici->flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+      if (get_image_usage(screen, ici, templ, bind, modifiers_count, modifiers, &mod) != ici->usage)
+         ici->flags &= ~VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+   }
 
    *success = true;
    return mod;
@@ -448,21 +446,20 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
    VkMemoryRequirements reqs;
    VkMemoryPropertyFlags flags;
    bool need_dedicated = false;
+   bool shared = templ->bind & PIPE_BIND_SHARED;
    VkExternalMemoryHandleTypeFlags export_types = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
    VkExternalMemoryHandleTypeFlags external = 0;
    if (whandle) {
-      if (whandle->type == WINSYS_HANDLE_TYPE_FD)
+      if (whandle->type == WINSYS_HANDLE_TYPE_FD) {
          external = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-      else
+         export_types |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      } else
          unreachable("unknown handle type");
    }
 
    /* TODO: remove linear for wsi */
    bool scanout = templ->bind & PIPE_BIND_SCANOUT;
-   bool shared = templ->bind & PIPE_BIND_SHARED;
-   if (shared && screen->info.have_EXT_external_memory_dma_buf)
-      export_types |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
    pipe_reference_init(&obj->reference, 1);
    util_dynarray_init(&obj->tmp, NULL);
@@ -730,14 +727,14 @@ resource_create(struct pipe_screen *pscreen,
                 const uint64_t *modifiers, int modifiers_count)
 {
    struct zink_screen *screen = zink_screen(pscreen);
-   struct zink_resource *res = CALLOC_STRUCT(zink_resource);
+   struct zink_resource *res = rzalloc(NULL, struct zink_resource);
 
    if (modifiers_count > 0) {
       /* for rebinds */
       res->modifiers_count = modifiers_count;
       res->modifiers = mem_dup(modifiers, modifiers_count * sizeof(uint64_t));
       if (!res->modifiers) {
-         FREE(res);
+         ralloc_free(res);
          return NULL;
       }
       /* TODO: remove this when multi-plane modifiers are supported */
@@ -767,7 +764,7 @@ resource_create(struct pipe_screen *pscreen,
    res->obj = resource_object_create(screen, &templ2, whandle, &optimal_tiling, NULL, 0);
    if (!res->obj) {
       free(res->modifiers);
-      FREE(res);
+      ralloc_free(res);
       return NULL;
    }
 
@@ -811,10 +808,10 @@ resource_create(struct pipe_screen *pscreen,
    }
    if (res->obj->is_buffer) {
       res->base.buffer_id_unique = util_idalloc_mt_alloc(&screen->buffer_ids);
-      _mesa_hash_table_init(&res->bufferview_cache, screen, NULL, equals_bvci);
+      _mesa_hash_table_init(&res->bufferview_cache, res, NULL, equals_bvci);
       simple_mtx_init(&res->bufferview_mtx, mtx_plain);
    } else {
-      _mesa_hash_table_init(&res->surface_cache, screen, NULL, equals_ivci);
+      _mesa_hash_table_init(&res->surface_cache, res, NULL, equals_ivci);
       simple_mtx_init(&res->surface_mtx, mtx_plain);
    }
    return &res->base.b;

@@ -3442,7 +3442,7 @@ struct gl_shared_state
    /* glCompileShaderInclude expects ShaderIncludes not to change while it is
     * in progress.
     */
-   mtx_t ShaderIncludeMutex;
+   simple_mtx_t ShaderIncludeMutex;
 
    /**
     * Some context in this share group was affected by a GPU reset
@@ -5123,7 +5123,7 @@ struct gl_texture_attrib_node
    /* For saving per texture object state (wrap modes, filters, etc),
     * SavedObj[][].Target is unused, so the value is invalid.
     */
-   struct gl_texture_object SavedObj[MAX_TEXTURE_UNITS][NUM_TEXTURE_TARGETS];
+   struct gl_texture_object SavedObj[MAX_COMBINED_TEXTURE_IMAGE_UNITS][NUM_TEXTURE_TARGETS];
 };
 
 

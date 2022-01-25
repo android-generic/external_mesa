@@ -2105,9 +2105,9 @@ panfrost_emit_varying_descs(
         unsigned consumer_count = consumer->info.varyings.input_count;
 
         /* Offsets within the general varying buffer, indexed by location */
-        signed offsets[PIPE_MAX_ATTRIBS];
-        assert(producer_count < ARRAY_SIZE(offsets));
-        assert(consumer_count < ARRAY_SIZE(offsets));
+        signed offsets[PAN_MAX_VARYINGS];
+        assert(producer_count <= ARRAY_SIZE(offsets));
+        assert(consumer_count <= ARRAY_SIZE(offsets));
 
         /* Allocate enough descriptors for both shader stages */
         struct panfrost_ptr T =
@@ -3374,7 +3374,10 @@ panfrost_create_sampler_view(
         struct pipe_resource *texture,
         const struct pipe_sampler_view *template)
 {
+        struct panfrost_context *ctx = pan_context(pctx);
         struct panfrost_sampler_view *so = rzalloc(pctx, struct panfrost_sampler_view);
+
+        pan_legalize_afbc_format(ctx, pan_resource(texture), template->format);
 
         pipe_reference(NULL, &texture->reference);
 

@@ -59,6 +59,7 @@
 #include "vk_device.h"
 #include "vk_format.h"
 #include "vk_instance.h"
+#include "vk_log.h"
 #include "vk_physical_device.h"
 #include "vk_shader_module.h"
 #include "vk_command_buffer.h"
@@ -73,6 +74,7 @@
 #include "radv_constants.h"
 #include "radv_descriptor_set.h"
 #include "radv_radeon_winsys.h"
+#include "radv_shader.h"
 #include "sid.h"
 
 /* Pre-declarations needed for WSI entrypoints */
@@ -208,21 +210,6 @@ radv_clear_mask(uint32_t *inout_mask, uint32_t clear_mask)
 struct radv_image_view;
 struct radv_instance;
 
-VkResult __vk_errorv(struct radv_instance *instance, const void *object,
-                     VkDebugReportObjectTypeEXT type, VkResult error, const char *file, int line,
-                     const char *format, va_list args);
-
-VkResult __vk_errorf(struct radv_instance *instance, const void *object,
-                     VkDebugReportObjectTypeEXT type, VkResult error, const char *file, int line,
-                     const char *format, ...) radv_printflike(7, 8);
-
-#define vk_error(instance, error)                                                                  \
-   __vk_errorf(instance, NULL, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, error, __FILE__, __LINE__, \
-               NULL);
-#define vk_errorf(instance, error, format, ...)                                                    \
-   __vk_errorf(instance, NULL, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, error, __FILE__, __LINE__, \
-               format, ##__VA_ARGS__);
-
 void radv_loge(const char *format, ...) radv_printflike(1, 2);
 void radv_loge_v(const char *format, va_list va);
 void radv_logi(const char *format, ...) radv_printflike(1, 2);
@@ -275,6 +262,9 @@ struct radv_physical_device {
 
    /* Whether to enable NGG. */
    bool use_ngg;
+
+   /* Whether to enable NGG culling. */
+   bool use_ngg_culling;
 
    /* Whether to enable NGG streamout. */
    bool use_ngg_streamout;
@@ -330,6 +320,7 @@ struct radv_instance {
    bool disable_shrink_image_store;
    bool absolute_depth_bias;
    bool report_apu_as_dgpu;
+   bool disable_htile_layers;
 };
 
 VkResult radv_init_wsi(struct radv_physical_device *physical_device);
@@ -780,8 +771,12 @@ struct radv_device {
     */
    uint32_t image_mrt_offset_counter;
    uint32_t fmask_mrt_offset_counter;
-   struct list_head shader_slabs;
-   mtx_t shader_slab_mutex;
+
+   struct list_head shader_arenas;
+   uint8_t shader_free_list_mask;
+   struct list_head shader_free_lists[RADV_SHADER_ALLOC_NUM_FREE_LISTS];
+   struct list_head shader_block_obj_pool;
+   mtx_t shader_arena_mutex;
 
    /* For detecting VM faults reported by dmesg. */
    uint64_t dmesg_timestamp;
@@ -838,6 +833,12 @@ struct radv_device {
       struct radv_buffer *buffer; /* HTILE */
       struct radv_device_memory *mem;
    } vrs;
+
+   struct u_rwlock vs_prologs_lock;
+   struct hash_table *vs_prologs;
+
+   struct radv_shader_prolog *simple_vs_prologs[MAX_VERTEX_ATTRIBS];
+   struct radv_shader_prolog *instance_rate_vs_prologs[816];
 };
 
 VkResult _radv_device_set_lost(struct radv_device *device, const char *file, int line,
@@ -866,6 +867,10 @@ struct radv_device_memory {
    struct AHardwareBuffer *android_hardware_buffer;
 #endif
 };
+
+void radv_device_memory_init(struct radv_device_memory *mem, struct radv_device *device,
+                             struct radeon_winsys_bo *bo);
+void radv_device_memory_finish(struct radv_device_memory *mem);
 
 struct radv_descriptor_range {
    uint64_t va;
@@ -999,7 +1004,8 @@ enum radv_dynamic_state_bits {
    RADV_DYNAMIC_LOGIC_OP = 1ull << 26,
    RADV_DYNAMIC_PRIMITIVE_RESTART_ENABLE = 1ull << 27,
    RADV_DYNAMIC_COLOR_WRITE_ENABLE = 1ull << 28,
-   RADV_DYNAMIC_ALL = (1ull << 29) - 1,
+   RADV_DYNAMIC_VERTEX_INPUT = 1ull << 29,
+   RADV_DYNAMIC_ALL = (1ull << 30) - 1,
 };
 
 enum radv_cmd_dirty_bits {
@@ -1034,12 +1040,13 @@ enum radv_cmd_dirty_bits {
    RADV_CMD_DIRTY_DYNAMIC_LOGIC_OP = 1ull << 26,
    RADV_CMD_DIRTY_DYNAMIC_PRIMITIVE_RESTART_ENABLE = 1ull << 27,
    RADV_CMD_DIRTY_DYNAMIC_COLOR_WRITE_ENABLE = 1ull << 28,
-   RADV_CMD_DIRTY_DYNAMIC_ALL = (1ull << 29) - 1,
-   RADV_CMD_DIRTY_PIPELINE = 1ull << 29,
-   RADV_CMD_DIRTY_INDEX_BUFFER = 1ull << 30,
-   RADV_CMD_DIRTY_FRAMEBUFFER = 1ull << 31,
-   RADV_CMD_DIRTY_VERTEX_BUFFER = 1ull << 32,
-   RADV_CMD_DIRTY_STREAMOUT_BUFFER = 1ull << 33
+   RADV_CMD_DIRTY_DYNAMIC_VERTEX_INPUT = 1ull << 29,
+   RADV_CMD_DIRTY_DYNAMIC_ALL = (1ull << 30) - 1,
+   RADV_CMD_DIRTY_PIPELINE = 1ull << 30,
+   RADV_CMD_DIRTY_INDEX_BUFFER = 1ull << 31,
+   RADV_CMD_DIRTY_FRAMEBUFFER = 1ull << 32,
+   RADV_CMD_DIRTY_VERTEX_BUFFER = 1ull << 33,
+   RADV_CMD_DIRTY_STREAMOUT_BUFFER = 1ull << 34,
 };
 
 enum radv_cmd_flush_bits {
@@ -1351,6 +1358,7 @@ struct radv_cmd_state {
    struct radv_render_pass *pass;
    const struct radv_subpass *subpass;
    struct radv_dynamic_state dynamic;
+   struct radv_vs_input_state dynamic_vs_input;
    struct radv_attachment_state *attachments;
    struct radv_streamout_state streamout;
    VkRect2D render_area;
@@ -1388,6 +1396,9 @@ struct radv_cmd_state {
    /* Whether CP DMA is busy/idle. */
    bool dma_is_busy;
 
+   /* Whether any images that are not L2 coherent are dirty from the CB. */
+   bool rb_noncoherent_dirty;
+
    /* Conditional rendering info. */
    uint8_t predication_op; /* 32-bit or 64-bit predicate value */
    int predication_type;   /* -1: disabled, 0: normal, 1: inverted */
@@ -1416,6 +1427,12 @@ struct radv_cmd_state {
    bool uses_draw_indirect_multi;
 
    uint32_t rt_stack_size;
+
+   struct radv_shader_prolog *emitted_vs_prolog;
+   uint32_t *emitted_vs_prolog_key;
+   uint32_t emitted_vs_prolog_key_hash;
+   uint32_t vbo_misaligned_mask;
+   uint32_t vbo_bound_mask;
 };
 
 struct radv_cmd_pool {
@@ -1533,10 +1550,17 @@ void si_cp_dma_clear_buffer(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uin
 void si_cp_dma_wait_for_idle(struct radv_cmd_buffer *cmd_buffer);
 
 void radv_set_db_count_control(struct radv_cmd_buffer *cmd_buffer);
+
+unsigned radv_instance_rate_prolog_index(unsigned num_attributes, uint32_t instance_rate_inputs);
+uint32_t radv_hash_vs_prolog(const void *key_);
+bool radv_cmp_vs_prolog(const void *a_, const void *b_);
+
 bool radv_cmd_buffer_upload_alloc(struct radv_cmd_buffer *cmd_buffer, unsigned size,
                                   unsigned *out_offset, void **ptr);
 void radv_cmd_buffer_set_subpass(struct radv_cmd_buffer *cmd_buffer,
                                  const struct radv_subpass *subpass);
+void radv_cmd_buffer_restore_subpass(struct radv_cmd_buffer *cmd_buffer,
+                                     const struct radv_subpass *subpass);
 bool radv_cmd_buffer_upload_data(struct radv_cmd_buffer *cmd_buffer, unsigned size,
                                  const void *data, unsigned *out_offset);
 
@@ -1654,21 +1678,15 @@ struct radv_event {
    uint64_t *map;
 };
 
-#define RADV_HASH_SHADER_NO_NGG            (1 << 0)
 #define RADV_HASH_SHADER_CS_WAVE32         (1 << 1)
 #define RADV_HASH_SHADER_PS_WAVE32         (1 << 2)
 #define RADV_HASH_SHADER_GE_WAVE32         (1 << 3)
 #define RADV_HASH_SHADER_LLVM              (1 << 4)
-#define RADV_HASH_SHADER_DISCARD_TO_DEMOTE (1 << 5)
-#define RADV_HASH_SHADER_MRT_NAN_FIXUP     (1 << 6)
-#define RADV_HASH_SHADER_INVARIANT_GEOM    (1 << 7)
 #define RADV_HASH_SHADER_KEEP_STATISTICS   (1 << 8)
-#define RADV_HASH_SHADER_FORCE_VRS_2x2     (1 << 9)
-#define RADV_HASH_SHADER_FORCE_VRS_2x1     (1 << 10)
-#define RADV_HASH_SHADER_FORCE_VRS_1x2     (1 << 11)
-#define RADV_HASH_SHADER_FORCE_NGG_CULLING (1 << 13)
+#define RADV_HASH_SHADER_USE_NGG_CULLING   (1 << 13)
 #define RADV_HASH_SHADER_ROBUST_BUFFER_ACCESS (1 << 14)
 #define RADV_HASH_SHADER_ROBUST_BUFFER_ACCESS2 (1 << 15)
+#define RADV_HASH_SHADER_FORCE_EMULATE_RT (1 << 16)
 
 struct radv_pipeline_key;
 
@@ -1749,8 +1767,6 @@ struct radv_pipeline {
    struct radv_device *device;
    struct radv_dynamic_state dynamic_state;
 
-   struct radv_pipeline_layout *layout;
-
    bool need_indirect_descriptor_sets;
    struct radv_shader_variant *shaders[MESA_SHADER_STAGES];
    struct radv_shader_variant *gs_copy_shader;
@@ -1767,6 +1783,9 @@ struct radv_pipeline {
    uint32_t attrib_index_offset[MAX_VERTEX_ATTRIBS];
 
    bool use_per_attribute_vb_descs;
+   bool can_use_simple_input;
+   uint8_t last_vertex_attrib_bit;
+   uint8_t next_vertex_stage : 8;
    uint32_t vb_desc_usage_mask;
    uint32_t vb_desc_alloc_size;
 
@@ -1828,6 +1847,10 @@ struct radv_pipeline {
 
    /* Unique pipeline hash identifier. */
    uint64_t pipeline_hash;
+
+   /* Pipeline layout info. */
+   uint32_t push_constant_size;
+   uint32_t dynamic_offset_count;
 };
 
 static inline bool
@@ -1891,6 +1914,10 @@ uint32_t radv_translate_buffer_dataformat(const struct util_format_description *
 uint32_t radv_translate_buffer_numformat(const struct util_format_description *desc,
                                          int first_non_void);
 bool radv_is_buffer_format_supported(VkFormat format, bool *scaled);
+void radv_translate_vertex_format(const struct radv_physical_device *pdevice, VkFormat format,
+                                  const struct util_format_description *desc, unsigned *dfmt,
+                                  unsigned *nfmt, bool *post_shuffle,
+                                  enum radv_vs_input_alpha_adjust *alpha_adjust);
 uint32_t radv_translate_colorformat(VkFormat format);
 uint32_t radv_translate_color_numformat(VkFormat format, const struct util_format_description *desc,
                                         int first_non_void);
@@ -2857,61 +2884,60 @@ radv_accel_struct_get_va(const struct radv_acceleration_structure *accel)
    return radv_buffer_get_va(accel->bo) + accel->mem_offset;
 }
 
-#define RADV_DEFINE_HANDLE_CASTS(__radv_type, __VkType)                                            \
-                                                                                                   \
-   static inline struct __radv_type *__radv_type##_from_handle(__VkType _handle)                   \
-   {                                                                                               \
-      return (struct __radv_type *)_handle;                                                        \
-   }                                                                                               \
-                                                                                                   \
-   static inline __VkType __radv_type##_to_handle(struct __radv_type *_obj)                        \
-   {                                                                                               \
-      return (__VkType)_obj;                                                                       \
-   }
+#define RADV_FROM_HANDLE(__radv_type, __name, __handle) \
+   VK_FROM_HANDLE(__radv_type, __name, __handle)
 
-#define RADV_DEFINE_NONDISP_HANDLE_CASTS(__radv_type, __VkType)                                    \
-                                                                                                   \
-   static inline struct __radv_type *__radv_type##_from_handle(__VkType _handle)                   \
-   {                                                                                               \
-      return (struct __radv_type *)(uintptr_t)_handle;                                             \
-   }                                                                                               \
-                                                                                                   \
-   static inline __VkType __radv_type##_to_handle(struct __radv_type *_obj)                        \
-   {                                                                                               \
-      return (__VkType)(uintptr_t)_obj;                                                            \
-   }
-
-#define RADV_FROM_HANDLE(__radv_type, __name, __handle)                                            \
-   struct __radv_type *__name = __radv_type##_from_handle(__handle)
-
-RADV_DEFINE_HANDLE_CASTS(radv_cmd_buffer, VkCommandBuffer)
-RADV_DEFINE_HANDLE_CASTS(radv_device, VkDevice)
-RADV_DEFINE_HANDLE_CASTS(radv_instance, VkInstance)
-RADV_DEFINE_HANDLE_CASTS(radv_physical_device, VkPhysicalDevice)
-RADV_DEFINE_HANDLE_CASTS(radv_queue, VkQueue)
-
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_acceleration_structure, VkAccelerationStructureKHR)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_cmd_pool, VkCommandPool)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_buffer, VkBuffer)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_buffer_view, VkBufferView)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_descriptor_pool, VkDescriptorPool)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_descriptor_set, VkDescriptorSet)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_descriptor_set_layout, VkDescriptorSetLayout)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_descriptor_update_template, VkDescriptorUpdateTemplate)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_device_memory, VkDeviceMemory)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_fence, VkFence)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_event, VkEvent)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_framebuffer, VkFramebuffer)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_image, VkImage)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_image_view, VkImageView);
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_pipeline_cache, VkPipelineCache)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_pipeline, VkPipeline)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_pipeline_layout, VkPipelineLayout)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_query_pool, VkQueryPool)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_render_pass, VkRenderPass)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_sampler, VkSampler)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_sampler_ycbcr_conversion, VkSamplerYcbcrConversion)
-RADV_DEFINE_NONDISP_HANDLE_CASTS(radv_semaphore, VkSemaphore)
+VK_DEFINE_HANDLE_CASTS(radv_cmd_buffer, vk.base, VkCommandBuffer,
+                       VK_OBJECT_TYPE_COMMAND_BUFFER)
+VK_DEFINE_HANDLE_CASTS(radv_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+VK_DEFINE_HANDLE_CASTS(radv_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTANCE)
+VK_DEFINE_HANDLE_CASTS(radv_physical_device, vk.base, VkPhysicalDevice,
+                       VK_OBJECT_TYPE_PHYSICAL_DEVICE)
+VK_DEFINE_HANDLE_CASTS(radv_queue, vk.base, VkQueue, VK_OBJECT_TYPE_QUEUE)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_acceleration_structure, base,
+                               VkAccelerationStructureKHR,
+                               VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_cmd_pool, base, VkCommandPool,
+                               VK_OBJECT_TYPE_COMMAND_POOL)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_buffer, base, VkBuffer, VK_OBJECT_TYPE_BUFFER)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_buffer_view, base, VkBufferView,
+                               VK_OBJECT_TYPE_BUFFER_VIEW)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_descriptor_pool, base, VkDescriptorPool,
+                               VK_OBJECT_TYPE_DESCRIPTOR_POOL)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_descriptor_set, header.base, VkDescriptorSet,
+                               VK_OBJECT_TYPE_DESCRIPTOR_SET)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_descriptor_set_layout, base,
+                               VkDescriptorSetLayout,
+                               VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_descriptor_update_template, base,
+                               VkDescriptorUpdateTemplate,
+                               VK_OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_device_memory, base, VkDeviceMemory,
+                               VK_OBJECT_TYPE_DEVICE_MEMORY)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_fence, base, VkFence, VK_OBJECT_TYPE_FENCE)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_event, base, VkEvent, VK_OBJECT_TYPE_EVENT)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_framebuffer, base, VkFramebuffer,
+                               VK_OBJECT_TYPE_FRAMEBUFFER)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_image, base, VkImage, VK_OBJECT_TYPE_IMAGE)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_image_view, base, VkImageView,
+                               VK_OBJECT_TYPE_IMAGE_VIEW);
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_pipeline_cache, base, VkPipelineCache,
+                               VK_OBJECT_TYPE_PIPELINE_CACHE)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_pipeline, base, VkPipeline,
+                               VK_OBJECT_TYPE_PIPELINE)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_pipeline_layout, base, VkPipelineLayout,
+                               VK_OBJECT_TYPE_PIPELINE_LAYOUT)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_query_pool, base, VkQueryPool,
+                               VK_OBJECT_TYPE_QUERY_POOL)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_render_pass, base, VkRenderPass,
+                               VK_OBJECT_TYPE_RENDER_PASS)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_sampler, base, VkSampler,
+                               VK_OBJECT_TYPE_SAMPLER)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_sampler_ycbcr_conversion, base,
+                               VkSamplerYcbcrConversion,
+                               VK_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION)
+VK_DEFINE_NONDISP_HANDLE_CASTS(radv_semaphore, base, VkSemaphore,
+                               VK_OBJECT_TYPE_SEMAPHORE)
 
 #ifdef __cplusplus
 }

@@ -25,12 +25,13 @@ radv_entrypoints = custom_target(
   command : [
     prog_python, '@INPUT0@', '--xml', '@INPUT1@', '--proto', '--weak',
     '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@', '--prefix', 'radv',
-    '--device-prefix', 'sqtt',
+    '--device-prefix', 'sqtt', '--device-prefix', 'metro_exodus',
   ],
   depend_files : vk_entrypoints_gen_depend_files,
 )
 
 libradv_files = files(
+  'layers/radv_metro_exodus.c',
   'layers/radv_sqtt_layer.c',
   'winsys/null/radv_null_bo.c',
   'winsys/null/radv_null_bo.h',
@@ -113,40 +114,22 @@ radv_flags = cc.get_supported_arguments(['-Wimplicit-fallthrough', '-Wshadow'])
 
 if with_platform_x11
   radv_deps += dep_xcb_dri3
-  radv_flags += [
-    '-DVK_USE_PLATFORM_XCB_KHR',
-    '-DVK_USE_PLATFORM_XLIB_KHR',
-  ]
-  libradv_files += files('radv_wsi_x11.c')
 endif
 
 if with_platform_wayland
   radv_deps += dep_wayland_client
-  radv_flags += '-DVK_USE_PLATFORM_WAYLAND_KHR'
-  libradv_files += files('radv_wsi_wayland.c')
 endif
 
 if system_has_kms_drm and not with_platform_android
-  radv_flags += '-DVK_USE_PLATFORM_DISPLAY_KHR'
   libradv_files += files('radv_wsi_display.c')
 endif
 
 if with_xlib_lease
   radv_deps += [dep_xlib_xrandr]
-  radv_flags += '-DVK_USE_PLATFORM_XLIB_XRANDR_EXT'
 endif
 
 if with_platform_android
   radv_deps += dep_android
-  radv_flags += [
-    '-DVK_USE_PLATFORM_ANDROID_KHR'
-  ]
-endif
-
-if with_platform_windows
-  radv_flags += [
-    '-DVK_USE_PLATFORM_WIN32_KHR',
-  ]
 endif
 
 # When static linking LLVM, all its symbols are public API.
@@ -166,15 +149,16 @@ libvulkan_radeon = shared_library(
   [libradv_files, radv_entrypoints, sha1_h],
   vs_module_defs : vulkan_radv_def,
   include_directories : [
-    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_amd, inc_amd_common, inc_amd_common_llvm, inc_compiler, inc_util, inc_vulkan_wsi,
+    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_amd, inc_amd_common, inc_amd_common_llvm, inc_compiler, inc_util,
   ],
   link_with : [
-    libamd_common, libamd_common_llvm, libamdgpu_addrlib, libvulkan_wsi,
+    libamd_common, libamd_common_llvm, libamdgpu_addrlib,
   ],
   dependencies : [
     dep_llvm, dep_libdrm_amdgpu, dep_thread, dep_elf, dep_dl, dep_m,
     dep_valgrind, radv_deps, idep_aco,
-    idep_mesautil, idep_nir, idep_vulkan_util, idep_amdgfxregs_h, idep_xmlconfig,
+    idep_mesautil, idep_nir, idep_vulkan_util, idep_vulkan_wsi,
+    idep_amdgfxregs_h, idep_xmlconfig,
   ],
   c_args : [no_override_init_args, radv_flags, c_msvc_compat_args],
   cpp_args : [radv_flags, cpp_msvc_compat_args],

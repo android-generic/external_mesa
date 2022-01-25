@@ -395,11 +395,12 @@ static void si_decompress_depth(struct si_context *sctx, struct si_texture *tex,
       si_make_CB_shader_coherent(sctx, tex->buffer.b.b.nr_samples, false, true /* no DCC */);
 }
 
-static void si_decompress_sampler_depth_textures(struct si_context *sctx,
+static bool si_decompress_sampler_depth_textures(struct si_context *sctx,
                                                  struct si_samplers *textures)
 {
    unsigned i;
    unsigned mask = textures->needs_depth_decompress_mask;
+   bool need_flush = false;
 
    while (mask) {
       struct pipe_sampler_view *view;
@@ -418,7 +419,14 @@ static void si_decompress_sampler_depth_textures(struct si_context *sctx,
       si_decompress_depth(sctx, tex, sview->is_stencil_sampler ? PIPE_MASK_S : PIPE_MASK_Z,
                           view->u.tex.first_level, view->u.tex.last_level, 0,
                           util_max_layer(&tex->buffer.b.b, view->u.tex.first_level));
+
+      if (tex->need_flush_after_depth_decompression) {
+         need_flush = true;
+         tex->need_flush_after_depth_decompression = false;
+      }
    }
+
+   return need_flush;
 }
 
 static void si_blit_decompress_color(struct si_context *sctx, struct si_texture *tex,
@@ -757,6 +765,7 @@ static void si_decompress_resident_images(struct si_context *sctx)
 void si_decompress_textures(struct si_context *sctx, unsigned shader_mask)
 {
    unsigned compressed_colortex_counter, mask;
+   bool need_flush = false;
 
    if (sctx->blitter_running)
       return;
@@ -774,7 +783,7 @@ void si_decompress_textures(struct si_context *sctx, unsigned shader_mask)
       unsigned i = u_bit_scan(&mask);
 
       if (sctx->samplers[i].needs_depth_decompress_mask) {
-         si_decompress_sampler_depth_textures(sctx, &sctx->samplers[i]);
+         need_flush |= si_decompress_sampler_depth_textures(sctx, &sctx->samplers[i]);
       }
       if (sctx->samplers[i].needs_color_decompress_mask) {
          si_decompress_sampler_color_textures(sctx, &sctx->samplers[i]);
@@ -782,6 +791,16 @@ void si_decompress_textures(struct si_context *sctx, unsigned shader_mask)
       if (sctx->images[i].needs_color_decompress_mask) {
          si_decompress_image_color_textures(sctx, &sctx->images[i]);
       }
+   }
+
+   if (sctx->chip_class == GFX10_3 && need_flush) {
+      /* This fixes a corruption with the following sequence:
+       *   - fast clear depth
+       *   - decompress depth
+       *   - draw
+       * (see https://gitlab.freedesktop.org/drm/amd/-/issues/1810#note_1170171)
+       */
+      sctx->b.flush(&sctx->b, NULL, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW);
    }
 
    if (shader_mask & u_bit_consecutive(0, SI_NUM_GRAPHICS_SHADERS)) {
@@ -1205,9 +1224,46 @@ resolve_to_temp:
 static void si_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
 {
    struct si_context *sctx = (struct si_context *)ctx;
+   struct si_texture *sdst = (struct si_texture *)info->dst.resource;
 
    if (do_hardware_msaa_resolve(ctx, info)) {
       return;
+   }
+
+   if (info->is_dri_blit_image && sdst->surface.is_linear &&
+       sctx->chip_class >= GFX7 && sdst->surface.flags & RADEON_SURF_IMPORTED) {
+      struct si_texture *ssrc = (struct si_texture *)info->src.resource;
+      /* Use SDMA or async compute when copying to a DRI_PRIME imported linear surface. */
+      bool async_copy = info->dst.box.x == 0 && info->dst.box.y == 0 && info->dst.box.z == 0 &&
+                        info->src.box.x == 0 && info->src.box.y == 0 && info->src.box.z == 0 &&
+                        info->dst.level == 0 && info->src.level == 0 &&
+                        info->src.box.width == info->dst.resource->width0 &&
+                        info->src.box.height == info->dst.resource->height0 &&
+                        info->src.box.depth == 1 && util_can_blit_via_copy_region(info, true);
+      /* Try SDMA first... */
+      /* TODO: figure out why SDMA copies are slow on GFX10_3 */
+      if (async_copy && sctx->chip_class < GFX10_3 && si_sdma_copy_image(sctx, sdst, ssrc))
+         return;
+
+      /* ... and use async compute as the fallback. */
+      if (async_copy) {
+         struct si_screen *sscreen = sctx->screen;
+
+         simple_mtx_lock(&sscreen->async_compute_context_lock);
+         if (!sscreen->async_compute_context)
+            si_init_aux_async_compute_ctx(sscreen);
+
+         if (sscreen->async_compute_context) {
+            si_compute_copy_image((struct si_context*)sctx->screen->async_compute_context,
+                                  info->dst.resource, 0, info->src.resource, 0, 0, 0, 0,
+                                  &info->src.box, false, 0);
+            si_flush_gfx_cs((struct si_context*)sctx->screen->async_compute_context, 0, NULL);
+            simple_mtx_unlock(&sscreen->async_compute_context_lock);
+            return;
+         }
+
+         simple_mtx_unlock(&sscreen->async_compute_context_lock);
+      }
    }
 
    if (unlikely(sctx->thread_trace_enabled))

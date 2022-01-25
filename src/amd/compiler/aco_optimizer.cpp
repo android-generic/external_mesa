@@ -854,6 +854,11 @@ apply_extract(opt_ctx& ctx, aco_ptr<Instruction>& instr, unsigned idx, ssa_info&
    SubdwordSel sel = parse_extract(info.instr);
    assert(sel);
 
+   instr->operands[idx].set16bit(false);
+   instr->operands[idx].set24bit(false);
+
+   ctx.info[tmp.id()].label &= ~label_insert;
+
    if (sel.size() == 4) {
       /* full dword selection */
    } else if (instr->opcode == aco_opcode::v_cvt_f32_u32 && sel.size() == 1 && !sel.sign_extend()) {
@@ -863,6 +868,12 @@ apply_extract(opt_ctx& ctx, aco_ptr<Instruction>& instr, unsigned idx, ssa_info&
       case 2: instr->opcode = aco_opcode::v_cvt_f32_ubyte2; break;
       case 3: instr->opcode = aco_opcode::v_cvt_f32_ubyte3; break;
       }
+   } else if (instr->opcode == aco_opcode::v_lshlrev_b32 && instr->operands[0].isConstant() &&
+              sel.offset() == 0 &&
+              ((sel.size() == 2 && instr->operands[0].constantValue() >= 16u) ||
+               (sel.size() == 1 && instr->operands[0].constantValue() >= 24u))) {
+      /* The undesireable upper bits are already shifted out. */
+      return;
    } else if (can_use_SDWA(ctx.program->chip_class, instr, true) &&
               (tmp.type() == RegType::vgpr || ctx.program->chip_class >= GFX9)) {
       to_SDWA(ctx, instr);
@@ -872,10 +883,6 @@ apply_extract(opt_ctx& ctx, aco_ptr<Instruction>& instr, unsigned idx, ssa_info&
          instr->vop3().opsel |= 1 << idx;
    }
 
-   instr->operands[idx].set16bit(false);
-   instr->operands[idx].set24bit(false);
-
-   ctx.info[tmp.id()].label &= ~label_insert;
    /* label_vopc seems to be the only one worth keeping at the moment */
    for (Definition& def : instr->definitions)
       ctx.info[def.tempId()].label &= label_vopc;
@@ -3128,10 +3135,12 @@ combine_vop3p(opt_ctx& ctx, aco_ptr<Instruction>& instr)
              * if 0 - pick selection from fneg->lo
              * if 1 - pick selection from fneg->hi
              */
-            bool opsel_lo = vop3p->opsel_lo & (1 << i);
-            bool opsel_hi = vop3p->opsel_hi & (1 << i);
-            vop3p->neg_lo[i] ^= true ^ (opsel_lo ? fneg->neg_hi[0] : fneg->neg_lo[0]);
-            vop3p->neg_hi[i] ^= true ^ (opsel_hi ? fneg->neg_hi[0] : fneg->neg_lo[0]);
+            bool opsel_lo = (vop3p->opsel_lo >> i) & 1;
+            bool opsel_hi = (vop3p->opsel_hi >> i) & 1;
+            bool neg_lo = true ^ fneg->neg_lo[0] ^ fneg->neg_lo[1];
+            bool neg_hi = true ^ fneg->neg_hi[0] ^ fneg->neg_hi[1];
+            vop3p->neg_lo[i] ^= opsel_lo ? neg_hi : neg_lo;
+            vop3p->neg_hi[i] ^= opsel_hi ? neg_hi : neg_lo;
             vop3p->opsel_lo ^= ((opsel_lo ? ~fneg->opsel_hi : fneg->opsel_lo) & 1) << i;
             vop3p->opsel_hi ^= ((opsel_hi ? ~fneg->opsel_hi : fneg->opsel_lo) & 1) << i;
 

@@ -108,7 +108,6 @@ anv_shader_compile_to_nir(struct anv_device *device,
       .module = module,
    };
    struct spirv_to_nir_options spirv_options = {
-      .frag_coord_is_sysval = true,
       .caps = {
          .demote_to_helper_invocation = true,
          .derivative_group = true,
@@ -125,6 +124,11 @@ anv_shader_compile_to_nir(struct anv_device *device,
          .fragment_shader_sample_interlock = pdevice->info.ver >= 9,
          .fragment_shader_pixel_interlock = pdevice->info.ver >= 9,
          .geometry_streams = true,
+         /* When KHR_format_feature_flags2 is enabled, the read/write without
+          * format is per format, so just report true. It's up to the
+          * application to check.
+          */
+         .image_read_without_format = device->vk.enabled_extensions.KHR_format_feature_flags2,
          .image_write_without_format = true,
          .int8 = pdevice->info.ver >= 8,
          .int16 = pdevice->info.ver >= 8,
@@ -194,7 +198,12 @@ anv_shader_compile_to_nir(struct anv_device *device,
 
    free(spec_entries);
 
-   if (INTEL_DEBUG & intel_debug_flag_for_shader_stage(stage)) {
+   const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
+      .point_coord = true,
+   };
+   NIR_PASS_V(nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
+
+   if (INTEL_DEBUG(intel_debug_flag_for_shader_stage(stage))) {
       fprintf(stderr, "NIR (from SPIR-V) for %s shader:\n",
               gl_shader_stage_name(stage));
       nir_print_shader(nir, stderr);
@@ -1148,6 +1157,24 @@ anv_pipeline_link_fs(const struct brw_compiler *compiler,
    if (deleted_output)
       nir_fixup_deref_modes(stage->nir);
 
+   /* Initially the valid outputs value is based off the renderpass color
+    * attachments (see populate_wm_prog_key()), now that we've potentially
+    * deleted variables that map to unused attachments, we need to update the
+    * valid outputs for the backend compiler based on what output variables
+    * are actually used. */
+   stage->key.wm.color_outputs_valid = 0;
+   nir_foreach_shader_out_variable_safe(var, stage->nir) {
+      if (var->data.location < FRAG_RESULT_DATA0)
+         continue;
+
+      const unsigned rt = var->data.location - FRAG_RESULT_DATA0;
+      const unsigned array_len =
+         glsl_type_is_array(var->type) ? glsl_get_length(var->type) : 1;
+      assert(rt + array_len <= MAX_RTS);
+
+      stage->key.wm.color_outputs_valid |= BITFIELD_RANGE(rt, array_len);
+   }
+
    /* We stored the number of subpass color attachments in nr_color_regions
     * when calculating the key for caching.  Now that we've computed the bind
     * map, we can reduce this to the actual max before we go into the back-end
@@ -1371,20 +1398,22 @@ anv_pipeline_init_from_cached_graphics(struct anv_graphics_pipeline *pipeline)
 {
    /* TODO: Cache this pipeline-wide information. */
 
-   /* Primitive replication depends on information from all the shaders.
-    * Recover this bit from the fact that we have more than one position slot
-    * in the vertex shader when using it.
-    */
-   assert(pipeline->active_stages & VK_SHADER_STAGE_VERTEX_BIT);
-   int pos_slots = 0;
-   const struct brw_vue_prog_data *vue_prog_data =
-      (const void *) pipeline->shaders[MESA_SHADER_VERTEX]->prog_data;
-   const struct brw_vue_map *vue_map = &vue_prog_data->vue_map;
-   for (int i = 0; i < vue_map->num_slots; i++) {
-      if (vue_map->slot_to_varying[i] == VARYING_SLOT_POS)
-         pos_slots++;
+   if (anv_pipeline_is_primitive(pipeline)) {
+      /* Primitive replication depends on information from all the shaders.
+       * Recover this bit from the fact that we have more than one position slot
+       * in the vertex shader when using it.
+       */
+      assert(pipeline->active_stages & VK_SHADER_STAGE_VERTEX_BIT);
+      int pos_slots = 0;
+      const struct brw_vue_prog_data *vue_prog_data =
+         (const void *) pipeline->shaders[MESA_SHADER_VERTEX]->prog_data;
+      const struct brw_vue_map *vue_map = &vue_prog_data->vue_map;
+      for (int i = 0; i < vue_map->num_slots; i++) {
+         if (vue_map->slot_to_varying[i] == VARYING_SLOT_POS)
+            pos_slots++;
+      }
+      pipeline->use_primitive_replication = pos_slots > 1;
    }
-   pipeline->use_primitive_replication = pos_slots > 1;
 }
 
 static VkResult
@@ -1400,8 +1429,6 @@ anv_pipeline_compile_graphics(struct anv_graphics_pipeline *pipeline,
    const struct brw_compiler *compiler = pipeline->base.device->physical->compiler;
    struct anv_pipeline_stage stages[MESA_SHADER_STAGES] = {};
 
-   pipeline->active_stages = 0;
-
    /* Information on which states are considered dynamic. */
    const VkPipelineDynamicStateCreateInfo *dyn_info =
       info->pDynamicState;
@@ -1416,8 +1443,6 @@ anv_pipeline_compile_graphics(struct anv_graphics_pipeline *pipeline,
    for (uint32_t i = 0; i < info->stageCount; i++) {
       const VkPipelineShaderStageCreateInfo *sinfo = &info->pStages[i];
       gl_shader_stage stage = vk_to_mesa_shader_stage(sinfo->stage);
-
-      pipeline->active_stages |= sinfo->stage;
 
       int64_t stage_start = os_time_get_nano();
 
@@ -1477,9 +1502,6 @@ anv_pipeline_compile_graphics(struct anv_graphics_pipeline *pipeline,
       stages[stage].feedback.duration += os_time_get_nano() - stage_start;
       stages[stage].feedback.flags |= VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT_EXT;
    }
-
-   if (pipeline->active_stages & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
-      pipeline->active_stages |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
 
    assert(pipeline->active_stages & VK_SHADER_STAGE_VERTEX_BIT);
 
@@ -1590,7 +1612,7 @@ anv_pipeline_compile_graphics(struct anv_graphics_pipeline *pipeline,
                                                  pipeline_ctx,
                                                  &stages[s]);
       if (stages[s].nir == NULL) {
-         result = vk_error(VK_ERROR_UNKNOWN);
+         result = vk_error(pipeline, VK_ERROR_UNKNOWN);
          goto fail;
       }
 
@@ -1729,7 +1751,7 @@ anv_pipeline_compile_graphics(struct anv_graphics_pipeline *pipeline,
       }
       if (stages[s].code == NULL) {
          ralloc_free(stage_ctx);
-         result = vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+         result = vk_error(pipeline->base.device, VK_ERROR_OUT_OF_HOST_MEMORY);
          goto fail;
       }
 
@@ -1748,7 +1770,7 @@ anv_pipeline_compile_graphics(struct anv_graphics_pipeline *pipeline,
                                   xfb_info, &stages[s].bind_map);
       if (!bin) {
          ralloc_free(stage_ctx);
-         result = vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+         result = vk_error(pipeline, VK_ERROR_OUT_OF_HOST_MEMORY);
          goto fail;
       }
 
@@ -1887,7 +1909,7 @@ anv_pipeline_compile_cs(struct anv_compute_pipeline *pipeline,
       stage.nir = anv_pipeline_stage_get_nir(&pipeline->base, cache, mem_ctx, &stage);
       if (stage.nir == NULL) {
          ralloc_free(mem_ctx);
-         return vk_error(VK_ERROR_UNKNOWN);
+         return vk_error(pipeline, VK_ERROR_UNKNOWN);
       }
 
       NIR_PASS_V(stage.nir, anv_nir_add_base_work_group_id);
@@ -1909,7 +1931,7 @@ anv_pipeline_compile_cs(struct anv_compute_pipeline *pipeline,
       stage.code = brw_compile_cs(compiler, mem_ctx, &params);
       if (stage.code == NULL) {
          ralloc_free(mem_ctx);
-         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+         return vk_error(pipeline, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
 
       anv_nir_validate_push_layout(&stage.prog_data.base, &stage.bind_map);
@@ -1931,7 +1953,7 @@ anv_pipeline_compile_cs(struct anv_compute_pipeline *pipeline,
                                      NULL, &stage.bind_map);
       if (!bin) {
          ralloc_free(mem_ctx);
-         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+         return vk_error(pipeline, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
 
       stage.feedback.duration = os_time_get_nano() - stage_start;
@@ -2043,7 +2065,8 @@ copy_non_dynamic_state(struct anv_graphics_pipeline *pipeline,
          pCreateInfo->pRasterizationState->frontFace;
    }
 
-   if (states & ANV_CMD_DIRTY_DYNAMIC_PRIMITIVE_TOPOLOGY) {
+   if ((states & ANV_CMD_DIRTY_DYNAMIC_PRIMITIVE_TOPOLOGY) &&
+         (pipeline->active_stages & VK_SHADER_STAGE_VERTEX_BIT)) {
       assert(pCreateInfo->pInputAssemblyState);
       dynamic->primitive_topology = pCreateInfo->pInputAssemblyState->topology;
    }
@@ -2060,7 +2083,8 @@ copy_non_dynamic_state(struct anv_graphics_pipeline *pipeline,
          pCreateInfo->pRasterizationState->depthBiasEnable;
    }
 
-   if (states & ANV_CMD_DIRTY_DYNAMIC_PRIMITIVE_RESTART_ENABLE) {
+   if ((states & ANV_CMD_DIRTY_DYNAMIC_PRIMITIVE_RESTART_ENABLE) &&
+         (pipeline->active_stages & VK_SHADER_STAGE_VERTEX_BIT)) {
       assert(pCreateInfo->pInputAssemblyState);
       dynamic->primitive_restart_enable =
          pCreateInfo->pInputAssemblyState->primitiveRestartEnable;
@@ -2265,8 +2289,6 @@ anv_pipeline_validate_create_info(const VkGraphicsPipelineCreateInfo *info)
    subpass = &renderpass->subpasses[info->subpass];
 
    assert(info->stageCount >= 1);
-   assert(info->pVertexInputState);
-   assert(info->pInputAssemblyState);
    assert(info->pRasterizationState);
    if (!info->pRasterizationState->rasterizerDiscardEnable) {
       assert(info->pViewportState);
@@ -2291,6 +2313,10 @@ anv_pipeline_validate_create_info(const VkGraphicsPipelineCreateInfo *info)
 
    for (uint32_t i = 0; i < info->stageCount; ++i) {
       switch (info->pStages[i].stage) {
+      case VK_SHADER_STAGE_VERTEX_BIT:
+         assert(info->pVertexInputState);
+         assert(info->pInputAssemblyState);
+         break;
       case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
       case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
          assert(info->pTessellationState);
@@ -2373,6 +2399,14 @@ anv_graphics_pipeline_init(struct anv_graphics_pipeline *pipeline,
             pCreateInfo->pDynamicState->pDynamicStates[s]);
       }
    }
+
+   pipeline->active_stages = 0;
+   for (uint32_t i = 0; i < pCreateInfo->stageCount; i++)
+      pipeline->active_stages |= pCreateInfo->pStages[i].stage;
+
+   if (pipeline->active_stages & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
+      pipeline->active_stages |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+
    copy_non_dynamic_state(pipeline, pCreateInfo);
 
    pipeline->depth_clamp_enable = pCreateInfo->pRasterizationState->depthClampEnable;
@@ -2398,79 +2432,79 @@ anv_graphics_pipeline_init(struct anv_graphics_pipeline *pipeline,
       return result;
    }
 
-   assert(pipeline->shaders[MESA_SHADER_VERTEX]);
-
    anv_pipeline_setup_l3_config(&pipeline->base, false);
 
-   const VkPipelineVertexInputStateCreateInfo *vi_info =
-      pCreateInfo->pVertexInputState;
+   if (anv_pipeline_is_primitive(pipeline)) {
+      const VkPipelineVertexInputStateCreateInfo *vi_info =
+         pCreateInfo->pVertexInputState;
 
-   const uint64_t inputs_read = get_vs_prog_data(pipeline)->inputs_read;
+      const uint64_t inputs_read = get_vs_prog_data(pipeline)->inputs_read;
 
-   for (uint32_t i = 0; i < vi_info->vertexAttributeDescriptionCount; i++) {
-      const VkVertexInputAttributeDescription *desc =
-         &vi_info->pVertexAttributeDescriptions[i];
+      for (uint32_t i = 0; i < vi_info->vertexAttributeDescriptionCount; i++) {
+         const VkVertexInputAttributeDescription *desc =
+            &vi_info->pVertexAttributeDescriptions[i];
 
-      if (inputs_read & (1ull << (VERT_ATTRIB_GENERIC0 + desc->location)))
-         pipeline->vb_used |= 1 << desc->binding;
-   }
-
-   for (uint32_t i = 0; i < vi_info->vertexBindingDescriptionCount; i++) {
-      const VkVertexInputBindingDescription *desc =
-         &vi_info->pVertexBindingDescriptions[i];
-
-      pipeline->vb[desc->binding].stride = desc->stride;
-
-      /* Step rate is programmed per vertex element (attribute), not
-       * binding. Set up a map of which bindings step per instance, for
-       * reference by vertex element setup. */
-      switch (desc->inputRate) {
-      default:
-      case VK_VERTEX_INPUT_RATE_VERTEX:
-         pipeline->vb[desc->binding].instanced = false;
-         break;
-      case VK_VERTEX_INPUT_RATE_INSTANCE:
-         pipeline->vb[desc->binding].instanced = true;
-         break;
+         if (inputs_read & (1ull << (VERT_ATTRIB_GENERIC0 + desc->location)))
+            pipeline->vb_used |= 1 << desc->binding;
       }
 
-      pipeline->vb[desc->binding].instance_divisor = 1;
-   }
+      for (uint32_t i = 0; i < vi_info->vertexBindingDescriptionCount; i++) {
+         const VkVertexInputBindingDescription *desc =
+            &vi_info->pVertexBindingDescriptions[i];
 
-   const VkPipelineVertexInputDivisorStateCreateInfoEXT *vi_div_state =
-      vk_find_struct_const(vi_info->pNext,
-                           PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT);
-   if (vi_div_state) {
-      for (uint32_t i = 0; i < vi_div_state->vertexBindingDivisorCount; i++) {
-         const VkVertexInputBindingDivisorDescriptionEXT *desc =
-            &vi_div_state->pVertexBindingDivisors[i];
+         pipeline->vb[desc->binding].stride = desc->stride;
 
-         pipeline->vb[desc->binding].instance_divisor = desc->divisor;
+         /* Step rate is programmed per vertex element (attribute), not
+          * binding. Set up a map of which bindings step per instance, for
+          * reference by vertex element setup. */
+         switch (desc->inputRate) {
+         default:
+         case VK_VERTEX_INPUT_RATE_VERTEX:
+            pipeline->vb[desc->binding].instanced = false;
+            break;
+         case VK_VERTEX_INPUT_RATE_INSTANCE:
+            pipeline->vb[desc->binding].instanced = true;
+            break;
+         }
+
+         pipeline->vb[desc->binding].instance_divisor = 1;
       }
-   }
 
-   /* Our implementation of VK_KHR_multiview uses instancing to draw the
-    * different views.  If the client asks for instancing, we need to multiply
-    * the instance divisor by the number of views ensure that we repeat the
-    * client's per-instance data once for each view.
-    */
-   if (pipeline->subpass->view_mask && !pipeline->use_primitive_replication) {
-      const uint32_t view_count = anv_subpass_view_count(pipeline->subpass);
-      for (uint32_t vb = 0; vb < MAX_VBS; vb++) {
-         if (pipeline->vb[vb].instanced)
-            pipeline->vb[vb].instance_divisor *= view_count;
+      const VkPipelineVertexInputDivisorStateCreateInfoEXT *vi_div_state =
+         vk_find_struct_const(vi_info->pNext,
+                              PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT);
+      if (vi_div_state) {
+         for (uint32_t i = 0; i < vi_div_state->vertexBindingDivisorCount; i++) {
+            const VkVertexInputBindingDivisorDescriptionEXT *desc =
+               &vi_div_state->pVertexBindingDivisors[i];
+
+            pipeline->vb[desc->binding].instance_divisor = desc->divisor;
+         }
       }
+
+      /* Our implementation of VK_KHR_multiview uses instancing to draw the
+       * different views.  If the client asks for instancing, we need to multiply
+       * the instance divisor by the number of views ensure that we repeat the
+       * client's per-instance data once for each view.
+       */
+      if (pipeline->subpass->view_mask && !pipeline->use_primitive_replication) {
+         const uint32_t view_count = anv_subpass_view_count(pipeline->subpass);
+         for (uint32_t vb = 0; vb < MAX_VBS; vb++) {
+            if (pipeline->vb[vb].instanced)
+               pipeline->vb[vb].instance_divisor *= view_count;
+         }
+      }
+
+      const VkPipelineInputAssemblyStateCreateInfo *ia_info =
+         pCreateInfo->pInputAssemblyState;
+      const VkPipelineTessellationStateCreateInfo *tess_info =
+         pCreateInfo->pTessellationState;
+
+      if (anv_pipeline_has_stage(pipeline, MESA_SHADER_TESS_EVAL))
+         pipeline->topology = _3DPRIM_PATCHLIST(tess_info->patchControlPoints);
+      else
+         pipeline->topology = vk_to_intel_primitive_type[ia_info->topology];
    }
-
-   const VkPipelineInputAssemblyStateCreateInfo *ia_info =
-      pCreateInfo->pInputAssemblyState;
-   const VkPipelineTessellationStateCreateInfo *tess_info =
-      pCreateInfo->pTessellationState;
-
-   if (anv_pipeline_has_stage(pipeline, MESA_SHADER_TESS_EVAL))
-      pipeline->topology = _3DPRIM_PATCHLIST(tess_info->patchControlPoints);
-   else
-      pipeline->topology = vk_to_intel_primitive_type[ia_info->topology];
 
    /* If rasterization is not enabled, ms_info must be ignored. */
    const bool raster_enabled =
@@ -2529,7 +2563,7 @@ compile_upload_rt_shader(struct anv_ray_tracing_pipeline *pipeline,
                      &stage->key.bs, &stage->prog_data.bs, nir,
                      num_resume_shaders, resume_shaders, stage->stats, NULL);
    if (stage->code == NULL)
-      return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(pipeline, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    /* Ray-tracing shaders don't have a "real" bind map */
    struct anv_pipeline_bind_map empty_bind_map = {};
@@ -2546,7 +2580,7 @@ compile_upload_rt_shader(struct anv_ray_tracing_pipeline *pipeline,
                                stage->stats, 1,
                                NULL, &empty_bind_map);
    if (bin == NULL)
-      return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(pipeline, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    /* TODO: Figure out executables for resume shaders */
    anv_pipeline_add_executables(&pipeline->base, stage, bin);
@@ -2787,7 +2821,7 @@ anv_pipeline_compile_ray_tracing(struct anv_ray_tracing_pipeline *pipeline,
                                                  pipeline_ctx, &stages[i]);
       if (stages[i].nir == NULL) {
          ralloc_free(pipeline_ctx);
-         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+         return vk_error(pipeline, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
 
       anv_pipeline_lower_nir(&pipeline->base, pipeline_ctx, &stages[i], layout);
@@ -3004,7 +3038,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
       ralloc_free(tmp_ctx);
 
       if (device->rt_trampoline == NULL)
-         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
    struct brw_rt_trivial_return {
@@ -3046,7 +3080,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
 
       if (device->rt_trivial_return == NULL) {
          anv_shader_bin_unref(device, device->rt_trampoline);
-         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
    }
 
@@ -3315,16 +3349,18 @@ VkResult anv_GetPipelineExecutableInternalRepresentationsKHR(
 
 VkResult
 anv_GetRayTracingShaderGroupHandlesKHR(
-    VkDevice                                    device,
+    VkDevice                                    _device,
     VkPipeline                                  _pipeline,
     uint32_t                                    firstGroup,
     uint32_t                                    groupCount,
     size_t                                      dataSize,
     void*                                       pData)
 {
+   ANV_FROM_HANDLE(anv_device, device, _device);
    ANV_FROM_HANDLE(anv_pipeline, pipeline, _pipeline);
+
    if (pipeline->type != ANV_PIPELINE_RAY_TRACING)
-      return vk_error(VK_ERROR_FEATURE_NOT_PRESENT);
+      return vk_error(device, VK_ERROR_FEATURE_NOT_PRESENT);
 
    struct anv_ray_tracing_pipeline *rt_pipeline =
       anv_pipeline_to_ray_tracing(pipeline);
@@ -3340,15 +3376,16 @@ anv_GetRayTracingShaderGroupHandlesKHR(
 
 VkResult
 anv_GetRayTracingCaptureReplayShaderGroupHandlesKHR(
-    VkDevice                                    device,
+    VkDevice                                    _device,
     VkPipeline                                  pipeline,
     uint32_t                                    firstGroup,
     uint32_t                                    groupCount,
     size_t                                      dataSize,
     void*                                       pData)
 {
+   ANV_FROM_HANDLE(anv_device, device, _device);
    unreachable("Unimplemented");
-   return vk_error(VK_ERROR_FEATURE_NOT_PRESENT);
+   return vk_error(device, VK_ERROR_FEATURE_NOT_PRESENT);
 }
 
 VkDeviceSize

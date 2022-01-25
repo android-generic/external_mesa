@@ -154,6 +154,7 @@ reg_create(void *mem_ctx, struct exec_list *list)
    reg->num_components = 0;
    reg->bit_size = 32;
    reg->num_array_elems = 0;
+   reg->divergent = false;
 
    exec_list_push_tail(list, &reg->node);
 
@@ -376,7 +377,7 @@ void nir_src_copy(nir_src *dest, const nir_src *src)
       dest->reg.base_offset = src->reg.base_offset;
       dest->reg.reg = src->reg.reg;
       if (src->reg.indirect) {
-         dest->reg.indirect = malloc(sizeof(nir_src));
+         dest->reg.indirect = calloc(1, sizeof(nir_src));
          nir_src_copy(dest->reg.indirect, src->reg.indirect);
       } else {
          dest->reg.indirect = NULL;
@@ -396,7 +397,7 @@ void nir_dest_copy(nir_dest *dest, const nir_dest *src)
    dest->reg.base_offset = src->reg.base_offset;
    dest->reg.reg = src->reg.reg;
    if (src->reg.indirect) {
-      dest->reg.indirect = malloc(sizeof(nir_src));
+      dest->reg.indirect = calloc(1, sizeof(nir_src));
       nir_src_copy(dest->reg.indirect, src->reg.indirect);
    } else {
       dest->reg.indirect = NULL;
@@ -2234,6 +2235,17 @@ nir_shader_lower_instructions(nir_shader *shader,
    }
 
    return progress;
+}
+
+/**
+ * Returns true if the shader supports quad-based implicit derivatives on
+ * texture sampling.
+ */
+bool nir_shader_supports_implicit_lod(nir_shader *shader)
+{
+   return (shader->info.stage == MESA_SHADER_FRAGMENT ||
+           (shader->info.stage == MESA_SHADER_COMPUTE &&
+            shader->info.cs.derivative_group != DERIVATIVE_GROUP_NONE));
 }
 
 nir_intrinsic_op

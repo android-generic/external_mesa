@@ -124,8 +124,8 @@ radv_surface_has_scanout(struct radv_device *device, const struct radv_image_cre
 }
 
 static bool
-radv_image_use_fast_clear_for_image(const struct radv_device *device,
-                                    const struct radv_image *image)
+radv_image_use_fast_clear_for_image_early(const struct radv_device *device,
+                                          const struct radv_image *image)
 {
    if (device->instance->debug_flags & RADV_DEBUG_FORCE_COMPRESS)
       return true;
@@ -139,7 +139,17 @@ radv_image_use_fast_clear_for_image(const struct radv_device *device,
       return false;
    }
 
-   return image->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &&
+   return !!(image->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+}
+
+static bool
+radv_image_use_fast_clear_for_image(const struct radv_device *device,
+                                    const struct radv_image *image)
+{
+   if (device->instance->debug_flags & RADV_DEBUG_FORCE_COMPRESS)
+      return true;
+
+   return radv_image_use_fast_clear_for_image_early(device, image) &&
           (image->exclusive ||
            /* Enable DCC for concurrent images if stores are
             * supported because that means we can keep DCC compressed on
@@ -219,9 +229,9 @@ radv_formats_is_atomic_allowed(struct radv_device *device, const void *pNext, Vk
 }
 
 static bool
-radv_use_dcc_for_image(struct radv_device *device, struct radv_image *image,
-                       const VkImageCreateInfo *pCreateInfo, VkFormat format,
-                       bool *sign_reinterpret)
+radv_use_dcc_for_image_early(struct radv_device *device, struct radv_image *image,
+                             const VkImageCreateInfo *pCreateInfo, VkFormat format,
+                             bool *sign_reinterpret)
 {
    /* DCC (Delta Color Compression) is only available for GFX8+. */
    if (device->physical_device->rad_info.chip_class < GFX8)
@@ -255,7 +265,7 @@ radv_use_dcc_for_image(struct radv_device *device, struct radv_image *image,
    if (vk_format_is_subsampled(format) || vk_format_get_plane_count(format) > 1)
       return false;
 
-   if (!radv_image_use_fast_clear_for_image(device, image) &&
+   if (!radv_image_use_fast_clear_for_image_early(device, image) &&
        image->tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
       return false;
 
@@ -276,6 +286,26 @@ radv_use_dcc_for_image(struct radv_device *device, struct radv_image *image,
 
    return radv_are_formats_dcc_compatible(device->physical_device, pCreateInfo->pNext, format,
                                           pCreateInfo->flags, sign_reinterpret);
+}
+
+static bool
+radv_use_dcc_for_image_late(struct radv_device *device, struct radv_image *image)
+{
+   if (!radv_image_has_dcc(image))
+      return false;
+
+   if (image->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+      return true;
+
+   if (!radv_image_use_fast_clear_for_image(device, image))
+      return false;
+
+   /* TODO: Fix storage images with DCC without DCC image stores.
+    * Disabling it for now. */
+   if ((image->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !radv_image_use_dcc_image_stores(device, image))
+      return false;
+
+   return true;
 }
 
 /*
@@ -322,12 +352,20 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
    bool use_htile_for_mips =
       image->info.array_size == 1 && device->physical_device->rad_info.chip_class >= GFX10;
 
+   /* Stencil texturing with HTILE doesn't work with mipmapping on Navi10-14. */
+   if (device->physical_device->rad_info.chip_class == GFX10 &&
+       image->vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT && image->info.levels > 1)
+      return false;
+
    /* Do not enable HTILE for very small images because it seems less performant but make sure it's
     * allowed with VRS attachments because we need HTILE.
     */
    if (image->info.width * image->info.height < 8 * 8 &&
        !(device->instance->debug_flags & RADV_DEBUG_FORCE_COMPRESS) &&
        !device->attachment_vrs_enabled)
+      return false;
+
+   if (device->instance->disable_htile_layers && image->info.array_size > 1)
       return false;
 
    return (image->info.levels == 1 || use_htile_for_mips) && !image->shareable;
@@ -553,8 +591,8 @@ radv_get_surface_flags(struct radv_device *device, struct radv_image *image, uns
        vk_format_get_blocksizebits(image_format) == 128 && vk_format_is_compressed(image_format))
       flags |= RADEON_SURF_NO_RENDER_TARGET;
 
-   if (!radv_use_dcc_for_image(device, image, pCreateInfo, image_format,
-                               &image->dcc_sign_reinterpret))
+   if (!radv_use_dcc_for_image_early(device, image, pCreateInfo, image_format,
+                                     &image->dcc_sign_reinterpret))
       flags |= RADEON_SURF_DISABLE_DCC;
 
    if (!radv_use_fmask_for_image(device, image))
@@ -1509,12 +1547,8 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       device->ws->surface_init(device->ws, &info, &image->planes[plane].surface);
 
       if (plane == 0) {
-        /* TODO: Fix storage images with DCC without DCC image stores.
-         * Disabling it for now. */
-         if(radv_image_has_dcc(image) && (image->usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
-            !radv_image_use_dcc_image_stores(device, image)) {
+         if (!radv_use_dcc_for_image_late(device, image))
             ac_surface_zero_dcc_fields(&image->planes[0].surface);
-         }
       }
 
       if (create_info.bo_metadata && !mod_info &&
@@ -1686,7 +1720,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    image =
       vk_zalloc2(&device->vk.alloc, alloc, image_struct_size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!image)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    vk_object_base_init(&device->vk, &image->base, VK_OBJECT_TYPE_IMAGE);
 
@@ -1763,7 +1797,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
                                    RADEON_FLAG_VIRTUAL, RADV_BO_PRIORITY_VIRTUAL, 0, &image->bo);
       if (result != VK_SUCCESS) {
          radv_destroy_image(device, alloc, image);
-         return vk_error(device->instance, result);
+         return vk_error(device, result);
       }
    }
 
@@ -1810,7 +1844,7 @@ radv_image_view_make_descriptor(struct radv_image_view *iview, struct radv_devic
       vk_format_get_plane_width(image->vk_format, plane_id, iview->extent.width),
       vk_format_get_plane_height(image->vk_format, plane_id, iview->extent.height),
       iview->extent.depth, descriptor->plane_descriptors[descriptor_plane_id],
-      descriptor_plane_id ? NULL : descriptor->fmask_descriptor);
+      descriptor_plane_id || is_storage_image ? NULL : descriptor->fmask_descriptor);
 
    const struct legacy_surf_level *base_level_info = NULL;
    if (device->physical_device->rad_info.chip_class <= GFX9) {
@@ -2294,7 +2328,7 @@ radv_CreateImageView(VkDevice _device, const VkImageViewCreateInfo *pCreateInfo,
    view =
       vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*view), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (view == NULL)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    radv_image_view_init(view, device, pCreateInfo, NULL);
 
@@ -2349,7 +2383,7 @@ radv_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInf
    view =
       vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*view), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!view)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    radv_buffer_view_init(view, device, pCreateInfo);
 

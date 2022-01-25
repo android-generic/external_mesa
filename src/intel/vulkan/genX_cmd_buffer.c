@@ -72,7 +72,7 @@ convert_pc_to_bits(struct GENX(PIPE_CONTROL) *pc) {
 }
 
 #define anv_debug_dump_pc(pc) \
-   if (INTEL_DEBUG & DEBUG_PIPE_CONTROL) { \
+   if (INTEL_DEBUG(DEBUG_PIPE_CONTROL)) { \
       fputs("pc: emit PC=( ", stderr); \
       anv_dump_pipe_bits(convert_pc_to_bits(&(pc))); \
       fprintf(stderr, ") reason: %s\n", __FUNCTION__); \
@@ -649,8 +649,7 @@ transition_depth_buffer(struct anv_cmd_buffer *cmd_buffer,
 
    /* Getting into the pass-through state for Depth is tricky and involves
     * both a resolve and an ambiguate.  We don't handle that state right now
-    * as anv_layout_to_aux_state never returns it. Resolve/ambiguate will
-    * trigger depth clears which require tile cache flushes.
+    * as anv_layout_to_aux_state never returns it.
     */
    assert(final_state != ISL_AUX_STATE_PASS_THROUGH);
 
@@ -658,16 +657,10 @@ transition_depth_buffer(struct anv_cmd_buffer *cmd_buffer,
       assert(initial_hiz_valid);
       anv_image_hiz_op(cmd_buffer, image, VK_IMAGE_ASPECT_DEPTH_BIT,
                        0, base_layer, layer_count, ISL_AUX_OP_FULL_RESOLVE);
-      anv_add_pending_pipe_bits(cmd_buffer,
-                                ANV_PIPE_TILE_CACHE_FLUSH_BIT,
-                                "after depth resolve");
    } else if (final_needs_hiz && !initial_hiz_valid) {
       assert(initial_depth_valid);
       anv_image_hiz_op(cmd_buffer, image, VK_IMAGE_ASPECT_DEPTH_BIT,
                        0, base_layer, layer_count, ISL_AUX_OP_AMBIGUATE);
-      anv_add_pending_pipe_bits(cmd_buffer,
-                                ANV_PIPE_TILE_CACHE_FLUSH_BIT,
-                                "after hiz resolve");
    }
 }
 
@@ -1186,9 +1179,12 @@ transition_color_buffer(struct anv_cmd_buffer *cmd_buffer,
    UNUSED const uint32_t image_layers = MAX2(image->vk.array_layers, max_depth);
    assert((uint64_t)base_layer + layer_count  <= image_layers);
    assert(last_level_num <= image->vk.mip_levels);
-   /* The spec disallows these final layouts. */
-   assert(final_layout != VK_IMAGE_LAYOUT_UNDEFINED &&
-          final_layout != VK_IMAGE_LAYOUT_PREINITIALIZED);
+   /* If there is a layout transfer, the final layout cannot be undefined or
+    * preinitialized (VUID-VkImageMemoryBarrier-newLayout-01198).
+    */
+   assert(initial_layout == final_layout ||
+          (final_layout != VK_IMAGE_LAYOUT_UNDEFINED &&
+           final_layout != VK_IMAGE_LAYOUT_PREINITIALIZED));
    const struct isl_drm_modifier_info *isl_mod_info =
       image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
       ? isl_drm_modifier_get_info(image->vk.drm_format_mod)
@@ -2063,7 +2059,7 @@ genX(cmd_buffer_config_l3)(struct anv_cmd_buffer *cmd_buffer,
     */
    assert(cfg == cmd_buffer->device->l3_config);
 #else
-   if (INTEL_DEBUG & DEBUG_L3) {
+   if (INTEL_DEBUG(DEBUG_L3)) {
       mesa_logd("L3 config transition: ");
       intel_dump_l3_config(cfg, stderr);
    }
@@ -2403,43 +2399,37 @@ genX(cmd_buffer_apply_pipe_flushes)(struct anv_cmd_buffer *cmd_buffer)
    cmd_buffer->state.pending_pipe_bits = bits;
 }
 
-void genX(CmdPipelineBarrier)(
-    VkCommandBuffer                             commandBuffer,
-    VkPipelineStageFlags                        srcStageMask,
-    VkPipelineStageFlags                        destStageMask,
-    VkBool32                                    byRegion,
-    uint32_t                                    memoryBarrierCount,
-    const VkMemoryBarrier*                      pMemoryBarriers,
-    uint32_t                                    bufferMemoryBarrierCount,
-    const VkBufferMemoryBarrier*                pBufferMemoryBarriers,
-    uint32_t                                    imageMemoryBarrierCount,
-    const VkImageMemoryBarrier*                 pImageMemoryBarriers)
+static void
+cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
+                   const VkDependencyInfoKHR *dep_info,
+                   const char *reason)
 {
-   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
-
    /* XXX: Right now, we're really dumb and just flush whatever categories
     * the app asks for.  One of these days we may make this a bit better
     * but right now that's all the hardware allows for in most areas.
     */
-   VkAccessFlags src_flags = 0;
-   VkAccessFlags dst_flags = 0;
+   VkAccessFlags2KHR src_flags = 0;
+   VkAccessFlags2KHR dst_flags = 0;
 
-   for (uint32_t i = 0; i < memoryBarrierCount; i++) {
-      src_flags |= pMemoryBarriers[i].srcAccessMask;
-      dst_flags |= pMemoryBarriers[i].dstAccessMask;
+   for (uint32_t i = 0; i < dep_info->memoryBarrierCount; i++) {
+      src_flags |= dep_info->pMemoryBarriers[i].srcAccessMask;
+      dst_flags |= dep_info->pMemoryBarriers[i].dstAccessMask;
    }
 
-   for (uint32_t i = 0; i < bufferMemoryBarrierCount; i++) {
-      src_flags |= pBufferMemoryBarriers[i].srcAccessMask;
-      dst_flags |= pBufferMemoryBarriers[i].dstAccessMask;
+   for (uint32_t i = 0; i < dep_info->bufferMemoryBarrierCount; i++) {
+      src_flags |= dep_info->pBufferMemoryBarriers[i].srcAccessMask;
+      dst_flags |= dep_info->pBufferMemoryBarriers[i].dstAccessMask;
    }
 
-   for (uint32_t i = 0; i < imageMemoryBarrierCount; i++) {
-      src_flags |= pImageMemoryBarriers[i].srcAccessMask;
-      dst_flags |= pImageMemoryBarriers[i].dstAccessMask;
-      ANV_FROM_HANDLE(anv_image, image, pImageMemoryBarriers[i].image);
-      const VkImageSubresourceRange *range =
-         &pImageMemoryBarriers[i].subresourceRange;
+   for (uint32_t i = 0; i < dep_info->imageMemoryBarrierCount; i++) {
+      const VkImageMemoryBarrier2KHR *img_barrier =
+         &dep_info->pImageMemoryBarriers[i];
+
+      src_flags |= img_barrier->srcAccessMask;
+      dst_flags |= img_barrier->dstAccessMask;
+
+      ANV_FROM_HANDLE(anv_image, image, img_barrier->image);
+      const VkImageSubresourceRange *range = &img_barrier->subresourceRange;
 
       uint32_t base_layer, layer_count;
       if (image->vk.image_type == VK_IMAGE_TYPE_3D) {
@@ -2455,8 +2445,8 @@ void genX(CmdPipelineBarrier)(
       if (range->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) {
          transition_depth_buffer(cmd_buffer, image,
                                  base_layer, layer_count,
-                                 pImageMemoryBarriers[i].oldLayout,
-                                 pImageMemoryBarriers[i].newLayout,
+                                 img_barrier->oldLayout,
+                                 img_barrier->newLayout,
                                  false /* will_full_fast_clear */);
       }
 
@@ -2464,8 +2454,8 @@ void genX(CmdPipelineBarrier)(
          transition_stencil_buffer(cmd_buffer, image,
                                    range->baseMipLevel, level_count,
                                    base_layer, layer_count,
-                                   pImageMemoryBarriers[i].oldLayout,
-                                   pImageMemoryBarriers[i].newLayout,
+                                   img_barrier->oldLayout,
+                                   img_barrier->newLayout,
                                    false /* will_full_fast_clear */);
       }
 
@@ -2476,24 +2466,36 @@ void genX(CmdPipelineBarrier)(
             transition_color_buffer(cmd_buffer, image, 1UL << aspect_bit,
                                     range->baseMipLevel, level_count,
                                     base_layer, layer_count,
-                                    pImageMemoryBarriers[i].oldLayout,
-                                    pImageMemoryBarriers[i].newLayout,
-                                    pImageMemoryBarriers[i].srcQueueFamilyIndex,
-                                    pImageMemoryBarriers[i].dstQueueFamilyIndex,
+                                    img_barrier->oldLayout,
+                                    img_barrier->newLayout,
+                                    img_barrier->srcQueueFamilyIndex,
+                                    img_barrier->dstQueueFamilyIndex,
                                     false /* will_full_fast_clear */);
          }
       }
    }
 
-   anv_add_pending_pipe_bits(cmd_buffer,
-                             anv_pipe_flush_bits_for_access_flags(cmd_buffer->device, src_flags) |
-                             anv_pipe_invalidate_bits_for_access_flags(cmd_buffer->device, dst_flags),
-                             "pipe barrier");
+   enum anv_pipe_bits bits =
+      anv_pipe_flush_bits_for_access_flags(cmd_buffer->device, src_flags) |
+      anv_pipe_invalidate_bits_for_access_flags(cmd_buffer->device, dst_flags);
+
+   anv_add_pending_pipe_bits(cmd_buffer, bits, reason);
+}
+
+void genX(CmdPipelineBarrier2KHR)(
+    VkCommandBuffer                             commandBuffer,
+    const VkDependencyInfoKHR*                  pDependencyInfo)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   cmd_buffer_barrier(cmd_buffer, pDependencyInfo, "pipe barrier");
 }
 
 static void
 cmd_buffer_alloc_push_constants(struct anv_cmd_buffer *cmd_buffer)
 {
+   assert(anv_pipeline_is_primitive(cmd_buffer->state.gfx.pipeline));
+
    VkShaderStageFlags stages =
       cmd_buffer->state.gfx.pipeline->active_stages;
 
@@ -2756,8 +2758,9 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
 
          case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: {
             if (desc->image_view) {
-               struct anv_surface_state sstate = (binding->write_only)
-                  ? desc->image_view->planes[binding->plane].writeonly_storage_surface_state
+               struct anv_surface_state sstate =
+                  binding->lowered_storage_surface
+                  ? desc->image_view->planes[binding->plane].lowered_storage_surface_state
                   : desc->image_view->planes[binding->plane].storage_surface_state;
                surface_state = sstate.state;
                assert(surface_state.alloc_size);
@@ -2840,8 +2843,8 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
 
          case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
             if (desc->buffer_view) {
-               surface_state = (binding->write_only)
-                  ? desc->buffer_view->writeonly_storage_surface_state
+               surface_state = binding->lowered_storage_surface
+                  ? desc->buffer_view->lowered_storage_surface_state
                   : desc->buffer_view->storage_surface_state;
                assert(surface_state.alloc_size);
                if (need_client_mem_relocs) {
@@ -3487,12 +3490,14 @@ cmd_buffer_emit_clip(struct anv_cmd_buffer *cmd_buffer)
    uint32_t dwords[GENX(3DSTATE_CLIP_length)];
 
    struct anv_graphics_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
-   const struct brw_vue_prog_data *last =
-      anv_pipeline_get_last_vue_prog_data(pipeline);
-   if (last->vue_map.slots_valid & VARYING_BIT_VIEWPORT) {
-      clip.MaximumVPIndex =
-         cmd_buffer->state.gfx.dynamic.viewport.count > 0 ?
-         cmd_buffer->state.gfx.dynamic.viewport.count - 1 : 0;
+   if (anv_pipeline_is_primitive(pipeline)) {
+      const struct brw_vue_prog_data *last =
+         anv_pipeline_get_last_vue_prog_data(pipeline);
+      if (last->vue_map.slots_valid & VARYING_BIT_VIEWPORT) {
+         clip.MaximumVPIndex =
+            cmd_buffer->state.gfx.dynamic.viewport.count > 0 ?
+            cmd_buffer->state.gfx.dynamic.viewport.count - 1 : 0;
+      }
    }
 
    GENX(3DSTATE_CLIP_pack)(NULL, dwords, &clip);
@@ -4807,8 +4812,7 @@ verify_cmd_parser(const struct anv_device *device,
                   const char *function)
 {
    if (device->physical->cmd_parser_version < required_version) {
-      return vk_errorf(device, &device->physical->vk.base,
-                       VK_ERROR_FEATURE_NOT_PRESENT,
+      return vk_errorf(device->physical, VK_ERROR_FEATURE_NOT_PRESENT,
                        "cmd parser version %d is required for %s",
                        required_version, function);
    } else {
@@ -6858,38 +6862,37 @@ void genX(CmdEndConditionalRenderingEXT)(
 }
 #endif
 
-/* Set of stage bits for which are pipelined, i.e. they get queued by the
- * command streamer for later execution.
+/* Set of stage bits for which are pipelined, i.e. they get queued
+ * by the command streamer for later execution.
  */
 #define ANV_PIPELINE_STAGE_PIPELINED_BITS \
-   (VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | \
-    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | \
-    VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT | \
-    VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | \
-    VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT | \
-    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | \
-    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | \
-    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | \
-    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | \
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | \
-    VK_PIPELINE_STAGE_TRANSFER_BIT | \
-    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | \
-    VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | \
-    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+   ~(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT_KHR | \
+     VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT_KHR | \
+     VK_PIPELINE_STAGE_2_HOST_BIT_KHR | \
+     VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT)
 
-void genX(CmdSetEvent)(
+void genX(CmdSetEvent2KHR)(
     VkCommandBuffer                             commandBuffer,
     VkEvent                                     _event,
-    VkPipelineStageFlags                        stageMask)
+    const VkDependencyInfoKHR*                  pDependencyInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_event, event, _event);
+
+   VkPipelineStageFlags2KHR src_stages = 0;
+
+   for (uint32_t i = 0; i < pDependencyInfo->memoryBarrierCount; i++)
+      src_stages |= pDependencyInfo->pMemoryBarriers[i].srcStageMask;
+   for (uint32_t i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; i++)
+      src_stages |= pDependencyInfo->pBufferMemoryBarriers[i].srcStageMask;
+   for (uint32_t i = 0; i < pDependencyInfo->imageMemoryBarrierCount; i++)
+      src_stages |= pDependencyInfo->pImageMemoryBarriers[i].srcStageMask;
 
    cmd_buffer->state.pending_pipe_bits |= ANV_PIPE_POST_SYNC_BIT;
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 
    anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
-      if (stageMask & ANV_PIPELINE_STAGE_PIPELINED_BITS) {
+      if (src_stages & ANV_PIPELINE_STAGE_PIPELINED_BITS) {
          pc.StallAtPixelScoreboard = true;
          pc.CommandStreamerStallEnable = true;
       }
@@ -6905,10 +6908,10 @@ void genX(CmdSetEvent)(
    }
 }
 
-void genX(CmdResetEvent)(
+void genX(CmdResetEvent2KHR)(
     VkCommandBuffer                             commandBuffer,
     VkEvent                                     _event,
-    VkPipelineStageFlags                        stageMask)
+    VkPipelineStageFlags2KHR                    stageMask)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_event, event, _event);
@@ -6933,22 +6936,15 @@ void genX(CmdResetEvent)(
    }
 }
 
-void genX(CmdWaitEvents)(
+void genX(CmdWaitEvents2KHR)(
     VkCommandBuffer                             commandBuffer,
     uint32_t                                    eventCount,
     const VkEvent*                              pEvents,
-    VkPipelineStageFlags                        srcStageMask,
-    VkPipelineStageFlags                        destStageMask,
-    uint32_t                                    memoryBarrierCount,
-    const VkMemoryBarrier*                      pMemoryBarriers,
-    uint32_t                                    bufferMemoryBarrierCount,
-    const VkBufferMemoryBarrier*                pBufferMemoryBarriers,
-    uint32_t                                    imageMemoryBarrierCount,
-    const VkImageMemoryBarrier*                 pImageMemoryBarriers)
+    const VkDependencyInfoKHR*                  pDependencyInfos)
 {
-#if GFX_VER >= 8
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
 
+#if GFX_VER >= 8
    for (uint32_t i = 0; i < eventCount; i++) {
       ANV_FROM_HANDLE(anv_event, event, pEvents[i]);
 
@@ -6966,11 +6962,7 @@ void genX(CmdWaitEvents)(
    anv_finishme("Implement events on gfx7");
 #endif
 
-   genX(CmdPipelineBarrier)(commandBuffer, srcStageMask, destStageMask,
-                            false, /* byRegion */
-                            memoryBarrierCount, pMemoryBarriers,
-                            bufferMemoryBarrierCount, pBufferMemoryBarriers,
-                            imageMemoryBarrierCount, pImageMemoryBarriers);
+   cmd_buffer_barrier(cmd_buffer, pDependencyInfos, "wait event");
 }
 
 VkResult genX(CmdSetPerformanceOverrideINTEL)(

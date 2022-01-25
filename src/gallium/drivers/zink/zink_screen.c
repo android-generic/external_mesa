@@ -279,6 +279,23 @@ zink_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
    }
 }
 
+static uint32_t
+get_smallest_buffer_heap(struct zink_screen *screen)
+{
+   enum zink_heap heaps[] = {
+      ZINK_HEAP_DEVICE_LOCAL,
+      ZINK_HEAP_DEVICE_LOCAL_VISIBLE,
+      ZINK_HEAP_HOST_VISIBLE_COHERENT,
+      ZINK_HEAP_HOST_VISIBLE_COHERENT
+   };
+   unsigned size = UINT32_MAX;
+   for (unsigned i = 0; i < ARRAY_SIZE(heaps); i++) {
+      unsigned heap_idx = screen->info.mem_props.memoryTypes[screen->heap_map[i]].heapIndex;
+      size = MIN2(screen->info.mem_props.memoryHeaps[heap_idx].size, size);
+   }
+   return size;
+}
+
 static int
 zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 {
@@ -525,7 +542,8 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_MAX_TEXTURE_BUFFER_SIZE:
-      return screen->info.props.limits.maxTexelBufferElements;
+      return MIN2(get_smallest_buffer_heap(screen),
+                  screen->info.props.limits.maxTexelBufferElements);
 
    case PIPE_CAP_ENDIANNESS:
       return PIPE_ENDIAN_NATIVE; /* unsure */
@@ -620,7 +638,7 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       /* 1<<27 is required by VK spec */
       assert(screen->info.props.limits.maxStorageBufferRange >= 1 << 27);
       /* but Gallium can't handle values that are too big, so clamp to VK spec minimum */
-      return 1 << 27;
+      return MIN2(get_smallest_buffer_heap(screen), 1 << 27);
 
    case PIPE_CAP_TGSI_FS_COORD_ORIGIN_UPPER_LEFT:
    case PIPE_CAP_TGSI_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
@@ -769,6 +787,14 @@ zink_get_shader_param(struct pipe_screen *pscreen,
       default:
          return 0; /* unsupported stage */
       }
+      switch (shader) {
+      case PIPE_SHADER_VERTEX:
+      case PIPE_SHADER_TESS_EVAL:
+      case PIPE_SHADER_GEOMETRY:
+         /* last vertex stage must support streamout, and this is capped in glsl compiler */
+         return MIN2(max, MAX_VARYING);
+      default: break;
+      }
       return MIN2(max, 64); // prevent overflowing struct shader_info::inputs_read
    }
 
@@ -800,7 +826,8 @@ zink_get_shader_param(struct pipe_screen *pscreen,
       /* At least 16384 is guaranteed by VK spec */
       assert(screen->info.props.limits.maxUniformBufferRange >= 16384);
       /* but Gallium can't handle values that are too big */
-      return MIN2(screen->info.props.limits.maxUniformBufferRange, 1 << 31);
+      return MIN3(get_smallest_buffer_heap(screen),
+                  screen->info.props.limits.maxUniformBufferRange, 1 << 31);
 
    case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
       return  MIN2(screen->info.props.limits.maxPerStageDescriptorUniformBuffers,
@@ -827,8 +854,7 @@ zink_get_shader_param(struct pipe_screen *pscreen,
       return screen->info.feats11.uniformAndStorageBuffer16BitAccess ||
              (screen->info.have_KHR_16bit_storage && screen->info.storage_16bit_feats.uniformAndStorageBuffer16BitAccess);
    case PIPE_SHADER_CAP_FP16_DERIVATIVES:
-      return screen->info.feats11.storageInputOutput16 ||
-             (screen->info.have_KHR_16bit_storage && screen->info.storage_16bit_feats.storageInputOutput16);
+      return 0; //spirv requires 32bit derivative srcs and dests
    case PIPE_SHADER_CAP_FP16:
       return screen->info.feats12.shaderFloat16 ||
              (screen->info.have_KHR_shader_float16_int8 &&
@@ -932,6 +958,9 @@ zink_is_format_supported(struct pipe_screen *pscreen,
                          unsigned bind)
 {
    struct zink_screen *screen = zink_screen(pscreen);
+
+   if (storage_sample_count && !screen->info.feats.features.shaderStorageImageMultisample && bind & PIPE_BIND_SHADER_IMAGE)
+      return false;
 
    if (format == PIPE_FORMAT_NONE)
       return screen->info.props.limits.framebufferNoAttachmentsSampleCounts &
@@ -1098,6 +1127,7 @@ zink_destroy_screen(struct pipe_screen *pscreen)
    if (screen->threaded)
       util_queue_destroy(&screen->flush_queue);
 
+   simple_mtx_destroy(&screen->queue_lock);
    VKSCR(DestroyDevice)(screen->dev, NULL);
    vkDestroyInstance(screen->instance, NULL);
    util_idalloc_mt_fini(&screen->buffer_ids);
@@ -1184,6 +1214,7 @@ update_queue_props(struct zink_screen *screen)
 static void
 init_queue(struct zink_screen *screen)
 {
+   simple_mtx_init(&screen->queue_lock, mtx_plain);
    vkGetDeviceQueue(screen->dev, screen->gfx_queue, 0, &screen->queue);
    if (screen->threaded && screen->max_queues > 1)
       vkGetDeviceQueue(screen->dev, screen->gfx_queue, 1, &screen->thread_queue);
@@ -1251,6 +1282,15 @@ emulate_x8(enum pipe_format format)
       return PIPE_FORMAT_R8G8B8A8_SNORM;
    case PIPE_FORMAT_R8G8B8X8_UNORM:
       return PIPE_FORMAT_R8G8B8A8_UNORM;
+
+   case PIPE_FORMAT_R16G16B16X16_FLOAT:
+      return PIPE_FORMAT_R16G16B16A16_FLOAT;
+   case PIPE_FORMAT_R16G16B16X16_SINT:
+      return PIPE_FORMAT_R16G16B16A16_SINT;
+   case PIPE_FORMAT_R16G16B16X16_SNORM:
+      return PIPE_FORMAT_R16G16B16A16_SNORM;
+   case PIPE_FORMAT_R16G16B16X16_UNORM:
+      return PIPE_FORMAT_R16G16B16A16_UNORM;
 
    default:
       return format;
@@ -1328,10 +1368,11 @@ static bool
 check_have_device_time(struct zink_screen *screen)
 {
    uint32_t num_domains = 0;
+   VkTimeDomainEXT domains[8]; //current max is 4
    VKSCR(GetPhysicalDeviceCalibrateableTimeDomainsEXT)(screen->pdev, &num_domains, NULL);
    assert(num_domains > 0);
+   assert(num_domains < ARRAY_SIZE(domains));
 
-   VkTimeDomainEXT *domains = malloc(sizeof(VkTimeDomainEXT) * num_domains);
    VKSCR(GetPhysicalDeviceCalibrateableTimeDomainsEXT)(screen->pdev, &num_domains, domains);
 
    /* VK_TIME_DOMAIN_DEVICE_EXT is used for the ctx->get_timestamp hook and is the only one we really need */
@@ -1341,32 +1382,27 @@ check_have_device_time(struct zink_screen *screen)
       }
    }
 
-   free(domains);
    return false;
 }
 
 static void
 zink_error(const char *msg)
 {
-   fprintf(stderr, "zink ERR: '%s'\n", msg);
 }
 
 static void
 zink_warn(const char *msg)
 {
-   fprintf(stderr, "zink WRN: '%s'\n", msg);
 }
 
 static void
 zink_info(const char *msg)
 {
-   fprintf(stderr, "zink NFO: '%s'\n", msg);
 }
 
 static void
 zink_msg(const char *msg)
 {
-   fprintf(stderr, "zink MSG: '%s'\n", msg);
 }
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL
@@ -1572,11 +1608,13 @@ noop_submit(void *data, void *gdata, int thread_index)
    struct noop_submit_info *n = data;
    VkSubmitInfo si = {0};
    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+   simple_mtx_lock(&n->screen->queue_lock);
    if (n->VKSCR(QueueSubmit)(n->screen->threaded ? n->screen->thread_queue : n->screen->queue,
                      1, &si, n->fence) != VK_SUCCESS) {
       debug_printf("ZINK: vkQueueSubmit() failed\n");
       n->screen->device_lost = true;
    }
+   simple_mtx_unlock(&n->screen->queue_lock);
 }
 
 bool
@@ -1668,11 +1706,11 @@ zink_query_memory_info(struct pipe_screen *pscreen, struct pipe_memory_info *inf
          if (mem.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
             /* VRAM */
             info->total_device_memory += mem.memoryProperties.memoryHeaps[i].size / 1024;
-            info->avail_device_memory += (budget.heapBudget[i] - budget.heapUsage[i]) / 1024;
+            info->avail_device_memory += (mem.memoryProperties.memoryHeaps[i].size - budget.heapUsage[i]) / 1024;
          } else {
             /* GART */
             info->total_staging_memory += mem.memoryProperties.memoryHeaps[i].size / 1024;
-            info->avail_staging_memory += (budget.heapBudget[i] - budget.heapUsage[i]) / 1024;
+            info->avail_staging_memory += (mem.memoryProperties.memoryHeaps[i].size - budget.heapUsage[i]) / 1024;
          }
       }
       /* evictions not yet supported in vulkan */

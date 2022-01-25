@@ -195,12 +195,11 @@ struct zink_context {
 
    struct pipe_device_reset_callback reset;
 
-   uint32_t curr_batch; //the current batch id
-
    simple_mtx_t batch_mtx;
    struct zink_fence *deferred_fence;
    struct zink_fence *last_fence; //the last command buffer submitted
-   struct hash_table batch_states; //submitted batch states
+   struct zink_batch_state *batch_states; //list of submitted batch states: ordered by increasing timeline id
+   unsigned batch_states_count; //number of states in `batch_states`
    struct util_dynarray free_batch_states; //unused batch states
    bool oom_flush;
    bool oom_stall;
@@ -400,8 +399,6 @@ zink_resource_access_is_write(VkAccessFlags flags);
 
 void
 zink_resource_buffer_barrier(struct zink_context *ctx, struct zink_resource *res, VkAccessFlags flags, VkPipelineStageFlags pipeline);
-void
-zink_fake_buffer_barrier(struct zink_resource *res, VkAccessFlags flags, VkPipelineStageFlags pipeline);
 bool
 zink_resource_image_needs_barrier(struct zink_resource *res, VkImageLayout new_layout, VkAccessFlags flags, VkPipelineStageFlags pipeline);
 bool

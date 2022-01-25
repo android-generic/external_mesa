@@ -359,7 +359,7 @@ iris_create_context(struct pipe_screen *pscreen, void *priv, unsigned flags)
    if (flags & PIPE_CONTEXT_LOW_PRIORITY)
       priority = INTEL_CONTEXT_LOW_PRIORITY;
 
-   if (INTEL_DEBUG & DEBUG_BATCH)
+   if (INTEL_DEBUG(DEBUG_BATCH))
       ice->state.sizes = _mesa_hash_table_u64_create(ice);
 
    for (int i = 0; i < IRIS_BATCH_COUNT; i++) {
@@ -379,7 +379,5 @@ iris_create_context(struct pipe_screen *pscreen, void *priv, unsigned flags)
    return threaded_context_create(ctx, &screen->transfer_pool,
                                   iris_replace_buffer_storage,
                                   NULL, /* TODO: asynchronous flushes? */
-                                  NULL,
-                                  false,
                                   &ice->thrctx);
 }

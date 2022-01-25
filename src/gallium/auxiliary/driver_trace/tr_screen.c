@@ -333,8 +333,7 @@ trace_context_is_resource_busy(struct pipe_screen *_screen,
 struct pipe_context *
 trace_context_create_threaded(struct pipe_screen *screen, struct pipe_context *pipe,
                               tc_replace_buffer_storage_func *replace_buffer,
-                              tc_create_fence_func *create_fence,
-                              tc_is_resource_busy *is_resource_busy)
+                              struct threaded_context_options *options)
 {
    if (!trace_screens)
       return pipe;
@@ -353,14 +352,14 @@ trace_context_create_threaded(struct pipe_screen *screen, struct pipe_context *p
 
    struct trace_context *tr_ctx = trace_context(ctx);
    tr_ctx->replace_buffer_storage = *replace_buffer;
-   tr_ctx->create_fence = *create_fence;
-   tr_scr->is_resource_busy = *is_resource_busy;
+   tr_ctx->create_fence = options->create_fence;
+   tr_scr->is_resource_busy = options->is_resource_busy;
    tr_ctx->threaded = true;
    *replace_buffer = trace_context_replace_buffer_storage;
-   if (*create_fence)
-      *create_fence = trace_context_create_fence;
-   if (*is_resource_busy)
-      *is_resource_busy = trace_context_is_resource_busy;
+   if (options->create_fence)
+      options->create_fence = trace_context_create_fence;
+   if (options->is_resource_busy)
+      options->is_resource_busy = trace_context_is_resource_busy;
    return ctx;
 }
 
@@ -1056,7 +1055,9 @@ trace_screen_create_vertex_state(struct pipe_screen *_screen,
    trace_dump_arg(ptr, screen);
    trace_dump_arg(ptr, buffer->buffer.resource);
    trace_dump_arg(vertex_buffer, buffer);
+   trace_dump_arg_begin("elements");
    trace_dump_struct_array(vertex_element, elements, num_elements);
+   trace_dump_arg_end();
    trace_dump_arg(uint, num_elements);
    trace_dump_arg(ptr, indexbuf);
    trace_dump_arg(uint, full_velem_mask);

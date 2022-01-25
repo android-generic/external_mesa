@@ -52,6 +52,7 @@
 #include "vk_command_buffer.h"
 #include "vk_device.h"
 #include "vk_instance.h"
+#include "vk_log.h"
 #include "vk_object.h"
 #include "vk_physical_device.h"
 #include "vk_queue.h"
@@ -104,26 +105,6 @@ typedef uint32_t xcb_window_t;
 
 #define panvk_printflike(a, b) __attribute__((__format__(__printf__, a, b)))
 
-/* Whenever we generate an error, pass it through this function. Useful for
- * debugging, where we can break on it. Only call at error site, not when
- * propagating errors. Might be useful to plug in a stack trace here.
- */
-
-struct panvk_instance;
-
-VkResult
-__vk_errorf(struct panvk_instance *instance,
-            VkResult error,
-            const char *file,
-            int line,
-            const char *format,
-            ...);
-
-#define vk_error(instance, error)                                            \
-   __vk_errorf(instance, error, __FILE__, __LINE__, NULL);
-#define vk_errorf(instance, error, format, ...)                              \
-   __vk_errorf(instance, error, __FILE__, __LINE__, format, ##__VA_ARGS__);
-
 void
 panvk_logi(const char *format, ...) panvk_printflike(1, 2);
 void
@@ -159,9 +140,11 @@ struct panvk_meta {
    } blitter;
 
    struct {
-      mali_ptr shader;
-      struct pan_shader_info shader_info;
-   } clear_attachment[MAX_RTS][3]; /* 3 base types */
+      struct {
+         mali_ptr shader;
+         struct pan_shader_info shader_info;
+      } color[MAX_RTS][3], zs, z, s; /* 3 base types */
+   } clear_attachment;
 
    struct {
       struct {

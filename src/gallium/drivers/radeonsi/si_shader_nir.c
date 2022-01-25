@@ -115,7 +115,7 @@ static void scan_io_usage(struct si_shader_info *info, nir_intrinsic_instr *intr
 
          info->input[loc].semantic = semantic + i;
 
-         if (semantic == SYSTEM_VALUE_PRIMITIVE_ID)
+         if (semantic == VARYING_SLOT_PRIMITIVE_ID)
             info->input[loc].interpolate = INTERP_MODE_FLAT;
          else
             info->input[loc].interpolate = interp;
@@ -244,6 +244,9 @@ static void scan_instruction(const struct nir_shader *nir, struct si_shader_info
          case nir_intrinsic_load_ubo:
             if (!nir_src_is_const(intr->src[1]))
                info->uses_vmem_return_type_other = true;
+            break;
+         case nir_intrinsic_load_constant:
+            info->uses_vmem_return_type_other = true;
             break;
 
          case nir_intrinsic_load_barycentric_at_sample: /* This loads sample positions. */

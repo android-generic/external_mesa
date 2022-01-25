@@ -371,10 +371,6 @@
    DRI_CONF_OPT_B(allow_rgb565_configs, def, \
                   "Allow exposure of visuals and fbconfigs with rgb565 formats")
 
-#define DRI_CONF_ALLOW_FP16_CONFIGS(def) \
-   DRI_CONF_OPT_B(allow_fp16_configs, def, \
-                  "Allow exposure of visuals and fbconfigs with fp16 formats")
-
 #define DRI_CONF_FORCE_INTEGER_TEX_NEAREST(def) \
    DRI_CONF_OPT_B(force_integer_tex_nearest, def, \
                   "Force integer textures to use nearest filtering")
@@ -523,5 +519,9 @@
 #define DRI_CONF_RADV_REPORT_APU_AS_DGPU(def) \
    DRI_CONF_OPT_B(radv_report_apu_as_dgpu, def, \
                   "Report APUs as discrete GPUs instead of integrated GPUs")
+
+#define DRI_CONF_RADV_DISABLE_HTILE_LAYERS(def) \
+   DRI_CONF_OPT_B(radv_disable_htile_layers, def, \
+                  "Disable HTILE for layered depth/stencil formats")
 
 #endif

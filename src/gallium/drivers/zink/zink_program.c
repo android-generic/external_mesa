@@ -167,6 +167,7 @@ update_shader_modules(struct zink_context *ctx,
    u_foreach_bit(pstage, mask) {
       assert(prog->shaders[pstage]);
       struct zink_shader_module *zm = get_shader_module_for_stage(ctx, screen, prog->shaders[pstage], prog, state);
+      state->modules[pstage] = zm->shader;
       if (prog->modules[pstage] == zm)
          continue;
       if (prog->modules[pstage])
@@ -175,13 +176,9 @@ update_shader_modules(struct zink_context *ctx,
       default_variants &= zm->default_variant;
       prog->modules[pstage] = zm;
       variant_hash ^= prog->modules[pstage]->hash;
-      state->modules[pstage] = zm->shader;
    }
 
    if (hash_changed && state) {
-      if (!first && likely(state->pipeline)) //avoid on first hash
-         state->final_hash ^= prog->last_variant_hash;
-
       if (default_variants && !first)
          prog->last_variant_hash = prog->default_variant_hash;
       else {
@@ -192,7 +189,6 @@ update_shader_modules(struct zink_context *ctx,
          }
       }
 
-      state->final_hash ^= prog->last_variant_hash;
       state->modules_changed = true;
    }
 }
@@ -825,6 +821,9 @@ bind_last_vertex_stage(struct zink_context *ctx)
       if (old != PIPE_SHADER_TYPES) {
          memset(&ctx->gfx_pipeline_state.shader_keys.key[old].key.vs_base, 0, sizeof(struct zink_vs_key_base));
          ctx->dirty_shader_stages |= BITFIELD_BIT(old);
+      } else {
+         /* always unset vertex shader values when changing to a non-vs last stage */
+         memset(&ctx->gfx_pipeline_state.shader_keys.key[PIPE_SHADER_VERTEX].key.vs_base, 0, sizeof(struct zink_vs_key_base));
       }
       ctx->last_vertex_stage_dirty = true;
    }
@@ -852,6 +851,23 @@ zink_bind_vs_state(struct pipe_context *pctx,
 
 }
 
+/* if gl_SampleMask[] is written to, we have to ensure that we get a shader with the same sample count:
+ * in GL, samples==1 means ignore gl_SampleMask[]
+ * in VK, gl_SampleMask[] is never ignored
+ */
+void
+zink_update_fs_key_samples(struct zink_context *ctx)
+{
+   if (!ctx->gfx_stages[PIPE_SHADER_FRAGMENT])
+      return;
+   nir_shader *nir = ctx->gfx_stages[PIPE_SHADER_FRAGMENT]->nir;
+   if (nir->info.outputs_written & (1 << FRAG_RESULT_SAMPLE_MASK)) {
+      bool samples = zink_get_fs_key(ctx)->samples;
+      if (samples != (ctx->fb_state.samples > 1))
+         zink_set_fs_key(ctx)->samples = ctx->fb_state.samples > 1;
+   }
+}
+
 static void
 zink_bind_fs_state(struct pipe_context *pctx,
                    void *cso)
@@ -869,6 +885,7 @@ zink_bind_fs_state(struct pipe_context *pctx,
                ctx->fbfetch_outputs |= BITFIELD_BIT(var->data.location - FRAG_RESULT_DATA0);
          }
       }
+      zink_update_fs_key_samples(ctx);
    }
    zink_update_fbfetch(ctx);
 }
