@@ -34,6 +34,8 @@ cc_library_static {
         "-DHAVE_LIBDRM",
         "-Wno-missing-field-initializers",
         "-Wno-sign-compare",
+        "-DSYSCONFDIR=\"/system/etc\"",
+        "-DDATADIR=\"/data\"",
     ],
 
     srcs: [
