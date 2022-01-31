@@ -32,7 +32,6 @@ cc_library_static {
 
     cflags: [
         "-DHAVE_LIBDRM",
-        "-DPREFER_IRIS",
         "-Wno-missing-field-initializers",
         "-Wno-sign-compare",
     ],
