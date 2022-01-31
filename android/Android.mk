@@ -80,7 +80,7 @@ MESON_GEN_PKGCONFIGS += libdrm_nouveau:$(LIBDRM_VERSION)
 endif
 
 ifneq ($(MESON_GEN_LLVM_STUB),)
-MESON_LLVM_VERSION := 13.0.0
+MESON_LLVM_VERSION := 13.0.1
 # Required for swr gallium target
 MESON_LLVM_IRBUILDER_PATH := external/llvm-project/llvm/include/llvm/IR/IRBuilder.h
 LOCAL_SHARED_LIBRARIES += libLLVM13
