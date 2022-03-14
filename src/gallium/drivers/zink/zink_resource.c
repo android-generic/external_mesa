@@ -165,6 +165,9 @@ create_bci(struct zink_screen *screen, const struct pipe_resource *templ, unsign
    if (bind & PIPE_BIND_SHADER_IMAGE)
       bci.usage |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
 
+   if (bind & PIPE_BIND_QUERY_BUFFER)
+      bci.usage |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
+
    if (templ->flags & PIPE_RESOURCE_FLAG_SPARSE)
       bci.flags |= VK_BUFFER_CREATE_SPARSE_BINDING_BIT;
    return bci;
@@ -1231,13 +1234,13 @@ zink_buffer_map(struct pipe_context *pctx,
             mgr = ctx->tc->base.stream_uploader;
          else
             mgr = ctx->base.stream_uploader;
-         u_upload_alloc(mgr, 0, box->width + box->x,
+         u_upload_alloc(mgr, 0, box->width,
                      screen->info.props.limits.minMemoryMapAlignment, &offset,
                      (struct pipe_resource **)&trans->staging_res, (void **)&ptr);
          res = zink_resource(trans->staging_res);
-         trans->offset = offset + box->x;
+         trans->offset = offset;
          usage |= PIPE_MAP_UNSYNCHRONIZED;
-         ptr = ((uint8_t *)ptr) + box->x;
+         ptr = ((uint8_t *)ptr);
       } else {
          /* At this point, the buffer is always idle (we checked it above). */
          usage |= PIPE_MAP_UNSYNCHRONIZED;

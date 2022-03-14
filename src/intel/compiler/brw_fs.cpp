@@ -2839,6 +2839,9 @@ fs_visitor::opt_algebraic()
          if (inst->src[1].file != IMM)
             continue;
 
+         if (brw_reg_type_is_floating_point(inst->src[1].type))
+            break;
+
          /* a * 1.0 = a */
          if (inst->src[1].is_one()) {
             inst->opcode = BRW_OPCODE_MOV;
@@ -9675,6 +9678,7 @@ brw_nir_populate_wm_prog_data(const nir_shader *shader,
 
    prog_data->per_coarse_pixel_dispatch =
       key->coarse_pixel &&
+      !prog_data->uses_omask &&
       !prog_data->persample_dispatch &&
       !prog_data->uses_sample_mask &&
       (prog_data->computed_depth_mode == BRW_PSCDEPTH_OFF) &&
@@ -10501,7 +10505,7 @@ brw_bsr(const struct intel_device_info *devinfo,
    assert(local_arg_offset % 8 == 0);
 
    return offset |
-          SET_BITS(simd_size > 8, 4, 4) |
+          SET_BITS(simd_size == 8, 4, 4) |
           SET_BITS(local_arg_offset / 8, 2, 0);
 }
 

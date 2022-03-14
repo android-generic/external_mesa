@@ -438,7 +438,7 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_TGSI_BALLOT:
-      return screen->vk_version >= VK_MAKE_VERSION(1,2,0) && screen->info.props11.subgroupSize <= 64;
+      return screen->info.have_vulkan12 && screen->info.have_EXT_shader_subgroup_ballot && screen->info.props11.subgroupSize <= 64;
 
    case PIPE_CAP_SAMPLE_SHADING:
       return screen->info.feats.features.sampleRateShading;
@@ -671,7 +671,10 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return MIN2(screen->info.props.limits.maxVertexOutputComponents / 4 / 2, 16);
 
    case PIPE_CAP_DMABUF:
-      return screen->info.have_KHR_external_memory_fd && screen->info.have_EXT_external_memory_dma_buf && screen->info.have_EXT_queue_family_foreign;
+      return screen->info.have_KHR_external_memory_fd &&
+             screen->info.have_EXT_external_memory_dma_buf &&
+             screen->info.have_EXT_queue_family_foreign &&
+             screen->info.have_EXT_image_drm_format_modifier;
 
    case PIPE_CAP_DEPTH_BOUNDS_TEST:
       return screen->info.feats.features.depthBounds;
@@ -851,8 +854,10 @@ zink_get_shader_param(struct pipe_screen *pscreen,
       return 0; /* not implemented */
 
    case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
-      return screen->info.feats11.uniformAndStorageBuffer16BitAccess ||
-             (screen->info.have_KHR_16bit_storage && screen->info.storage_16bit_feats.uniformAndStorageBuffer16BitAccess);
+      //enabling this breaks GTF-GL46.gtf21.GL2Tests.glGetUniform.glGetUniform
+      //return screen->info.feats11.uniformAndStorageBuffer16BitAccess ||
+             //(screen->info.have_KHR_16bit_storage && screen->info.storage_16bit_feats.uniformAndStorageBuffer16BitAccess);
+      return 0;
    case PIPE_SHADER_CAP_FP16_DERIVATIVES:
       return 0; //spirv requires 32bit derivative srcs and dests
    case PIPE_SHADER_CAP_FP16:
@@ -1941,9 +1946,11 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
    screen->base.get_compiler_options = zink_get_compiler_options;
    screen->base.get_sample_pixel_grid = zink_get_sample_pixel_grid;
    screen->base.is_format_supported = zink_is_format_supported;
-   screen->base.query_dmabuf_modifiers = zink_query_dmabuf_modifiers;
-   screen->base.is_dmabuf_modifier_supported = zink_is_dmabuf_modifier_supported;
-   screen->base.get_dmabuf_modifier_planes = zink_get_dmabuf_modifier_planes;
+   if (screen->info.have_EXT_image_drm_format_modifier && screen->info.have_EXT_external_memory_dma_buf) {
+      screen->base.query_dmabuf_modifiers = zink_query_dmabuf_modifiers;
+      screen->base.is_dmabuf_modifier_supported = zink_is_dmabuf_modifier_supported;
+      screen->base.get_dmabuf_modifier_planes = zink_get_dmabuf_modifier_planes;
+   }
    screen->base.context_create = zink_context_create;
    screen->base.flush_frontbuffer = zink_flush_frontbuffer;
    screen->base.destroy = zink_destroy_screen;

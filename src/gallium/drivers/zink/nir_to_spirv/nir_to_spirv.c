@@ -1408,16 +1408,16 @@ static SpvId
 emit_atomic(struct ntv_context *ctx, SpvId op, SpvId type, SpvId src0, SpvId src1, SpvId src2)
 {
    if (op == SpvOpAtomicLoad)
-      return spirv_builder_emit_triop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeWorkgroup),
+      return spirv_builder_emit_triop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeDevice),
                                        emit_uint_const(ctx, 32, 0));
    if (op == SpvOpAtomicCompareExchange)
-      return spirv_builder_emit_hexop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeWorkgroup),
+      return spirv_builder_emit_hexop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeDevice),
                                        emit_uint_const(ctx, 32, 0),
                                        emit_uint_const(ctx, 32, 0),
                                        /* these params are intentionally swapped */
                                        src2, src1);
 
-   return spirv_builder_emit_quadop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeWorkgroup),
+   return spirv_builder_emit_quadop(&ctx->builder, op, type, src0, emit_uint_const(ctx, 32, SpvScopeDevice),
                                     emit_uint_const(ctx, 32, 0), src1);
 }
 
@@ -1742,7 +1742,13 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
    BUILTIN_UNOP(nir_op_ufind_msb, GLSLstd450FindUMsb)
    BUILTIN_UNOP(nir_op_find_lsb, GLSLstd450FindILsb)
    BUILTIN_UNOP(nir_op_ifind_msb, GLSLstd450FindSMsb)
-   BUILTIN_UNOPF(nir_op_pack_half_2x16, GLSLstd450PackHalf2x16)
+
+   case nir_op_pack_half_2x16:
+      assert(nir_op_infos[alu->op].num_inputs == 1);
+      result = emit_builtin_unop(ctx, GLSLstd450PackHalf2x16, get_dest_type(ctx, &alu->dest.dest, nir_type_uint), src[0]);
+      force_float = true;
+      break;
+
    BUILTIN_UNOPF(nir_op_unpack_half_2x16, GLSLstd450UnpackHalf2x16)
    BUILTIN_UNOPF(nir_op_pack_64_2x32, GLSLstd450PackDouble2x32)
 #undef BUILTIN_UNOP
@@ -2481,12 +2487,12 @@ emit_interpolate(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 }
 
 static void
-handle_atomic_op(struct ntv_context *ctx, nir_intrinsic_instr *intr, SpvId ptr, SpvId param, SpvId param2)
+handle_atomic_op(struct ntv_context *ctx, nir_intrinsic_instr *intr, SpvId ptr, SpvId param, SpvId param2, nir_alu_type type)
 {
-   SpvId dest_type = get_dest_type(ctx, &intr->dest, nir_type_uint32);
+   SpvId dest_type = get_dest_type(ctx, &intr->dest, type);
    SpvId result = emit_atomic(ctx, get_atomic_op(intr->intrinsic), dest_type, ptr, param, param2);
    assert(result);
-   store_dest(ctx, &intr->dest, result, nir_type_uint);
+   store_dest(ctx, &intr->dest, result, type);
 }
 
 static void
@@ -2525,7 +2531,7 @@ emit_ssbo_atomic_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    if (intr->intrinsic == nir_intrinsic_ssbo_atomic_comp_swap)
       param2 = get_src(ctx, &intr->src[3]);
 
-   handle_atomic_op(ctx, intr, ptr, param, param2);
+   handle_atomic_op(ctx, intr, ptr, param, param2, nir_type_uint32);
 }
 
 static void
@@ -2546,7 +2552,7 @@ emit_shared_atomic_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    if (intr->intrinsic == nir_intrinsic_shared_atomic_comp_swap)
       param2 = get_src(ctx, &intr->src[2]);
 
-   handle_atomic_op(ctx, intr, ptr, param, param2);
+   handle_atomic_op(ctx, intr, ptr, param, param2, nir_type_uint32);
 }
 
 static void
@@ -2681,13 +2687,24 @@ emit_image_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    type_to_dim(glsl_get_sampler_dim(type), &is_ms);
    SpvId sample = is_ms ? get_src(ctx, &intr->src[2]) : emit_uint_const(ctx, 32, 0);
    SpvId coord = get_image_coords(ctx, type, &intr->src[1]);
-   SpvId base_type = get_glsl_basetype(ctx, glsl_get_sampler_result_type(type));
+   enum glsl_base_type glsl_type = glsl_get_sampler_result_type(type);
+   SpvId base_type = get_glsl_basetype(ctx, glsl_type);
    SpvId texel = spirv_builder_emit_image_texel_pointer(&ctx->builder, base_type, img_var, coord, sample);
    SpvId param2 = 0;
 
-   if (intr->intrinsic == nir_intrinsic_image_deref_atomic_comp_swap)
+   /* The type of Value must be the same as Result Type.
+    * The type of the value pointed to by Pointer must be the same as Result Type.
+    */
+   nir_alu_type ntype = nir_get_nir_type_for_glsl_base_type(glsl_type);
+   SpvId cast_type = get_dest_type(ctx, &intr->dest, ntype);
+   param = emit_bitcast(ctx, cast_type, param);
+
+   if (intr->intrinsic == nir_intrinsic_image_deref_atomic_comp_swap) {
       param2 = get_src(ctx, &intr->src[4]);
-   handle_atomic_op(ctx, intr, texel, param, param2);
+      param2 = emit_bitcast(ctx, cast_type, param2);
+   }
+
+   handle_atomic_op(ctx, intr, texel, param, param2, ntype);
 }
 
 static void
@@ -2869,7 +2886,7 @@ emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    case nir_intrinsic_memory_barrier:
       spirv_builder_emit_memory_barrier(&ctx->builder, SpvScopeWorkgroup,
                                         SpvMemorySemanticsImageMemoryMask | SpvMemorySemanticsUniformMemoryMask |
-                                        SpvMemorySemanticsMakeVisibleMask  | SpvMemorySemanticsAcquireReleaseMask);
+                                        SpvMemorySemanticsAcquireReleaseMask);
       break;
 
    case nir_intrinsic_memory_barrier_image:
@@ -3249,13 +3266,16 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
       lod = emit_float_const(ctx, 32, 0.0);
    if (tex->op == nir_texop_txs) {
       SpvId image = spirv_builder_emit_image(&ctx->builder, image_type, load);
-      /* Additionally, if its Dim is 1D, 2D, 3D, or Cube,
+      /* Its Dim operand must be one of 1D, 2D, 3D, or Cube
+       * - OpImageQuerySizeLod specification
+       *
+       * Additionally, if its Dim is 1D, 2D, 3D, or Cube,
        * it must also have either an MS of 1 or a Sampled of 0 or 2.
        * - OpImageQuerySize specification
        *
        * all spirv samplers use these types
        */
-      if (tex->sampler_dim != GLSL_SAMPLER_DIM_MS && !lod)
+      if (!lod && tex_instr_is_lod_allowed(tex))
          lod = emit_uint_const(ctx, 32, 0);
       SpvId result = spirv_builder_emit_image_query_size(&ctx->builder,
                                                          dest_type, image,
