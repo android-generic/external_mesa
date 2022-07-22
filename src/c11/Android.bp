@@ -1,7 +1,7 @@
 // Mesa 3-D graphics library
 //
-// Copyright (C) 2021 GlobalLogic Ukraine
-// Copyright (C) 2021 Roman Stratiienko (r.stratiienko@gmail.com)
+// Copyright (C) 2022 BlissLabs
+// Copyright (C) 2022 SupremeGamers
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
 // copy of this software and associated documentation files (the "Software"),
@@ -21,56 +21,27 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-cc_library_shared {
-    name: "libgbm_mesa",
+cc_library_static {
+    name: "libmesa_c11",
+
     vendor: true,
+
+    include_dirs: [
+        "external/mesa/include",
+        "external/mesa/src",
+        "external/mesa/src/c11",
+    ],
+
     srcs: [
-        "src/gbm/main/backend.c",
-        "src/gbm/main/gbm.c",
-        "src/gbm/backends/dri/gbm_dri.c",
-        "src/util/debug.c",
-        "src/util/os_file.c",
-        "src/loader/loader.c",
-        "src/loader/loader_dri_helper.c",
+        "impl/threads_posix.c",
+        "impl/time.c",
     ],
 
-    export_include_dirs: ["src/gbm/main"],
-
-    local_include_dirs: [
-        "include",
-        "src/loader",
-        "src/util",
-        "src",
-    ],
-
-    shared_libs: ["libdrm"],
-
-    static_libs: ["libmesa_c11"],
-    
     cflags: [
         "-DHAVE_STRUCT_TIMESPEC",
         "-DHAVE_TIMESPEC_GET",
-        "-DHAVE_LIBDRM",
         "-DMAJOR_IN_SYSMACROS",
-        "-Wno-missing-field-initializers",
-        "-Wno-sign-compare",
         "-DHAVE_PTHREAD=1",
-        "-Wno-unused-parameter",
-        "-Wno-missing-field-initializers",
+        "-Wno-implicit-function-declaration",
     ],
-
-    multilib: {
-        lib32: {
-            cflags: [
-                "-DDEFAULT_DRIVER_DIR=\"/vendor/lib/dri\"",
-                "-DDEFAULT_BACKENDS_PATH=\"/vendor/lib/gbm\"",
-            ],
-        },
-        lib64: {
-            cflags: [
-                "-DDEFAULT_DRIVER_DIR=\"/vendor/lib64/dri\"",
-                "-DDEFAULT_BACKENDS_PATH=\"/vendor/lib64/gbm\"",
-            ],
-        },
-    },
 }
