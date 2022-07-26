@@ -174,9 +174,9 @@ $(eval $(call mesa3d-lib,libGLESv1_CM_mesa,.so.1,egl,MESA3D_LIBGLESV1_BIN))
 # Module 'libGLESv2_mesa', produces '/vendor/lib{64}/egl/libGLESv2_mesa.so'
 $(eval $(call mesa3d-lib,libGLESv2_mesa,.so.2,egl,MESA3D_LIBGLESV2_BIN))
 
-# Modules 'vulkan.{driver_name}', produces '/vendor/lib{64}/hw/vulkan.{driver_name}.so' HAL
+# Modules 'vulkan.{driver_name}', produces '/vendor/lib{64}/vulkan.{driver_name}.so' HAL
 $(foreach driver,$(BOARD_MESA3D_VULKAN_DRIVERS), \
-    $(eval $(call mesa3d-lib,vulkan.$(MESA_VK_LIB_SUFFIX_$(driver)),.so.0,hw,MESA3D_VULKAN_$(driver)_BIN)))
+    $(eval $(call mesa3d-lib,vulkan.$(MESA_VK_LIB_SUFFIX_$(driver)),.so.0,,MESA3D_VULKAN_$(driver)_BIN)))
 
 ifneq ($(filter true, $(BOARD_MESA3D_BUILD_LIBGBM)),)
 # Modules 'libgbm', produces '/vendor/lib{64}/libgbm.so'
