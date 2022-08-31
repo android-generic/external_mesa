@@ -1450,6 +1450,15 @@ if cc.has_header_symbol('time.h', 'struct timespec')
    pre_args += '-DHAVE_STRUCT_TIMESPEC'
 endif
 
+with_c11_threads = false
+if cc.has_function('thrd_create', prefix: '#include <threads.h>')
+  if with_platform_android
+    # Current only Android's c11 <threads.h> are verified
+    pre_args += '-DHAVE_THRD_CREATE'
+    with_c11_threads = true
+  endif
+endif
+
 if cc.has_header_symbol('errno.h', 'program_invocation_name',
                         args : '-D_GNU_SOURCE')
    pre_args += '-DHAVE_PROGRAM_INVOCATION_NAME'
@@ -1718,6 +1727,7 @@ if with_gallium_opencl
 endif
 if with_clc
   llvm_modules += ['coverage', 'target', 'linker', 'irreader', 'option', 'libdriver', 'lto']
+  llvm_optional_modules += ['all-targets']
 endif
 if with_tests or with_gallium_softpipe
   llvm_modules += 'native'
@@ -1884,7 +1894,7 @@ endif
 # Be explicit about only using this lib on Windows, to avoid picking
 # up random libs with the generic name 'libversion'
 dep_version = null_dep
-if with_opencl_spirv and host_machine.system() == 'windows'
+if host_machine.system() == 'windows'
   dep_version = cpp.find_library('version')
 endif
 

@@ -5600,7 +5600,7 @@ optimize_nir(struct nir_shader *s, const struct nir_to_dxil_options *opts)
          NIR_PASS(progress, s, dxil_nir_lower_16bit_conv);
       NIR_PASS(progress, s, nir_opt_remove_phis);
       NIR_PASS(progress, s, nir_opt_dce);
-      NIR_PASS(progress, s, nir_opt_if, true);
+      NIR_PASS(progress, s, nir_opt_if, nir_opt_if_aggressive_last_continue | nir_opt_if_optimize_phi_true_false);
       NIR_PASS(progress, s, nir_opt_dead_cf);
       NIR_PASS(progress, s, nir_opt_cse);
       NIR_PASS(progress, s, nir_opt_peephole_select, 8, true, true);
@@ -5649,9 +5649,9 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
          ctx->mod.info.has_per_sample_input;
       break;
    case DXIL_COMPUTE_SHADER:
-      state->state.num_threads_x = ctx->shader->info.workgroup_size[0];
-      state->state.num_threads_y = ctx->shader->info.workgroup_size[1];
-      state->state.num_threads_z = ctx->shader->info.workgroup_size[2];
+      state->state.num_threads_x = MAX2(ctx->shader->info.workgroup_size[0], 1);
+      state->state.num_threads_y = MAX2(ctx->shader->info.workgroup_size[1], 1);
+      state->state.num_threads_z = MAX2(ctx->shader->info.workgroup_size[2], 1);
       break;
    case DXIL_GEOMETRY_SHADER:
       state->state.psv1.max_vertex_count = ctx->shader->info.gs.vertices_out;

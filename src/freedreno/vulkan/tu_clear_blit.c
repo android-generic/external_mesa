@@ -6,10 +6,7 @@
  *    Jonathan Marek <jonathan@marek.ca>
  */
 
-#include "tu_private.h"
-
-#include "tu_cs.h"
-#include "vk_format.h"
+#include "tu_clear_blit.h"
 
 #include "ir3/ir3_nir.h"
 
@@ -19,6 +16,10 @@
 #include "util/half_float.h"
 #include "compiler/nir/nir_builder.h"
 
+#include "tu_cmd_buffer.h"
+#include "tu_cs.h"
+#include "tu_formats.h"
+#include "tu_image.h"
 #include "tu_tracepoints.h"
 
 static uint32_t
@@ -2917,6 +2918,7 @@ tu_clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
     */
    if (vk_format_is_depth_or_stencil(attachment->format)) {
       tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_COLOR_TS);
+      tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_DEPTH_TS);
       tu6_emit_event_write(cmd, cs, PC_CCU_INVALIDATE_DEPTH);
    } else {
       tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_COLOR_TS);

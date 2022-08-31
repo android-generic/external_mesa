@@ -560,7 +560,7 @@ optimize_once(nir_shader *shader)
            NIR_PASS(progress, shader, nir_opt_dce);
    }
 
-   NIR_PASS(progress, shader, nir_opt_if, false);
+   NIR_PASS(progress, shader, nir_opt_if, nir_opt_if_optimize_phi_true_false);
    NIR_PASS(progress, shader, nir_opt_dead_cf);
    NIR_PASS(progress, shader, nir_opt_cse);
    NIR_PASS(progress, shader, nir_opt_peephole_select, 200, true, true);
@@ -682,6 +682,7 @@ int r600_shader_from_nir(struct r600_context *rctx,
    lower_tex_options.lower_txp = ~0u;
    lower_tex_options.lower_txf_offset = true;
    lower_tex_options.lower_invalid_implicit_lod = true;
+   lower_tex_options.lower_tg4_offsets = true;
 
    NIR_PASS_V(sel->nir, nir_lower_tex, &lower_tex_options);
    NIR_PASS_V(sel->nir, r600_nir_lower_txl_txf_array_or_cube);
