@@ -94,8 +94,8 @@ endif
 
 ifneq ($(MESON_GEN_LLVM_STUB),)
 LLVM_VERSION_MAJOR = $(shell cat external/llvm-project/llvm/CMakeLists.txt | grep -o "LLVM_VERSION_MAJOR\s*\w*" | $(shell which grep) -o "[[:digit:]]*" | head -1)
-MESON_LLVM_VERSION := $(LLVM_VERSION_MAJOR).0.0
-LOCAL_SHARED_LIBRARIES += libLLVM$(LLVM_VERSION_MAJOR)
+MESON_LLVM_VERSION := 14.0.6
+LOCAL_SHARED_LIBRARIES += libLLVM14
 endif
 
 ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 30; echo $$?), 0)
