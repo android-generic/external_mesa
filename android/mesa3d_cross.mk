@@ -70,6 +70,7 @@ $(M_TARGET_PREFIX)MESA3D_LIBGLESV1_BIN   := $(MESON_OUT_DIR)/install/usr/local/l
 $(M_TARGET_PREFIX)MESA3D_LIBGLESV2_BIN   := $(MESON_OUT_DIR)/install/usr/local/lib/libGLESv2.so.2.0.0
 $(M_TARGET_PREFIX)MESA3D_LIBGLAPI_BIN    := $(MESON_OUT_DIR)/install/usr/local/lib/libglapi.so.0.0.0
 $(M_TARGET_PREFIX)MESA3D_LIBGBM_BIN      := $(MESON_OUT_DIR)/install/usr/local/lib/$(MESA_LIBGBM_NAME).so.1.0.0
+$(M_TARGET_PREFIX)MESA3D_GALLIUM_DRV_VIDEO_BIN := $(MESON_OUT_DIR)/install/usr/local/lib/libgallium_drv_video.so
 
 
 MESA3D_GLES_BINS := \
@@ -91,6 +92,8 @@ MESON_GEN_NINJA := \
 	-Degl=enabled                                                                \
 	-Dcpp_rtti=false                                                             \
 	-Dlmsensors=disabled                                                         \
+	-Dgallium-va=enabled														 \
+	-Dvideo-codecs=h264dec,h264enc,h265dec,h265enc,vc1dec						 \
 
 MESON_BUILD := PATH=/usr/bin:/bin:/sbin:$$PATH ninja -C $(MESON_OUT_DIR)/build
 
@@ -320,7 +323,8 @@ endif
 	touch $@
 
 MESON_COPY_LIBGALLIUM := \
-	cp `ls -1 $(MESA3D_GALLIUM_DRI_DIR)/* | head -1` $($(M_TARGET_PREFIX)MESA3D_GALLIUM_DRI_BIN)
+	cp `find $(MESA3D_GALLIUM_DRI_DIR) -name \*_dri.so | head -1` $($(M_TARGET_PREFIX)MESA3D_GALLIUM_DRI_BIN) && \
+	cp `find $(MESA3D_GALLIUM_DRI_DIR) -name \*_drv_video.so | head -1` $($(M_TARGET_PREFIX)MESA3D_GALLIUM_DRV_VIDEO_BIN)
 
 $(MESON_OUT_DIR)/install/.install.timestamp: MESON_COPY_LIBGALLIUM:=$(MESON_COPY_LIBGALLIUM)
 $(MESON_OUT_DIR)/install/.install.timestamp: MESON_BUILD:=$(MESON_BUILD)
@@ -348,9 +352,20 @@ $($(M_TARGET_PREFIX)TARGET_OUT_VENDOR_SHARED_LIBRARIES)/dri/.symlinks.timestamp:
 $($(M_TARGET_PREFIX)TARGET_OUT_VENDOR_SHARED_LIBRARIES)/dri/.symlinks.timestamp: $(MESON_OUT_DIR)/install/.install.timestamp
 	# Create Symlinks
 	mkdir -p $(dir $@)
-	ls -1 $(MESA3D_GALLIUM_DRI_DIR)/ | PATH=/usr/bin:$$PATH xargs -I{} ln -s -f libgallium_dri.so $(dir $@)/{}
+	find $(MESA3D_GALLIUM_DRI_DIR) -name \*_dri.so -printf '%f\n' | PATH=/usr/bin:$$PATH xargs -I{} ln -s -f libgallium_dri.so $(dir $@)/{}
 	touch $@
 
 $($(M_TARGET_PREFIX)MESA3D_GALLIUM_DRI_BIN): $(TARGET_OUT_VENDOR)/$(MESA3D_LIB_DIR)/dri/.symlinks.timestamp
+	echo "Build $@"
+	touch $@
+
+$($(M_TARGET_PREFIX)TARGET_OUT_VENDOR_SHARED_LIBRARIES)/dri/.symlinks.drv_video.timestamp: MESA3D_GALLIUM_DRI_DIR:=$(MESA3D_GALLIUM_DRI_DIR)
+$($(M_TARGET_PREFIX)TARGET_OUT_VENDOR_SHARED_LIBRARIES)/dri/.symlinks.drv_video.timestamp: $(MESON_OUT_DIR)/install/.install.timestamp
+	# Create Symlinks
+	mkdir -p $(dir $@)
+	find $(MESA3D_GALLIUM_DRI_DIR) -name \*_drv_video.so -printf '%f\n' | PATH=/usr/bin:$$PATH xargs -I{} ln -s -f libgallium_drv_video.so $(dir $@)/{}
+	touch $@
+
+$($(M_TARGET_PREFIX)MESA3D_GALLIUM_DRV_VIDEO_BIN): $(TARGET_OUT_VENDOR)/$(MESA3D_LIB_DIR)/dri/.symlinks.drv_video.timestamp
 	echo "Build $@"
 	touch $@
