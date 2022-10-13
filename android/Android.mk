@@ -39,10 +39,10 @@ MESA_VK_LIB_SUFFIX_swrast := lvp
 
 include $(CLEAR_VARS)
 
-LOCAL_SHARED_LIBRARIES := libc libdl libdrm libm liblog libcutils libz libc++ libnativewindow libsync libhardware
+LOCAL_SHARED_LIBRARIES := libc libdl libdrm libm liblog libcutils libz libc++ libnativewindow libsync libhardware libva libva-android
 LOCAL_STATIC_LIBRARIES := libexpat libarect libelf
 LOCAL_HEADER_LIBRARIES := libnativebase_headers libbacktrace_headers
-MESON_GEN_PKGCONFIGS := backtrace cutils expat hardware libdrm:$(LIBDRM_VERSION) nativewindow sync zlib:1.2.11 libelf
+MESON_GEN_PKGCONFIGS := backtrace cutils expat hardware libdrm:$(LIBDRM_VERSION) nativewindow sync zlib:1.2.11 libelf libva:1.16.0
 LOCAL_CFLAGS += $(BOARD_MESA3D_CFLAGS)
 
 ifneq ($(filter swrast,$(BOARD_MESA3D_GALLIUM_DRIVERS) $(BOARD_MESA3D_VULKAN_DRIVERS)),)
@@ -171,6 +171,8 @@ endef
 # Module 'libgallium_dri', produces '/vendor/lib{64}/dri/libgallium_dri.so'
 # This module also trigger DRI symlinks creation process
 $(eval $(call mesa3d-lib,libgallium_dri,.so.0,dri,MESA3D_GALLIUM_DRI_BIN))
+# Module 'libgallium_drv_video', produces '/vendor/lib{64}/dri/libgallium_drv_video.so'
+$(eval $(call mesa3d-lib,libgallium_drv_video,.so.0,dri,MESA3D_GALLIUM_DRV_VIDEO_BIN))
 # Module 'libglapi', produces '/vendor/lib{64}/libglapi.so'
 $(eval $(call mesa3d-lib,libglapi,.so.0,,MESA3D_LIBGLAPI_BIN))
 
