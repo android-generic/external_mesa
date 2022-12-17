@@ -37,7 +37,7 @@ cc_library_static {
     ],
 
     srcs: [
-        "debug.c",
+        "u_debug.c",
         "os_file.c",
     ],
 
