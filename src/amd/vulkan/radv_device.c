@@ -117,9 +117,10 @@ radv_device_get_cache_uuid(struct radv_physical_device *pdevice, void *uuid)
 
 #ifdef RADV_BUILD_ID_OVERRIDE
    {
-      char data[strlen(RADV_BUILD_ID_OVERRIDE) / 2];
-      parse_hex(data, RADV_BUILD_ID_OVERRIDE, ARRAY_SIZE(data));
-      _mesa_sha1_update(&ctx, data, ARRAY_SIZE(data));
+      unsigned size = strlen(RADV_BUILD_ID_OVERRIDE) / 2;
+      char *data = alloca(size);
+      parse_hex(data, RADV_BUILD_ID_OVERRIDE, size);
+      _mesa_sha1_update(&ctx, data, size);
    }
 #else
    if (!disk_cache_get_function_identifier(radv_device_get_cache_uuid, &ctx))
@@ -488,7 +489,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_external_semaphore = true,
       .KHR_external_semaphore_fd = true,
       .KHR_format_feature_flags2 = true,
-      .KHR_fragment_shading_rate = device->rad_info.gfx_level >= GFX10_3,
+      .KHR_fragment_shading_rate = device->rad_info.gfx_level == GFX10_3,
       .KHR_get_memory_requirements2 = true,
       .KHR_global_priority = true,
       .KHR_image_format_list = true,
@@ -629,7 +630,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .AMD_shader_core_properties2 = true,
       /* TODO: Figure out if it's possible to implement it on gfx11. */
       .AMD_shader_explicit_vertex_parameter = device->rad_info.gfx_level < GFX11,
-      .AMD_shader_fragment_mask = device->rad_info.gfx_level < GFX11,
+      .AMD_shader_fragment_mask = device->use_fmask,
       .AMD_shader_image_load_store_lod = true,
       .AMD_shader_trinary_minmax = true,
       .AMD_texture_gather_bias_lod = device->rad_info.gfx_level < GFX11,
@@ -860,13 +861,17 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    device->dcc_msaa_allowed = (device->instance->perftest_flags & RADV_PERFTEST_DCC_MSAA);
 
+   device->use_fmask = device->rad_info.gfx_level < GFX11 &&
+                       !(device->instance->debug_flags & RADV_DEBUG_NO_FMASK);
+
    device->use_ngg = (device->rad_info.gfx_level >= GFX10 &&
                      device->rad_info.family != CHIP_NAVI14 &&
                      !(device->instance->debug_flags & RADV_DEBUG_NO_NGG)) ||
                      device->rad_info.gfx_level >= GFX11;
 
+   /* TODO: Investigate if NGG culling helps on GFX11. */
    device->use_ngg_culling = device->use_ngg && device->rad_info.max_render_backends > 1 &&
-                             (device->rad_info.gfx_level >= GFX10_3 ||
+                             (device->rad_info.gfx_level == GFX10_3 ||
                               (device->instance->perftest_flags & RADV_PERFTEST_NGGC)) &&
                              !(device->instance->debug_flags & RADV_DEBUG_NO_NGGC);
 
@@ -1039,6 +1044,7 @@ static const struct debug_control radv_debug_options[] = {
    {"prologs", RADV_DEBUG_DUMP_PROLOGS},
    {"nodma", RADV_DEBUG_NO_DMA_BLIT},
    {"epilogs", RADV_DEBUG_DUMP_EPILOGS},
+   {"nofmask", RADV_DEBUG_NO_FMASK},
    {NULL, 0}};
 
 const char *
@@ -3033,10 +3039,14 @@ radv_queue_state_finish(struct radv_queue_state *queue, struct radeon_winsys *ws
       ws->buffer_destroy(ws, queue->task_rings_bo);
    if (queue->attr_ring_bo)
       ws->buffer_destroy(ws, queue->attr_ring_bo);
-   if (queue->gds_bo)
+   if (queue->gds_bo) {
+      ws->buffer_make_resident(ws, queue->gds_bo, false);
       ws->buffer_destroy(ws, queue->gds_bo);
-   if (queue->gds_oa_bo)
+   }
+   if (queue->gds_oa_bo) {
+      ws->buffer_make_resident(ws, queue->gds_oa_bo, false);
       ws->buffer_destroy(ws, queue->gds_oa_bo);
+   }
    if (queue->compute_scratch_bo)
       ws->buffer_destroy(ws, queue->compute_scratch_bo);
 }
@@ -3806,7 +3816,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
       }
    }
 
-   if (device->physical_device->rad_info.gfx_level >= GFX10_3) {
+   if (device->physical_device->rad_info.gfx_level == GFX10_3) {
       if (getenv("RADV_FORCE_VRS_CONFIG_FILE")) {
          const char *file = radv_get_force_vrs_config_file();
 
@@ -4443,13 +4453,14 @@ radv_emit_compute_scratch(struct radv_device *device, struct radeon_cmdbuf *cs,
    radv_cs_add_buffer(device->ws, cs, compute_scratch_bo);
 
    if (info->gfx_level >= GFX11) {
-      radeon_set_sh_reg_seq(cs, R_00B840_COMPUTE_DISPATCH_SCRATCH_BASE_LO, 4);
+      radeon_set_sh_reg_seq(cs, R_00B840_COMPUTE_DISPATCH_SCRATCH_BASE_LO, 2);
       radeon_emit(cs, scratch_va >> 8);
       radeon_emit(cs, scratch_va >> 40);
-   } else {
-      radeon_set_sh_reg_seq(cs, R_00B900_COMPUTE_USER_DATA_0, 2);
+
+      waves /= info->num_se;
    }
 
+   radeon_set_sh_reg_seq(cs, R_00B900_COMPUTE_USER_DATA_0, 2);
    radeon_emit(cs, scratch_va);
    radeon_emit(cs, rsrc1);
 
@@ -4709,6 +4720,13 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
                                  RADV_BO_PRIORITY_SCRATCH, 0, &gds_bo);
       if (result != VK_SUCCESS)
          goto fail;
+
+      /* Add the GDS BO to our global BO list to prevent the kernel to emit a GDS switch and reset
+       * the state when a compute queue is used.
+       */
+      result = device->ws->buffer_make_resident(ws, gds_bo, true);
+      if (result != VK_SUCCESS)
+         goto fail;
    }
 
    if (!queue->ring_info.gds_oa && needs->gds_oa) {
@@ -4716,6 +4734,13 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
 
       result = ws->buffer_create(ws, 4, 1, RADEON_DOMAIN_OA, ring_bo_flags,
                                  RADV_BO_PRIORITY_SCRATCH, 0, &gds_oa_bo);
+      if (result != VK_SUCCESS)
+         goto fail;
+
+      /* Add the GDS OA BO to our global BO list to prevent the kernel to emit a GDS switch and
+       * reset the state when a compute queue is used.
+       */
+      result = device->ws->buffer_make_resident(ws, gds_oa_bo, true);
       if (result != VK_SUCCESS)
          goto fail;
    }
@@ -4846,11 +4871,6 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
          break;
       }
 
-      if (gds_bo)
-         radv_cs_add_buffer(ws, cs, gds_bo);
-      if (gds_oa_bo)
-         radv_cs_add_buffer(ws, cs, gds_oa_bo);
-
       if (i < 2) {
          /* The two initial preambles have a cache flush at the beginning. */
          const enum amd_gfx_level gfx_level = device->physical_device->rad_info.gfx_level;
@@ -4945,10 +4965,14 @@ fail:
       ws->buffer_destroy(ws, task_rings_bo);
    if (attr_ring_bo && attr_ring_bo != queue->attr_ring_bo)
       ws->buffer_destroy(ws, attr_ring_bo);
-   if (gds_bo && gds_bo != queue->gds_bo)
+   if (gds_bo && gds_bo != queue->gds_bo) {
+      ws->buffer_make_resident(ws, queue->gds_bo, false);
       ws->buffer_destroy(ws, gds_bo);
-   if (gds_oa_bo && gds_oa_bo != queue->gds_oa_bo)
+   }
+   if (gds_oa_bo && gds_oa_bo != queue->gds_oa_bo) {
+      ws->buffer_make_resident(ws, queue->gds_oa_bo, false);
       ws->buffer_destroy(ws, gds_oa_bo);
+   }
 
    return vk_error(queue, result);
 }

@@ -1725,17 +1725,21 @@ emit_alu_op1_64bit(const nir_alu_instr& alu,
    }
 
    for (unsigned i = 0; i < nir_dest_num_components(alu.dest.dest); ++i) {
-      for (unsigned c = 0; c < 2; ++c) {
-         ir = new AluInstr(opcode,
-                           value_factory.dest(alu.dest, 2 * i + c, pin_chan),
-                           value_factory.src64(alu.src[0], i, swz[c]),
-                           {alu_write});
-         group->add_instruction(ir);
-      }
+      ir = new AluInstr(opcode,
+                        value_factory.dest(alu.dest, 2 * i, pin_chan),
+                        value_factory.src64(alu.src[0], i, swz[0]),
+                        {alu_write});
+      group->add_instruction(ir);
       if (alu.src[0].abs)
          ir->set_alu_flag(alu_src0_abs);
       if (alu.src[0].negate)
          ir->set_alu_flag(alu_src0_neg);
+
+      ir = new AluInstr(opcode,
+                        value_factory.dest(alu.dest, 2 * i + 1, pin_chan),
+                        value_factory.src64(alu.src[0], i, swz[1]),
+                        {alu_write});
+      group->add_instruction(ir);
    }
    if (ir)
       ir->set_alu_flag(alu_last_instr);
@@ -2814,7 +2818,7 @@ emit_alu_trans_op1_cayman(const nir_alu_instr& alu, EAluOp opcode, Shader& shade
 
    auto pin = pin_for_components(alu);
 
-   unsigned ncomp = nir_dest_num_components(alu.dest.dest) == 4 ? 4 : 3;
+   unsigned ncomp = 4; //nir_dest_num_components(alu.dest.dest) == 4 ? 4 : 3;
 
    /* todo: Actually we need only three channels, but then we have
     * to make sure that we don't hava w dest */

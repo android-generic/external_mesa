@@ -2190,7 +2190,9 @@ radv_emit_fb_color_state(struct radv_cmd_buffer *cmd_buffer, int index,
       }
    }
 
-   if (G_028C70_DCC_ENABLE(cb_color_info)) {
+   if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11
+          ? G_028C78_FDCC_ENABLE(cb_fdcc_control)
+          : G_028C70_DCC_ENABLE(cb_color_info)) {
       /* Drawing with DCC enabled also compresses colorbuffers. */
       VkImageSubresourceRange range = {
          .aspectMask = iview->vk.aspects,
@@ -3587,7 +3589,8 @@ radv_cmd_buffer_flush_dynamic_state(struct radv_cmd_buffer *cmd_buffer, bool pip
    if (states & RADV_CMD_DIRTY_DYNAMIC_SAMPLE_MASK)
       radv_emit_sample_mask(cmd_buffer);
 
-   if (states & RADV_CMD_DIRTY_DYNAMIC_DEPTH_CLAMP_ENABLE)
+   if (states & (RADV_CMD_DIRTY_DYNAMIC_DEPTH_CLAMP_ENABLE |
+                 RADV_CMD_DIRTY_DYNAMIC_DEPTH_CLIP_ENABLE))
       radv_emit_depth_clamp_enable(cmd_buffer);
 
    cmd_buffer->state.dirty &= ~states;
@@ -4092,8 +4095,8 @@ radv_flush_streamout_descriptors(struct radv_cmd_buffer *cmd_buffer)
       struct radv_streamout_binding *sb = cmd_buffer->streamout_bindings;
       struct radv_streamout_state *so = &cmd_buffer->state.streamout;
       unsigned so_offset;
+      uint64_t desc_va;
       void *so_ptr;
-      uint64_t va;
 
       /* Allocate some descriptor state for streamout buffers. */
       if (!radv_cmd_buffer_upload_alloc(cmd_buffer, MAX_SO_BUFFERS * 16, &so_offset, &so_ptr))
@@ -4102,27 +4105,29 @@ radv_flush_streamout_descriptors(struct radv_cmd_buffer *cmd_buffer)
       for (uint32_t i = 0; i < MAX_SO_BUFFERS; i++) {
          struct radv_buffer *buffer = sb[i].buffer;
          uint32_t *desc = &((uint32_t *)so_ptr)[i * 4];
+         uint32_t size = 0;
+         uint64_t va = 0;
 
-         if (!(so->enabled_mask & (1 << i)))
-            continue;
+         if (so->enabled_mask & (1 << i)) {
+            va = radv_buffer_get_va(buffer->bo) + buffer->offset;
 
-         va = radv_buffer_get_va(buffer->bo) + buffer->offset;
+            va += sb[i].offset;
 
-         va += sb[i].offset;
+            /* Set the descriptor.
+             *
+             * On GFX8, the format must be non-INVALID, otherwise
+             * the buffer will be considered not bound and store
+             * instructions will be no-ops.
+             */
+            size = 0xffffffff;
 
-         /* Set the descriptor.
-          *
-          * On GFX8, the format must be non-INVALID, otherwise
-          * the buffer will be considered not bound and store
-          * instructions will be no-ops.
-          */
-         uint32_t size = 0xffffffff;
-
-         /* Set the correct buffer size for NGG streamout because it's used to determine the max
-          * emit per buffer.
-          */
-         if (cmd_buffer->device->physical_device->use_ngg_streamout)
-            size = sb[i].size;
+            if (cmd_buffer->device->physical_device->use_ngg_streamout) {
+               /* With NGG streamout, the buffer size is used to determine the max emit per buffer
+                * and also acts as a disable bit when it's 0.
+                */
+               size = radv_is_streamout_enabled(cmd_buffer) ? sb[i].size : 0;
+            }
+         }
 
          uint32_t rsrc_word3 =
             S_008F0C_DST_SEL_X(V_008F0C_SQ_SEL_X) | S_008F0C_DST_SEL_Y(V_008F0C_SQ_SEL_Y) |
@@ -4144,10 +4149,10 @@ radv_flush_streamout_descriptors(struct radv_cmd_buffer *cmd_buffer)
          desc[3] = rsrc_word3;
       }
 
-      va = radv_buffer_get_va(cmd_buffer->upload.upload_bo);
-      va += so_offset;
+      desc_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo);
+      desc_va += so_offset;
 
-      radv_emit_streamout_buffers(cmd_buffer, va);
+      radv_emit_streamout_buffers(cmd_buffer, desc_va);
    }
 
    cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_STREAMOUT_BUFFER;
@@ -4179,7 +4184,7 @@ radv_flush_ngg_query_state(struct radv_cmd_buffer *cmd_buffer)
    if (cmd_buffer->state.active_prims_gen_gds_queries)
       ngg_query_state |= radv_ngg_query_prim_gen;
 
-   if (cmd_buffer->state.active_prims_xfb_gds_queries) {
+   if (cmd_buffer->state.active_prims_xfb_gds_queries && radv_is_streamout_enabled(cmd_buffer)) {
       ngg_query_state |= radv_ngg_query_prim_xfb | radv_ngg_query_prim_gen;
    }
 
@@ -4574,11 +4579,8 @@ radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkAccessFlags2 src_fla
             }
          }
 
-         /* This is valid even for the rb_noncoherent_dirty case, because with how we account for
-          * dirtyness, if it isn't dirty it doesn't contain the data at all and hence doesn't need
-          * invalidating. */
          if (!image_is_coherent)
-            flush_bits |= RADV_CMD_FLAG_WB_L2;
+            flush_bits |= RADV_CMD_FLAG_INV_L2;
          break;
       case VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR:
       case VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT:
@@ -5467,6 +5469,18 @@ radv_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeline
          cmd_buffer->state.dirty |= RADV_CMD_DIRTY_DYNAMIC_PATCH_CONTROL_POINTS;
       }
 
+      /* Re-emit the streamout buffers because the SGPR idx can be different and with NGG streamout
+       * they always need to be emitted because a buffer size of 0 is used to disable streamout.
+       */
+      if (graphics_pipeline->last_vgt_api_stage_locs[AC_UD_STREAMOUT_BUFFERS].sgpr_idx != -1) {
+         cmd_buffer->state.dirty |= RADV_CMD_DIRTY_STREAMOUT_BUFFER;
+
+         if (cmd_buffer->device->physical_device->use_ngg_streamout) {
+            cmd_buffer->gds_needed = true;
+            cmd_buffer->gds_oa_needed = true;
+         }
+      }
+
       radv_bind_dynamic_state(cmd_buffer, &graphics_pipeline->dynamic_state);
 
       radv_bind_vs_input_state(cmd_buffer, graphics_pipeline);
@@ -6171,6 +6185,8 @@ radv_CmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCou
          primary->sample_positions_needed = true;
       if (secondary->gds_needed)
          primary->gds_needed = true;
+      if (secondary->gds_oa_needed)
+         primary->gds_oa_needed = true;
 
       if (!secondary->state.render.has_image_views && primary->state.render.active &&
           (primary->state.dirty & RADV_CMD_DIRTY_FRAMEBUFFER)) {
@@ -6510,6 +6526,7 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
       }
    }
 
+   radeon_check_space(cmd_buffer->device->ws, cmd_buffer->cs, 6);
    radeon_set_context_reg(cmd_buffer->cs, R_028204_PA_SC_WINDOW_SCISSOR_TL,
                           S_028204_TL_X(render->area.offset.x) |
                           S_028204_TL_Y(render->area.offset.y));
@@ -7544,7 +7561,8 @@ radv_emit_ngg_culling_state(struct radv_cmd_buffer *cmd_buffer, const struct rad
       cmd_buffer->state.dirty &
       (RADV_CMD_DIRTY_PIPELINE |
        RADV_CMD_DIRTY_DYNAMIC_CULL_MODE | RADV_CMD_DIRTY_DYNAMIC_FRONT_FACE |
-       RADV_CMD_DIRTY_DYNAMIC_RASTERIZER_DISCARD_ENABLE | RADV_CMD_DIRTY_DYNAMIC_VIEWPORT);
+       RADV_CMD_DIRTY_DYNAMIC_RASTERIZER_DISCARD_ENABLE | RADV_CMD_DIRTY_DYNAMIC_VIEWPORT |
+       RADV_CMD_DIRTY_DYNAMIC_CONSERVATIVE_RAST_MODE);
 
    /* Check small draw status:
     * For small draw calls, we disable culling by setting the SGPR to 0.
@@ -8490,7 +8508,7 @@ radv_CmdDrawMeshTasksIndirectCountEXT(VkCommandBuffer commandBuffer, VkBuffer _b
    radv_after_draw(cmd_buffer);
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 radv_CmdExecuteGeneratedCommandsNV(VkCommandBuffer commandBuffer, VkBool32 isPreprocessed,
                                    const VkGeneratedCommandsInfoNV *pGeneratedCommandsInfo)
 {
@@ -8958,6 +8976,8 @@ radv_trace_rays(struct radv_cmd_buffer *cmd_buffer, const VkTraceRaysIndirectCom
    } else
       info.va = launch_size_va;
 
+   ASSERTED unsigned cdw_max = radeon_check_space(cmd_buffer->device->ws, cmd_buffer->cs, 11);
+
    struct radv_userdata_info *desc_loc =
       radv_lookup_user_sgpr(&pipeline->base, MESA_SHADER_COMPUTE, AC_UD_CS_SBT_DESCRIPTORS);
    if (desc_loc->sgpr_idx != -1) {
@@ -8979,6 +8999,8 @@ radv_trace_rays(struct radv_cmd_buffer *cmd_buffer, const VkTraceRaysIndirectCom
       radeon_set_sh_reg(cmd_buffer->cs, R_00B900_COMPUTE_USER_DATA_0 + base_loc->sgpr_idx * 4,
                         pipeline->base.scratch_bytes_per_wave / cs_info->wave_size);
    }
+
+   assert(cmd_buffer->cs->cdw <= cdw_max);
 
    radv_dispatch(cmd_buffer, &info, pipeline, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
 }
@@ -9869,9 +9891,9 @@ radv_set_streamout_enable(struct radv_cmd_buffer *cmd_buffer, bool enable)
         (old_hw_enabled_mask != so->hw_enabled_mask)))
       radv_emit_streamout_enable(cmd_buffer);
 
-   if (cmd_buffer->device->physical_device->use_ngg_streamout) {
-      cmd_buffer->gds_needed = true;
-      cmd_buffer->gds_oa_needed = true;
+   if (cmd_buffer->device->physical_device->use_ngg_streamout && !enable) {
+      /* Re-emit streamout buffers to unbind them. */
+      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_STREAMOUT_BUFFER;
    }
 }
 
@@ -10215,7 +10237,7 @@ radv_CmdWriteBufferMarker2AMD(VkCommandBuffer commandBuffer, VkPipelineStageFlag
    assert(cmd_buffer->cs->cdw <= cdw_max);
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 radv_CmdBindPipelineShaderGroupNV(VkCommandBuffer commandBuffer,
                                   VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline,
                                   uint32_t groupIndex)
