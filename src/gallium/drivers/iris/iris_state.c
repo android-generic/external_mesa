@@ -657,6 +657,8 @@ emit_pipeline_select(struct iris_batch *batch, uint32_t pipeline)
    if (pipeline == GPGPU) {
       flags |= PIPE_CONTROL_RENDER_TARGET_FLUSH |
                PIPE_CONTROL_DEPTH_CACHE_FLUSH;
+   } else {
+      flags |= PIPE_CONTROL_UNTYPED_DATAPORT_CACHE_FLUSH;
    }
    iris_emit_pipe_control_flush(batch, "PIPELINE_SELECT flush", flags);
 #else
@@ -1334,10 +1336,8 @@ struct iris_genx_state {
    bool pma_fix_enabled;
 #endif
 
-#if GFX_VER == 9
    /* Is object level preemption enabled? */
    bool object_preemption;
-#endif
 
 #if GFX_VERx10 == 120
    enum iris_depth_reg_mode depth_reg_mode;
@@ -1878,6 +1878,7 @@ struct iris_rasterizer_state {
    bool light_twoside; /* for shader state */
    bool rasterizer_discard; /* for 3DSTATE_STREAMOUT and 3DSTATE_CLIP */
    bool half_pixel_center; /* for 3DSTATE_MULTISAMPLE */
+   bool line_smooth;
    bool line_stipple_enable;
    bool poly_stipple_enable;
    bool multisample;
@@ -1943,6 +1944,7 @@ iris_create_rasterizer_state(struct pipe_context *ctx,
    cso->half_pixel_center = state->half_pixel_center;
    cso->sprite_coord_mode = state->sprite_coord_mode;
    cso->sprite_coord_enable = state->sprite_coord_enable;
+   cso->line_smooth = state->line_smooth;
    cso->line_stipple_enable = state->line_stipple_enable;
    cso->poly_stipple_enable = state->poly_stipple_enable;
    cso->conservative_rasterization =
@@ -1999,7 +2001,6 @@ iris_create_rasterizer_state(struct pipe_context *ctx,
       rr.GlobalDepthOffsetScale = state->offset_scale;
       rr.GlobalDepthOffsetClamp = state->offset_clamp;
       rr.SmoothPointEnable = state->point_smooth;
-      rr.AntialiasingEnable = state->line_smooth;
       rr.ScissorRectangleEnable = state->scissor;
 #if GFX_VER >= 9
       rr.ViewportZNearClipTestEnable = state->depth_clip_near;
@@ -2822,6 +2823,21 @@ iris_create_surface(struct pipe_context *ctx,
                                                &res->surf, view,
                                                &isl_surf, view, &offset_B,
                                                &tile_x_el, &tile_y_el);
+
+      /* On Broadwell, HALIGN and VALIGN are specified in pixels and are
+       * hard-coded to align to exactly the block size of the compressed
+       * texture. This means that, when reinterpreted as a non-compressed
+       * texture, the tile offsets may be anything.
+       *
+       * We need them to be multiples of 4 to be usable in RENDER_SURFACE_STATE,
+       * so force the state tracker to take fallback paths if they're not.
+       */
+#if GFX_VER == 8
+      if (tile_x_el % 4 != 0 || tile_y_el % 4 != 0) {
+         ok = false;
+      }
+#endif
+
       if (!ok) {
          free(surf);
          return NULL;
@@ -3347,9 +3363,26 @@ iris_set_framebuffer_state(struct pipe_context *ctx,
       ice->state.dirty |= IRIS_DIRTY_DEPTH_BUFFER;
    }
 
+   bool has_integer_rt = false;
+   for (unsigned i = 0; i < state->nr_cbufs; i++) {
+      if (state->cbufs[i]) {
+         enum isl_format ifmt =
+            isl_format_for_pipe_format(state->cbufs[i]->format);
+         has_integer_rt |= isl_format_has_int_channel(ifmt);
+      }
+   }
+
+   /* 3DSTATE_RASTER::AntialiasingEnable */
+   if (has_integer_rt != ice->state.has_integer_rt ||
+       cso->samples != samples) {
+      ice->state.dirty |= IRIS_DIRTY_RASTER;
+   }
+
    util_copy_framebuffer_state(cso, state);
    cso->samples = samples;
    cso->layers = layers;
+
+   ice->state.has_integer_rt = has_integer_rt;
 
    struct iris_depth_buffer_state *cso_z = &ice->state.genx->depth_buffer;
 
@@ -5900,6 +5933,27 @@ genX(emit_depth_state_workarounds)(struct iris_context *ice,
 }
 
 static void
+iris_preemption_streamout_wa(struct iris_context *ice,
+                             struct iris_batch *batch,
+                             bool enable)
+{
+#if GFX_VERx10 >= 120
+   iris_emit_reg(batch, GENX(CS_CHICKEN1), reg) {
+      reg.DisablePreemptionandHighPriorityPausingdueto3DPRIMITIVECommand = !enable;
+      reg.DisablePreemptionandHighPriorityPausingdueto3DPRIMITIVECommandMask = true;
+   }
+
+   /* Emit CS_STALL and 250 noops. */
+   iris_emit_pipe_control_flush(batch, "workaround: Wa_16013994831",
+                                PIPE_CONTROL_CS_STALL);
+   for (unsigned i = 0; i < 250; i++)
+      iris_emit_cmd(batch, GENX(MI_NOOP), noop);
+
+   ice->state.genx->object_preemption = enable;
+#endif
+}
+
+static void
 iris_upload_dirty_render_state(struct iris_context *ice,
                                struct iris_batch *batch,
                                const struct pipe_draw_info *draw)
@@ -6401,6 +6455,14 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       if (dirty & IRIS_DIRTY_STREAMOUT) {
          const struct iris_rasterizer_state *cso_rast = ice->state.cso_rast;
 
+#if GFX_VERx10 >= 120
+         /* Wa_16013994831 - Disable preemption. */
+         if (batch->screen->devinfo->verx10 == 120 ||
+             intel_device_info_is_dg2(batch->screen->devinfo)) {
+            iris_preemption_streamout_wa(ice, batch, false);
+         }
+#endif
+
          uint32_t dynamic_sol[GENX(3DSTATE_STREAMOUT_length)];
          iris_pack_command(GENX(3DSTATE_STREAMOUT), dynamic_sol, sol) {
             sol.SOFunctionEnable = true;
@@ -6418,6 +6480,13 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       }
    } else {
       if (dirty & IRIS_DIRTY_STREAMOUT) {
+
+#if GFX_VERx10 >= 120
+         /* Wa_16013994831 - Enable preemption. */
+         if (!ice->state.genx->object_preemption)
+            iris_preemption_streamout_wa(ice, batch, true);
+#endif
+
          iris_emit_cmd(batch, GENX(3DSTATE_STREAMOUT), sol);
       }
    }
@@ -6455,8 +6524,31 @@ iris_upload_dirty_render_state(struct iris_context *ice,
    }
 
    if (dirty & (IRIS_DIRTY_RASTER | IRIS_DIRTY_URB)) {
+      /* From the Browadwell PRM, Volume 2, documentation for
+       * 3DSTATE_RASTER, "Antialiasing Enable":
+       *
+       * "This field must be disabled if any of the render targets
+       * have integer (UINT or SINT) surface format."
+       *
+       * Additionally internal documentation for Gfx12+ states:
+       *
+       * "This bit MUST not be set when NUM_MULTISAMPLES > 1 OR
+       *  FORCED_SAMPLE_COUNT > 1."
+       */
+      struct pipe_framebuffer_state *cso_fb = &ice->state.framebuffer;
+      unsigned samples = util_framebuffer_get_num_samples(cso_fb);
       struct iris_rasterizer_state *cso = ice->state.cso_rast;
-      iris_batch_emit(batch, cso->raster, sizeof(cso->raster));
+
+      bool aa_enable = cso->line_smooth &&
+                       !ice->state.has_integer_rt &&
+                       !(batch->screen->devinfo->ver >= 12 && samples > 1);
+
+      uint32_t dynamic_raster[GENX(3DSTATE_RASTER_length)];
+      iris_pack_command(GENX(3DSTATE_RASTER), &dynamic_raster, raster) {
+         raster.AntialiasingEnable = aa_enable;
+      }
+      iris_emit_merge(batch, cso->raster, dynamic_raster,
+                      ARRAY_SIZE(cso->raster));
 
       uint32_t dynamic_sf[GENX(3DSTATE_SF_length)];
       iris_pack_command(GENX(3DSTATE_SF), &dynamic_sf, sf) {
@@ -8635,6 +8727,10 @@ genX(init_state)(struct iris_context *ice)
    ice->state.prim_mode = PIPE_PRIM_MAX;
    ice->state.genx = calloc(1, sizeof(struct iris_genx_state));
    ice->draw.derived_params.drawid = -1;
+
+#if GFX_VERx10 >= 120
+   ice->state.genx->object_preemption = true;
+#endif
 
    /* Make a 1x1x1 null surface for unbound textures */
    void *null_surf_map =

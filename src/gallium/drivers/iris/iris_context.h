@@ -784,6 +784,9 @@ struct iris_context {
       /** Are stencil writes enabled?  (Stencil buffer may or may not exist.) */
       bool stencil_writes_enabled;
 
+      /** Do we have integer RT in current framebuffer state? */
+      bool has_integer_rt;
+
       /** GenX-specific current state */
       struct iris_genx_state *genx;
 
@@ -1084,9 +1087,6 @@ void iris_predraw_flush_buffers(struct iris_context *ice,
 void iris_postdraw_update_resolve_tracking(struct iris_context *ice);
 void iris_postdraw_update_image_resolve_tracking(struct iris_context *ice,
                                                  gl_shader_stage stage);
-void iris_cache_flush_for_render(struct iris_batch *batch,
-                                 struct iris_bo *bo,
-                                 enum isl_aux_usage aux_usage);
 int iris_get_driver_query_info(struct pipe_screen *pscreen, unsigned index,
                                struct pipe_driver_query_info *info);
 int iris_get_driver_query_group_info(struct pipe_screen *pscreen,

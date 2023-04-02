@@ -309,7 +309,6 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
        *result = error;
        return NULL;
    }
-   cswap->max_acquires = cswap->scci.minImageCount - cdt->caps.minImageCount;
    cswap->last_present = UINT32_MAX;
 
    *result = VK_SUCCESS;
@@ -332,6 +331,7 @@ kopper_GetSwapchainImages(struct zink_screen *screen, struct kopper_swapchain *c
       for (unsigned i = 0; i < cswap->num_images; i++)
          cswap->images[i].image = images[i];
    }
+   cswap->max_acquires = cswap->num_images - cswap->scci.minImageCount + 1;
    return error;
 }
 
@@ -508,7 +508,7 @@ kopper_acquire(struct zink_screen *screen, struct zink_resource *res, uint64_t t
          res->obj->access_stage = 0;
       }
       if (timeout == UINT64_MAX && util_queue_is_initialized(&screen->flush_queue) &&
-          p_atomic_read_relaxed(&cdt->swapchain->num_acquires) > cdt->swapchain->max_acquires) {
+          p_atomic_read_relaxed(&cdt->swapchain->num_acquires) >= cdt->swapchain->max_acquires) {
          util_queue_fence_wait(&cdt->present_fence);
       }
       VkSemaphoreCreateInfo sci = {
@@ -733,8 +733,11 @@ kopper_present(void *data, void *gdata, int thread_idx)
    }
    util_dynarray_append(arr, VkSemaphore, cpi->sem);
 out:
-   if (thread_idx != -1)
+   if (thread_idx != -1) {
       p_atomic_dec(&swapchain->async_presents);
+      struct pipe_resource *pres = &cpi->res->base.b;
+      pipe_resource_reference(&pres, NULL);
+   }
    free(cpi);
 }
 
@@ -778,6 +781,8 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res)
    }
    if (util_queue_is_initialized(&screen->flush_queue)) {
       p_atomic_inc(&cpi->swapchain->async_presents);
+      struct pipe_resource *pres = NULL;
+      pipe_resource_reference(&pres, &res->base.b);
       util_queue_add_job(&screen->flush_queue, cpi, &cdt->present_fence,
                          kopper_present, NULL, 0);
    } else {

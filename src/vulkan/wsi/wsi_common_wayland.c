@@ -843,10 +843,18 @@ wsi_wl_display_init(struct wsi_wayland *wsi_wl,
          /* Round-trip again to fetch dma-buf feedback */
          wl_display_roundtrip_queue(display->wl_display, display->queue);
 
-         if (wsi_wl->wsi->drm_info.hasRender) {
+         if (wsi_wl->wsi->drm_info.hasRender ||
+             wsi_wl->wsi->drm_info.hasPrimary) {
+            /* Apparently some wayland compositor do not send the render
+             * device node but the primary, so test against both.
+             */
             display->same_gpu =
-               major(display->main_device) == wsi_wl->wsi->drm_info.renderMajor &&
-               minor(display->main_device) == wsi_wl->wsi->drm_info.renderMinor;
+               (wsi_wl->wsi->drm_info.hasRender &&
+                major(display->main_device) == wsi_wl->wsi->drm_info.renderMajor &&
+                minor(display->main_device) == wsi_wl->wsi->drm_info.renderMinor) ||
+               (wsi_wl->wsi->drm_info.hasPrimary &&
+                major(display->main_device) == wsi_wl->wsi->drm_info.primaryMajor &&
+                minor(display->main_device) == wsi_wl->wsi->drm_info.primaryMinor);
          }
    }
 
@@ -1412,6 +1420,11 @@ static VkResult wsi_wl_surface_init(struct wsi_wl_surface *wsi_wl_surface,
    return VK_SUCCESS;
 
 fail:
+   if (wsi_wl_surface->surface)
+      wl_proxy_wrapper_destroy(wsi_wl_surface->surface);
+
+   if (wsi_wl_surface->display)
+      wsi_wl_display_destroy(wsi_wl_surface->display);
    return result;
 }
 
@@ -1850,10 +1863,8 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    result = wsi_swapchain_init(wsi_device, &chain->base, device,
                                pCreateInfo, image_params, pAllocator);
-   if (result != VK_SUCCESS) {
-      vk_free(pAllocator, chain);
-      return result;
-   }
+   if (result != VK_SUCCESS)
+      goto fail;
 
    bool alpha = pCreateInfo->compositeAlpha ==
                       VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
@@ -1891,8 +1902,10 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 fail_image_init:
    wsi_wl_swapchain_images_free(chain);
 
-fail:
    wsi_wl_swapchain_chain_free(chain, pAllocator);
+fail:
+   vk_free(pAllocator, chain);
+   wsi_wl_surface->chain = NULL;
 
    return result;
 }

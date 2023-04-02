@@ -1936,6 +1936,10 @@ radv_lower_io_to_scalar_early(nir_shader *nir, nir_variable_mode mask)
 {
    bool progress = false;
 
+   NIR_PASS(progress, nir, nir_lower_array_deref_of_vec, mask,
+            nir_lower_direct_array_deref_of_vec_load | nir_lower_indirect_array_deref_of_vec_load |
+               nir_lower_direct_array_deref_of_vec_store |
+               nir_lower_indirect_array_deref_of_vec_store);
    NIR_PASS(progress, nir, nir_lower_io_to_scalar_early, mask);
    if (progress) {
       /* Optimize the new vector code and then remove dead vars */
@@ -3583,6 +3587,7 @@ radv_create_shaders(struct radv_pipeline *pipeline, struct radv_pipeline_layout 
                     const VkPipelineCreationFeedbackCreateInfo *creation_feedback,
                     struct radv_pipeline_shader_stack_size **stack_sizes,
                     uint32_t *num_stack_sizes,
+                    VkGraphicsPipelineLibraryFlagBitsEXT lib_flags,
                     gl_shader_stage *last_vgt_api_stage)
 {
    const char *noop_fs_entrypoint = "noop_fs";
@@ -3609,6 +3614,12 @@ radv_create_shaders(struct radv_pipeline *pipeline, struct radv_pipeline_layout 
    for (uint32_t i = 0; i < stageCount; i++) {
       const VkPipelineShaderStageCreateInfo *sinfo = &pStages[i];
       gl_shader_stage stage = vk_to_mesa_shader_stage(sinfo->stage);
+
+      /* Ignore graphics shader stages that don't need to be imported. */
+      if ((pipeline->type == RADV_PIPELINE_GRAPHICS ||
+           pipeline->type == RADV_PIPELINE_GRAPHICS_LIB) &&
+          !(shader_stage_to_pipeline_library_flags(sinfo->stage) & lib_flags))
+         continue;
 
       radv_pipeline_stage_init(sinfo, &stages[stage], stage);
    }
@@ -5164,7 +5175,9 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
 
    result = radv_create_shaders(&pipeline->base, &pipeline_layout, device, cache, &key, pCreateInfo->pStages,
                                 pCreateInfo->stageCount, pCreateInfo->flags, NULL,
-                                creation_feedback, NULL, NULL, &pipeline->last_vgt_api_stage);
+                                creation_feedback, NULL, NULL,
+                                (~imported_flags) & ALL_GRAPHICS_LIB_FLAGS,
+                                &pipeline->last_vgt_api_stage);
    if (result != VK_SUCCESS) {
       radv_pipeline_layout_finish(device, &pipeline_layout);
       return result;
@@ -5219,13 +5232,17 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
     * GFX10 supports pixel shaders without exports by setting both the
     * color and Z formats to SPI_SHADER_ZERO. The hw will skip export
     * instructions if any are present.
+    *
+    * GFX11 requires one color output, otherwise the DCC decompression does nothing.
     */
-   if ((device->physical_device->rad_info.gfx_level <= GFX9 || ps->info.ps.can_discard) &&
-       !blend.spi_shader_col_format) {
-      if (!ps->info.ps.writes_z && !ps->info.ps.writes_stencil && !ps->info.ps.writes_sample_mask) {
-         blend.spi_shader_col_format = V_028714_SPI_SHADER_32_R;
-         pipeline->col_format_non_compacted = V_028714_SPI_SHADER_32_R;
-      }
+   pipeline->need_null_export_workaround =
+      (device->physical_device->rad_info.gfx_level <= GFX9 || ps->info.ps.can_discard ||
+       (extra && extra->custom_blend_mode == V_028808_CB_DCC_DECOMPRESS_GFX11 &&
+        device->physical_device->rad_info.gfx_level >= GFX11)) &&
+      !ps->info.ps.writes_z && !ps->info.ps.writes_stencil && !ps->info.ps.writes_sample_mask;
+   if (pipeline->need_null_export_workaround && !blend.spi_shader_col_format) {
+      blend.spi_shader_col_format = V_028714_SPI_SHADER_32_R;
+      pipeline->col_format_non_compacted = V_028714_SPI_SHADER_32_R;
    }
 
    if (radv_pipeline_has_stage(pipeline, MESA_SHADER_GEOMETRY) && !radv_pipeline_has_ngg(pipeline)) {
@@ -5379,7 +5396,7 @@ radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline,
 
       result = radv_create_shaders(&pipeline->base.base, pipeline_layout, device, cache, &key,
                                    pCreateInfo->pStages, pCreateInfo->stageCount, pCreateInfo->flags,
-                                   NULL, creation_feedback, NULL, NULL,
+                                   NULL, creation_feedback, NULL, NULL, imported_flags,
                                    &pipeline->base.last_vgt_api_stage);
 
       if (result != VK_SUCCESS)
@@ -5583,7 +5600,7 @@ radv_compute_pipeline_create(VkDevice _device, VkPipelineCache _cache,
    UNUSED gl_shader_stage last_vgt_api_stage = MESA_SHADER_NONE;
    result = radv_create_shaders(&pipeline->base, pipeline_layout, device, cache, &key,
                                 &pCreateInfo->stage, 1, pCreateInfo->flags, NULL, creation_feedback,
-                                NULL, NULL, &last_vgt_api_stage);
+                                NULL, NULL, 0, &last_vgt_api_stage);
    if (result != VK_SUCCESS) {
       radv_pipeline_destroy(device, &pipeline->base, pAllocator);
       return result;

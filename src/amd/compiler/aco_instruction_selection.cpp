@@ -9626,7 +9626,7 @@ visit_tex(isel_context* ctx, nir_tex_instr* instr)
    unsigned wqm_coord_count = 0;
    std::vector<Temp> unpacked_coord;
    if (ctx->options->gfx_level == GFX9 && instr->sampler_dim == GLSL_SAMPLER_DIM_1D &&
-       instr->op != nir_texop_lod && instr->coord_components) {
+       instr->coord_components) {
       RegClass rc = a16 ? v2b : v1;
       for (unsigned i = 0; i < coord.bytes() / rc.bytes(); i++)
          unpacked_coord.emplace_back(emit_extract_vector(ctx, coord, i, rc));
@@ -10501,19 +10501,6 @@ visit_loop(isel_context* ctx, nir_loop* loop)
    loop_context lc;
    begin_loop(ctx, &lc);
 
-   /* NIR seems to allow this, and even though the loop exit has no predecessors, SSA defs from the
-    * loop header are live. Handle this without complicating the ACO IR by creating a dummy break.
-    */
-   if (nir_cf_node_cf_tree_next(&loop->cf_node)->predecessors->entries == 0) {
-      Builder bld(ctx->program, ctx->block);
-      Temp cond = bld.copy(bld.def(s1, scc), Operand::zero());
-      if_context ic;
-      begin_uniform_if_then(ctx, &ic, cond);
-      emit_loop_break(ctx);
-      begin_uniform_if_else(ctx, &ic);
-      end_uniform_if(ctx, &ic);
-   }
-
    bool unreachable = visit_cf_list(ctx, &loop->body);
 
    unsigned loop_header_idx = ctx->cf_info.parent_loop.header_idx;
@@ -10553,6 +10540,19 @@ visit_loop(isel_context* ctx, nir_loop* loop)
             break;
          }
       }
+   }
+
+   /* NIR seems to allow this, and even though the loop exit has no predecessors, SSA defs from the
+    * loop header are live. Handle this without complicating the ACO IR by creating a dummy break.
+    */
+   if (nir_cf_node_cf_tree_next(&loop->cf_node)->predecessors->entries == 0) {
+      Builder bld(ctx->program, ctx->block);
+      Temp cond = bld.copy(bld.def(s1, scc), Operand::zero());
+      if_context ic;
+      begin_uniform_if_then(ctx, &ic, cond);
+      emit_loop_break(ctx);
+      begin_uniform_if_else(ctx, &ic);
+      end_uniform_if(ctx, &ic);
    }
 
    end_loop(ctx, &lc);
@@ -11482,6 +11482,9 @@ create_fs_exports(isel_context* ctx)
 
    if (ctx->program->info.ps.has_epilog) {
       create_fs_jump_to_epilog(ctx);
+
+      /* FS epilogs always have at least one color/null export. */
+      ctx->program->has_color_exports = true;
    } else {
       struct aco_export_mrt mrts[8];
       unsigned compacted_mrt_index = 0;

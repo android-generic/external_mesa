@@ -497,8 +497,20 @@ uint8_t AluInstr::allowed_src_chan_mask() const
     * is not important to know which is the old channel that will
     * be freed by the channel switch.*/
    int mask = 0;
+
+   /* Be conservative about channel use when using more than two
+    * slots. Currently a constellatioon of
+    *
+    *  ALU d.x = f(r0.x, r1.y)
+    *  ALU _.y = f(r2.y, r3.x)
+    *  ALU _.z = f(r4.x, r5.y)
+    *
+    * will fail to be split. To get constellations like this to be scheduled
+    * properly will need some work on the bank swizzle check.
+    */
+   int maxuse = m_alu_slots > 2 ? 2 : 3;
    for (int i = 0; i < 4; ++i) {
-       if (chan_use_count[i] < 3)
+       if (chan_use_count[i] < maxuse)
            mask |= 1 << i;
    }
    return mask;
@@ -587,22 +599,24 @@ AluInstr::check_readport_validation(PRegister old_src, PVirtualValue new_src) co
    assert(nsrc * m_alu_slots == m_src.size());
 
    for (int s = 0; s < m_alu_slots && success; ++s) {
-      for (AluBankSwizzle i = alu_vec_012; i != alu_vec_unknown; ++i) {
-         auto ireg = m_src.begin() + s * nsrc;
+      PVirtualValue src[3];
+      auto ireg = m_src.begin() + s * nsrc;
 
+      for (unsigned i = 0; i < nsrc; ++i, ++ireg)
+         src[i] = old_src->equal_to(**ireg) ? new_src : *ireg;
+
+      AluBankSwizzle bs = alu_vec_012;
+      while (bs != alu_vec_unknown) {
          AluReadportReservation rpr = rpr_sum;
-         PVirtualValue s[3];
-
-         for (unsigned i = 0; i < nsrc; ++i, ++ireg)
-            s[i] = old_src->equal_to(**ireg) ? new_src : *ireg;
-
-         if (rpr.schedule_vec_src(s, nsrc, i)) {
+         if (rpr.schedule_vec_src(src, nsrc, bs)) {
             rpr_sum = rpr;
             break;
-         } else {
-            success = false;
          }
+         ++bs;
       }
+
+      if (bs == alu_vec_unknown)
+         success = false;
    }
    return success;
 }

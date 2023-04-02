@@ -510,7 +510,8 @@ vk_image_layout_stencil_write_optimal(VkImageLayout layout)
 {
    return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
           layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL ||
-          layout == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+          layout == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL ||
+          layout == VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
 }
 #endif
 
@@ -541,6 +542,7 @@ transition_stencil_buffer(struct anv_cmd_buffer *cmd_buffer,
     *  - VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     *  - VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
     *  - VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL
+    *  - VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL
     *
     * For general, we have no nice opportunity to transition so we do the copy
     * to the shadow unconditionally at the end of the subpass. For transfer
@@ -1376,6 +1378,8 @@ genX(BeginCommandBuffer)(
             inheritance_info->stencilAttachmentFormat;
 
          cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_RENDER_TARGETS;
+
+         anv_cmd_graphic_state_update_has_uint_rt(gfx);
       }
    }
 
@@ -5255,6 +5259,8 @@ void genX(CmdBeginRendering)(
       }
    }
 
+   anv_cmd_graphic_state_update_has_uint_rt(gfx);
+
    const struct anv_image_view *ds_iview = NULL;
    const VkRenderingAttachmentInfo *d_att = pRenderingInfo->pDepthAttachment;
    const VkRenderingAttachmentInfo *s_att = pRenderingInfo->pStencilAttachment;
@@ -5720,6 +5726,7 @@ void genX(CmdEndRendering)(
     *  - VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     *  - VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
     *  - VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL
+    *  - VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL
     *  - VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT
     *
     * For general, we have no nice opportunity to transition so we do the copy

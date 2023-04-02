@@ -76,6 +76,7 @@
 #include "vk_device.h"
 #include "vk_drm_syncobj.h"
 #include "vk_enum_defines.h"
+#include "vk_format.h"
 #include "vk_framebuffer.h"
 #include "vk_graphics_state.h"
 #include "vk_image.h"
@@ -1055,7 +1056,7 @@ struct anv_queue {
    /** Synchronization object for debug purposes (DEBUG_SYNC) */
    struct vk_sync                           *sync;
 
-   struct intel_ds_queue *                   ds;
+   struct intel_ds_queue                     ds;
 };
 
 struct nir_xfb_info;
@@ -2272,13 +2273,24 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_device *device,
             pipe_bits |= ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
          }
          break;
-      case VK_ACCESS_2_SHADER_READ_BIT:
       case VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT:
       case VK_ACCESS_2_TRANSFER_READ_BIT:
+      case VK_ACCESS_2_SHADER_SAMPLED_READ_BIT:
          /* Transitioning a buffer to be read through the sampler, so
           * invalidate the texture cache, we don't want any stale data.
           */
          pipe_bits |= ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT;
+         break;
+      case VK_ACCESS_2_SHADER_READ_BIT:
+         /* Same as VK_ACCESS_2_UNIFORM_READ_BIT and
+          * VK_ACCESS_2_SHADER_SAMPLED_READ_BIT cases above
+          */
+         pipe_bits |= ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
+                      ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT;
+         if (!device->physical->compiler->indirect_ubos_use_sampler) {
+            pipe_bits |= ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
+            pipe_bits |= ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
+         }
          break;
       case VK_ACCESS_2_MEMORY_READ_BIT:
          /* Transitioning a buffer for generic read, invalidate all the
@@ -2318,6 +2330,7 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_device *device,
           */
          pipe_bits |= ANV_PIPE_TILE_CACHE_FLUSH_BIT;
          break;
+      case VK_ACCESS_2_SHADER_STORAGE_READ_BIT:
       default:
          break; /* Nothing to do */
       }
@@ -2448,7 +2461,6 @@ anv_gfx8_9_vb_cache_range_needs_workaround(struct anv_vb_cache_range *bound,
       return false;
    }
 
-   assert(vb_address.bo);
    bound->start = intel_48b_address(anv_address_physical(vb_address));
    bound->end = bound->start + vb_size;
    assert(bound->end > bound->start); /* No overflow */
@@ -2530,6 +2542,7 @@ struct anv_cmd_graphics_state {
    struct vk_sample_locations_state sample_locations;
 
    bool object_preemption;
+   bool has_uint_rt;
 };
 
 enum anv_depth_reg_mode {
@@ -3083,7 +3096,6 @@ struct anv_graphics_pipeline {
       uint32_t                                  sf[4];
       uint32_t                                  raster[5];
       uint32_t                                  wm[2];
-      uint32_t                                  blend_state[1 + MAX_RTS * 2];
       uint32_t                                  streamout_state[5];
    } gfx8;
 };
@@ -3177,6 +3189,18 @@ anv_cmd_buffer_all_color_write_masked(const struct anv_cmd_buffer *cmd_buffer)
    }
 
    return true;
+}
+
+static inline void
+anv_cmd_graphic_state_update_has_uint_rt(struct anv_cmd_graphics_state *state)
+{
+   state->has_uint_rt = false;
+   for (unsigned a = 0; a < state->color_att_count; a++) {
+      if (vk_format_is_int(state->color_att[a].vk_format)) {
+         state->has_uint_rt = true;
+         break;
+      }
+   }
 }
 
 #define ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(prefix, stage)             \

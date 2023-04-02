@@ -524,6 +524,7 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_NATIVE_FENCE_FD:
       return screen->instance_info.have_KHR_external_semaphore_capabilities && screen->info.have_KHR_external_semaphore_fd;
 
+   case PIPE_CAP_VALIDATE_ALL_DIRTY_STATES:
    case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
    case PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE:
    case PIPE_CAP_SHAREABLE_SHADERS:
@@ -720,7 +721,7 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return screen->info.props.limits.maxImageArrayLayers;
 
    case PIPE_CAP_DEPTH_CLIP_DISABLE:
-      return !screen->driver_workarounds.depth_clip_control_missing;
+      return screen->info.have_EXT_depth_clip_enable;
 
    case PIPE_CAP_SHADER_STENCIL_EXPORT:
       return screen->info.have_EXT_shader_stencil_export;
@@ -767,7 +768,7 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_BINDLESS_TEXTURE:
-      return screen->info.have_EXT_descriptor_indexing;
+      return zink_descriptor_mode != ZINK_DESCRIPTOR_MODE_DB && screen->info.have_EXT_descriptor_indexing;
 
    case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
       return screen->info.props.limits.minTexelBufferOffsetAlignment;
@@ -881,8 +882,12 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS:
       return screen->info.feats.features.sparseResidencyImage2D ? 1 : 0;
    case PIPE_CAP_QUERY_SPARSE_TEXTURE_RESIDENCY:
+      return screen->info.feats.features.sparseResidency2Samples &&
+             screen->info.feats.features.shaderResourceResidency ? 1 : 0;
    case PIPE_CAP_CLAMP_SPARSE_TEXTURE_LOD:
-      return screen->info.feats.features.sparseResidency2Samples ? 1 : 0;
+      return screen->info.feats.features.shaderResourceMinLod &&
+             screen->info.feats.features.sparseResidency2Samples &&
+             screen->info.feats.features.shaderResourceResidency ? 1 : 0;
 
    case PIPE_CAP_VIEWPORT_SUBPIXEL_BITS:
       return screen->info.props.limits.viewportSubPixelBits;
@@ -2104,7 +2109,7 @@ zink_get_dmabuf_modifier_planes(struct pipe_screen *pscreen, uint64_t modifier, 
    for (unsigned i = 0; i < screen->modifier_props[format].drmFormatModifierCount; i++)
       if (screen->modifier_props[format].pDrmFormatModifierProperties[i].drmFormatModifier == modifier)
          return screen->modifier_props[format].pDrmFormatModifierProperties[i].drmFormatModifierPlaneCount;
-   return 0;
+   return util_format_get_num_planes(format);
 }
 
 static int
