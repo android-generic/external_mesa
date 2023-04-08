@@ -42,7 +42,7 @@ include $(CLEAR_VARS)
 LOCAL_SHARED_LIBRARIES := libc libdl libdrm libm liblog libcutils libz libc++ libnativewindow libsync libhardware libva libva-android
 LOCAL_STATIC_LIBRARIES := libexpat libarect libelf
 LOCAL_HEADER_LIBRARIES := libnativebase_headers libbacktrace_headers
-MESON_GEN_PKGCONFIGS := backtrace cutils expat hardware libdrm:$(LIBDRM_VERSION) nativewindow sync zlib:1.2.11 libelf libva:1.17.0
+MESON_GEN_PKGCONFIGS := backtrace cutils expat hardware libdrm:$(LIBDRM_VERSION) nativewindow sync zlib:1.2.11 libelf libva:1.18.0
 LOCAL_CFLAGS += $(BOARD_MESA3D_CFLAGS)
 
 ifneq ($(filter swrast,$(BOARD_MESA3D_GALLIUM_DRIVERS) $(BOARD_MESA3D_VULKAN_DRIVERS)),)
@@ -95,8 +95,8 @@ endif
 
 ifneq ($(MESON_GEN_LLVM_STUB),)
 LLVM_VERSION_MAJOR = $(shell cat external/llvm-project/llvm/CMakeLists.txt | grep -o "LLVM_VERSION_MAJOR\s*\w*" | /bin/grep -o "[[:digit:]]*" | head -1)
-MESON_LLVM_VERSION := 15.0.6
-LOCAL_SHARED_LIBRARIES += libLLVM15
+MESON_LLVM_VERSION := 16.0.1
+LOCAL_SHARED_LIBRARIES += libLLVM16
 endif
 
 ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 30; echo $$?), 0)
