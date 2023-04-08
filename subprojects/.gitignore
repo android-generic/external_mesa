@@ -2,3 +2,5 @@
 !*.wrap
 !packagefiles/**
 !.gitignore
+!llvm/
+!llvm/*
