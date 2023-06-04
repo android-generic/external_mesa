@@ -95,6 +95,7 @@ MESON_GEN_NINJA := \
 	-Dlmsensors=disabled                                                         \
 	-Dgallium-va=enabled														 \
 	-Dvideo-codecs=h264dec,h264enc,h265dec,h265enc,vc1dec						 \
+	-Dallow-kcmp=enabled                                                         \
 
 MESON_BUILD := PATH=/usr/bin:/bin:/sbin:$$PATH ninja -C $(MESON_OUT_DIR)/build
 
