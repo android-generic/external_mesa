@@ -97,6 +97,9 @@ MESON_GEN_NINJA := \
 	-Dlmsensors=disabled                                                         \
 	-Dandroid-libbacktrace=disabled                                              \
 	-Dallow-kcmp=enabled                                                         \
+	-Dxmlconfig=enabled															 \
+	-Dsysconfdir="/vendor/etc"													 \
+	-Ddatadir="/data/vendor"													 \
 	$(BOARD_MESA3D_MESON_ARGS)                                                   \
 
 MESON_BUILD := PATH=/usr/bin:/bin:/sbin:$$PATH ninja -C $(MESON_OUT_DIR)/build
