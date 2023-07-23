@@ -102,8 +102,8 @@ endif
 
 ifneq ($(MESON_GEN_LLVM_STUB),)
 LLVM_VERSION_MAJOR = $(shell cat external/llvm-project/llvm/CMakeLists.txt | grep -o "LLVM_VERSION_MAJOR\s*\w*" | /bin/grep -o "[[:digit:]]*" | head -1)
-MESON_LLVM_VERSION := 15.0.6
-LOCAL_SHARED_LIBRARIES += libLLVM15
+MESON_LLVM_VERSION := 16.0.6
+LOCAL_SHARED_LIBRARIES += libLLVM16
 endif
 
 ifneq ($(strip $(BOARD_MESA3D_GALLIUM_VA)),)
