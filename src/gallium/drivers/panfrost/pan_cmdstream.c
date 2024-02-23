@@ -2801,6 +2801,11 @@ panfrost_draw_emit_vertex(struct panfrost_batch *batch,
    section = pan_section_ptr(job, COMPUTE_JOB, DRAW);
    panfrost_draw_emit_vertex_section(batch, vs_vary, varyings, attribs,
                                      attrib_bufs, section);
+
+#if PAN_ARCH == 4
+   pan_section_pack(job, COMPUTE_JOB, COMPUTE_PADDING, cfg)
+      ;
+#endif
 }
 #endif
 
@@ -3822,6 +3827,11 @@ panfrost_launch_grid_on_batch(struct pipe_context *pipe,
       cfg.textures = batch->textures[PIPE_SHADER_COMPUTE];
       cfg.samplers = batch->samplers[PIPE_SHADER_COMPUTE];
    }
+
+#if PAN_ARCH == 4
+   pan_section_pack(t.cpu, COMPUTE_JOB, COMPUTE_PADDING, cfg)
+      ;
+#endif
 #else
    struct panfrost_compiled_shader *cs = ctx->prog[PIPE_SHADER_COMPUTE];
 
@@ -4224,7 +4234,7 @@ panfrost_create_sampler_view(struct pipe_context *pctx,
    struct panfrost_sampler_view *so =
       rzalloc(pctx, struct panfrost_sampler_view);
 
-   pan_legalize_afbc_format(ctx, pan_resource(texture), template->format,
+   pan_legalize_afbc_format(ctx, pan_resource(texture), template->format, false,
                             false);
 
    pipe_reference(NULL, &texture->reference);

@@ -749,7 +749,7 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          else
             return 0;
       case PIPE_VIDEO_CAP_EFC_SUPPORTED:
-         return ((sscreen->info.family >= CHIP_RENOIR) &&
+         return ((sscreen->info.family > CHIP_RENOIR) &&
                  !(sscreen->debug_flags & DBG(NO_EFC)));
 
       case PIPE_VIDEO_CAP_ENC_MAX_REFERENCES_PER_FRAME:
@@ -1323,7 +1323,6 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
       .lower_hadd = true,
       .lower_hadd64 = true,
       .lower_fisnormal = true,
-      .lower_rotate = true,
       .lower_to_scalar = true,
       .lower_to_scalar_filter = sscreen->info.has_packed_math_16bit ?
                                    si_alu_to_scalar_packed_math_filter : NULL,

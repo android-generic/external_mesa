@@ -309,7 +309,7 @@ create_bci(struct zink_screen *screen, const struct pipe_resource *templ, unsign
       bci.usage |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
 
    if (templ->flags & PIPE_RESOURCE_FLAG_SPARSE)
-      bci.flags |= VK_BUFFER_CREATE_SPARSE_BINDING_BIT;
+      bci.flags |= VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
    return bci;
 }
 
@@ -1266,7 +1266,7 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
       alignment = MAX2(alignment, screen->info.props.limits.minMemoryMapAlignment);
    obj->alignment = alignment;
 
-   if (zink_mem_type_idx_from_bits(screen, heap, reqs.memoryTypeBits) == UINT32_MAX) {
+   if (zink_mem_type_idx_from_types(screen, heap, reqs.memoryTypeBits) == UINT32_MAX) {
       /* not valid based on reqs; demote to more compatible type */
       switch (heap) {
       case ZINK_HEAP_DEVICE_LOCAL_VISIBLE:
@@ -1278,7 +1278,7 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
       default:
          break;
       }
-      assert(zink_mem_type_idx_from_bits(screen, heap, reqs.memoryTypeBits) != UINT32_MAX);
+      assert(zink_mem_type_idx_from_types(screen, heap, reqs.memoryTypeBits) != UINT32_MAX);
    }
 
 retry:
@@ -2826,6 +2826,16 @@ do_transfer_unmap(struct zink_screen *screen, struct zink_transfer *trans)
    if (!res)
       res = zink_resource(trans->base.b.resource);
    unmap_resource(screen, res);
+}
+
+void
+zink_screen_buffer_unmap(struct pipe_screen *pscreen, struct pipe_transfer *ptrans)
+{
+   struct zink_screen *screen = zink_screen(pscreen);
+   struct zink_transfer *trans = (struct zink_transfer *)ptrans;
+   if (trans->base.b.usage & PIPE_MAP_ONCE && !trans->staging_res)
+      do_transfer_unmap(screen, trans);
+   transfer_unmap(NULL, ptrans);
 }
 
 static void

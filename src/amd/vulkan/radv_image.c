@@ -530,7 +530,7 @@ radv_patch_image_from_extra_info(struct radv_device *device, struct radv_image *
          image_info->surf_index = NULL;
       }
 
-      if (create_info->prime_blit_src && device->physical_device->rad_info.gfx_level == GFX9) {
+      if (create_info->prime_blit_src && !device->physical_device->rad_info.sdma_supports_compression) {
          /* Older SDMA hw can't handle DCC */
          image->planes[plane].surface.flags |= RADEON_SURF_DISABLE_DCC;
       }
@@ -1713,6 +1713,11 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       radv_video_get_profile_alignments(device->physical_device, profile_list, &width_align, &height_align);
       image_info.width = align(image_info.width, width_align);
       image_info.height = align(image_info.height, height_align);
+
+      if (radv_has_uvd(device->physical_device) && image->vk.usage & VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR) {
+         /* UVD and kernel demand a full DPB allocation. */
+         image_info.array_size = MIN2(16, image_info.array_size);
+      }
    }
 
    unsigned plane_count = radv_get_internal_plane_count(device->physical_device, image->vk.format);

@@ -688,6 +688,10 @@
 
 #define DRI_CONF_RADV_APP_LAYER() DRI_CONF_OPT_S_NODEF(radv_app_layer, "Select an application layer.")
 
+#define DRI_CONF_RADV_FORCE_ACTIVE_ACCEL_STRUCT_LEAVES(def) \
+   DRI_CONF_OPT_B(radv_force_active_accel_struct_leaves, def, \
+                  "Force leaf nodes of acceleration structures to be marked active.")
+
 /**
  * \brief ANV specific configuration options
  */
@@ -699,6 +703,10 @@
 #define DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(def) \
    DRI_CONF_OPT_B(anv_sample_mask_out_opengl_behaviour, def, \
                   "Ignore sample mask out when having single sampled target")
+
+#define DRI_CONF_ANV_FORCE_FILTER_ADDR_ROUNDING(def) \
+   DRI_CONF_OPT_B(anv_force_filter_addr_rounding, def, \
+                  "Force min/mag filter address rounding to be enabled even for NEAREST sampling")
 
 #define DRI_CONF_ANV_MESH_CONV_PRIM_ATTRS_TO_VERT_ATTRS(def) \
    DRI_CONF_OPT_E(anv_mesh_conv_prim_attrs_to_vert_attrs, def, -2, 2, \
