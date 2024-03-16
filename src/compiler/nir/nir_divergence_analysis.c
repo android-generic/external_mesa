@@ -143,6 +143,7 @@ visit_intrinsic(nir_shader *shader, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_xfb_address:
    case nir_intrinsic_load_num_vertices:
    case nir_intrinsic_load_fb_layers_v3d:
+   case nir_intrinsic_load_fep_w_v3d:
    case nir_intrinsic_load_tcs_num_patches_amd:
    case nir_intrinsic_load_ring_tess_factors_amd:
    case nir_intrinsic_load_ring_tess_offchip_amd:
@@ -189,7 +190,6 @@ visit_intrinsic(nir_shader *shader, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_resume_shader_address_amd:
    case nir_intrinsic_load_global_const_block_intel:
    case nir_intrinsic_load_reloc_const_intel:
-   case nir_intrinsic_load_global_block_intel:
    case nir_intrinsic_load_btd_global_arg_addr_intel:
    case nir_intrinsic_load_btd_local_arg_addr_intel:
    case nir_intrinsic_load_mesh_inline_data_intel:
@@ -217,6 +217,13 @@ visit_intrinsic(nir_shader *shader, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_global_constant_uniform_block_intel:
    case nir_intrinsic_cmat_length:
       is_divergent = false;
+      break;
+
+   /* This is divergent because it specifically loads sequential values into
+    * successive SIMD lanes.
+    */
+   case nir_intrinsic_load_global_block_intel:
+      is_divergent = true;
       break;
 
    case nir_intrinsic_decl_reg:

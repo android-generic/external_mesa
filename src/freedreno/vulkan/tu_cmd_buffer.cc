@@ -2093,7 +2093,7 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
       memset(&cmd_buffer->descriptors[i].push_set, 0, sizeof(cmd_buffer->descriptors[i].push_set));
       cmd_buffer->descriptors[i].push_set.base.type = VK_OBJECT_TYPE_DESCRIPTOR_SET;
       cmd_buffer->descriptors[i].max_sets_bound = 0;
-      cmd_buffer->descriptors[i].dynamic_bound = 0;
+      cmd_buffer->descriptors[i].max_dynamic_offset_size = 0;
    }
 
    u_trace_fini(&cmd_buffer->trace);
@@ -2385,12 +2385,12 @@ tu6_emit_descriptor_sets(struct tu_cmd_buffer *cmd,
          cmd->state.desc_sets =
             tu_cs_draw_state(&cmd->sub_cs, &state_cs,
                              4 + 4 * descriptors_state->max_sets_bound +
-                             (descriptors_state->dynamic_bound ? 6 : 0));
+                             (descriptors_state->max_dynamic_offset_size ? 6 : 0));
       } else {
          cmd->state.desc_sets =
             tu_cs_draw_state(&cmd->sub_cs, &state_cs,
                              3 + 2 * descriptors_state->max_sets_bound +
-                             (descriptors_state->dynamic_bound ? 3 : 0));
+                             (descriptors_state->max_dynamic_offset_size ? 3 : 0));
       }
       cs = &state_cs;
    } else {
@@ -2410,7 +2410,7 @@ tu6_emit_descriptor_sets(struct tu_cmd_buffer *cmd,
    }
 
    /* Dynamic descriptors get the reserved descriptor set. */
-   if (descriptors_state->dynamic_bound) {
+   if (descriptors_state->max_dynamic_offset_size) {
       int reserved_set_idx = cmd->device->physical_device->reserved_set_idx;
       assert(reserved_set_idx >= 0); /* reserved set must be bound */
 
@@ -2561,22 +2561,26 @@ tu_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
    assert(dyn_idx == dynamicOffsetCount);
 
    if (dynamic_offset_offset) {
+      descriptors_state->max_dynamic_offset_size =
+         MAX2(descriptors_state->max_dynamic_offset_size, dynamic_offset_offset);
+
       /* allocate and fill out dynamic descriptor set */
       struct tu_cs_memory dynamic_desc_set;
       int reserved_set_idx = cmd->device->physical_device->reserved_set_idx;
-      VkResult result = tu_cs_alloc(&cmd->sub_cs,
-                                    dynamic_offset_offset / (4 * A6XX_TEX_CONST_DWORDS),
-                                    A6XX_TEX_CONST_DWORDS, &dynamic_desc_set);
+      VkResult result =
+         tu_cs_alloc(&cmd->sub_cs,
+                     descriptors_state->max_dynamic_offset_size /
+                     (4 * A6XX_TEX_CONST_DWORDS),
+                     A6XX_TEX_CONST_DWORDS, &dynamic_desc_set);
       if (result != VK_SUCCESS) {
          vk_command_buffer_set_error(&cmd->vk, result);
          return;
       }
 
       memcpy(dynamic_desc_set.map, descriptors_state->dynamic_descriptors,
-             dynamic_offset_offset);
+             descriptors_state->max_dynamic_offset_size);
       assert(reserved_set_idx >= 0); /* reserved set must be bound */
       descriptors_state->set_iova[reserved_set_idx] = dynamic_desc_set.iova | BINDLESS_DESCRIPTOR_64B;
-      descriptors_state->dynamic_bound = true;
    }
 
    tu_dirty_desc_sets(cmd, pipelineBindPoint);
@@ -3053,6 +3057,17 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
    tu_bind_tes(cmd, pipeline->shaders[MESA_SHADER_TESS_EVAL]);
    tu_bind_gs(cmd, pipeline->shaders[MESA_SHADER_GEOMETRY]);
    tu_bind_fs(cmd, pipeline->shaders[MESA_SHADER_FRAGMENT]);
+
+   /* We precompile static state and count it as dynamic, so we have to
+    * manually clear bitset that tells which dynamic state is set, in order to
+    * make sure that future dynamic state will be emitted. The issue is that
+    * framework remembers only a past REAL dynamic state and compares a new
+    * dynamic state against it, and not against our static state masquaraded
+    * as dynamic.
+    */
+   BITSET_ANDNOT(cmd->vk.dynamic_graphics_state.set,
+                 cmd->vk.dynamic_graphics_state.set,
+                 pipeline->static_state_mask);
 
    vk_cmd_set_dynamic_graphics_state(&cmd->vk,
                                      &gfx_pipeline->dynamic_state);

@@ -837,6 +837,9 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_BINDLESS_TEXTURE:
+      if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB &&
+          (screen->info.db_props.maxDescriptorBufferBindings < 2 || screen->info.db_props.maxSamplerDescriptorBufferBindings < 2))
+         return 0;
       return screen->info.have_EXT_descriptor_indexing;
 
    case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
@@ -1004,7 +1007,7 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 0;
 
    case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
-      return screen->info.props.limits.maxTessellationControlPerVertexOutputComponents / 4;
+      return screen->info.props.limits.maxTessellationControlPerPatchOutputComponents / 4;
    case PIPE_CAP_MAX_VARYINGS:
       /* need to reserve up to 60 of our varying components and 16 slots for streamout */
       return MIN2(screen->info.props.limits.maxVertexOutputComponents / 4 / 2, 16);
@@ -2274,7 +2277,7 @@ zink_screen_export_dmabuf_semaphore(struct zink_screen *screen, struct zink_reso
       .fd = -1,
    };
 
-   int fd;
+   int fd = -1;
    if (res->obj->is_aux) {
       fd = os_dupfd_cloexec(res->obj->handle);
    } else {
@@ -2283,6 +2286,11 @@ zink_screen_export_dmabuf_semaphore(struct zink_screen *screen, struct zink_reso
       fd_info.memory = zink_bo_get_mem(res->obj->bo);
       fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
       VKSCR(GetMemoryFdKHR)(screen->dev, &fd_info, &fd);
+   }
+
+   if (unlikely(fd < 0)) {
+      mesa_loge("MESA: Unable to get a valid memory fd");
+      return VK_NULL_HANDLE;
    }
 
    int ret = drmIoctl(fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &export);
@@ -3196,12 +3204,12 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       }
    }
 
-   vk_instance_dispatch_table_load(&screen->vk.instance,
-                                   screen->vk_GetInstanceProcAddr,
-                                   screen->instance);
-   vk_physical_device_dispatch_table_load(&screen->vk.physical_device,
-                                          screen->vk_GetInstanceProcAddr,
-                                          screen->instance);
+   vk_instance_uncompacted_dispatch_table_load(&screen->vk.instance,
+                                                screen->vk_GetInstanceProcAddr,
+                                                screen->instance);
+   vk_physical_device_uncompacted_dispatch_table_load(&screen->vk.physical_device,
+                                                      screen->vk_GetInstanceProcAddr,
+                                                      screen->instance);
 
    zink_verify_instance_extensions(screen);
 
@@ -3298,9 +3306,9 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    if (!screen->dev)
       goto fail;
 
-   vk_device_dispatch_table_load(&screen->vk.device,
-                                 screen->vk_GetDeviceProcAddr,
-                                 screen->dev);
+   vk_device_uncompacted_dispatch_table_load(&screen->vk.device,
+                                             screen->vk_GetDeviceProcAddr,
+                                             screen->dev);
 
    init_queue(screen);
 
@@ -3465,20 +3473,11 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
          mesa_logw("zink: bug detected: inputAttachmentDescriptorSize(%u) > %u", (unsigned)screen->info.db_props.inputAttachmentDescriptorSize, ZINK_FBFETCH_DESCRIPTOR_SIZE);
          can_db = false;
       }
-      if (screen->compact_descriptors) {
-         if (screen->info.db_props.maxDescriptorBufferBindings < 3) {
-            if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
-               mesa_loge("Cannot use db descriptor mode with compact descriptors with maxDescriptorBufferBindings < 3");
-               goto fail;
-            }
-            can_db = false;
-         }
-      } else {
-         if (screen->info.db_props.maxDescriptorBufferBindings < 5) {
-            if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
-               mesa_loge("Cannot use db descriptor mode with maxDescriptorBufferBindings < 5");
-               goto fail;
-            }
+      if (screen->info.db_props.maxDescriptorBufferBindings < 2 || screen->info.db_props.maxSamplerDescriptorBufferBindings < 2) {
+         if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
+            /* allow for testing, but disable bindless */
+            mesa_logw("Cannot use bindless and db descriptor mode with (maxDescriptorBufferBindings||maxSamplerDescriptorBufferBindings) < 2");
+         } else {
             can_db = false;
          }
       }

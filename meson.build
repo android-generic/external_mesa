@@ -603,7 +603,7 @@ vdpau = get_option('gallium-vdpau') \
   .require(with_platform_x11, error_message : 'VDPAU state tracker requires X11 support.') \
   .require(_vdpau_drivers.contains(true), error_message : 'VDPAU state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau, d3d12 (with option gallium-d3d12-video, virgl).') 
 
-dep_vdpau = dependency('vdpau', version : '>= 1.1', required : vdpau)
+dep_vdpau = dependency('vdpau', version : '>= 1.4', required : vdpau)
 if dep_vdpau.found()
   dep_vdpau = dep_vdpau.partial_dependency(compile_args : true)
   pre_args += '-DHAVE_ST_VDPAU'
@@ -813,7 +813,6 @@ if _opencl != 'disabled'
     error('The Clover OpenCL state tracker requires rtti')
   endif
 
-  with_clc = true
   with_gallium_opencl = true
   with_opencl_icd = _opencl == 'icd'
 else
@@ -838,7 +837,7 @@ if with_gallium_rusticl
 endif
 
 dep_clc = null_dep
-if with_clc
+if with_gallium_opencl or with_clc
   dep_clc = dependency('libclc')
 endif
 

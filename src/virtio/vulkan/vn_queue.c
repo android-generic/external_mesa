@@ -600,7 +600,7 @@ vn_queue_submission_add_query_feedback(struct vn_queue_submission *submit,
    VkCommandBuffer *feedback_cmd_handle =
       vn_get_feedback_cmd_handle(submit, feedback_cmds, cmd_count);
    const uint32_t stride = submit->batch_type == VK_STRUCTURE_TYPE_SUBMIT_INFO
-                              ? sizeof(VkCommandBuffer *)
+                              ? sizeof(VkCommandBuffer)
                               : sizeof(VkCommandBufferSubmitInfo);
 
    struct vn_feedback_cmd_pool *feedback_cmd_pool = NULL;
@@ -857,7 +857,7 @@ vn_queue_submission_setup_batches(struct vn_queue_submission *submit)
     * to modify cmd buffer.
     * Only needed for non-empty submissions
     */
-   if (submit->batches) {
+   if (submit->batch_count) {
       memcpy(submit->temp.batches, submit->batches,
              batch_size * submit->batch_count);
    }
