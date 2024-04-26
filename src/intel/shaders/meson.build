@@ -37,38 +37,8 @@ intel_shaders_gens = [ [ 80,   8],
                        [300,  30] ]
 intel_shaders = []
 foreach gen : intel_shaders_gens
-  intel_shaders_spv = custom_target(
-    input : intel_shader_files,
-    output : 'intel_gfx@0@_shaders.spv'.format(gen[0]),
-    command : [
-      prog_mesa_clc,
-      intel_shader_files, '-o', '@OUTPUT@', '--',
-      '-DNDEBUG=1',
-      '-DGFX_VERx10=@0@'.format(gen[0]),
-      '-I' + join_paths(meson.current_source_dir(), '.'),
-      '-I' + join_paths(dir_source_root, 'src/compiler/libcl'),
-      '-I' + join_paths(dir_source_root, 'src'),
-      '-I' + join_paths(dir_source_root, 'src/intel'),
-      '-I' + join_paths(meson.project_build_root(), 'src/intel'),
-      '-I' + join_paths(dir_source_root, 'src/intel/genxml'),
-    ],
-    depends : [gen_cl_xml_pack, intel_dev_wa_src],
-  )
-
-  intel_shaders += custom_target(
-    input : ['spv2hex.py', intel_shaders_spv],
-    output : 'intel_gfx@0@_shaders_spv.h'.format(gen[0]),
-    command : [
-      prog_python, '@INPUT@', '--output', '@OUTPUT@',
-      '--prefix', 'gfx@0@_shaders_spv'.format(gen[1]),
-    ],
-  )
-
-  intel_shaders += custom_target(
-    input : intel_shaders_spv,
-    output : 'intel_gfx@0@_shaders_binding.h'.format(gen[0]),
-    command : [prog_vtn_bindgen, intel_shaders_spv, '@OUTPUT@'],
-  )
+  intel_shaders += 'intel_gfx@0@_shaders_spv.h'.format(gen[0])
+  intel_shaders += 'intel_gfx@0@_shaders_binding.h'.format(gen[0])
 endforeach
 
 idep_intel_shaders = declare_dependency(

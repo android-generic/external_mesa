@@ -79,8 +79,6 @@ spirv2nir = executable(
 
 if get_option('mesa-clc') != 'system' and (with_gallium_asahi or \
                                            with_asahi_vk or \
-                                           with_intel_vk or \
-                                           with_gallium_iris or \
                                            get_option('install-mesa-clc'))
    prog_vtn_bindgen = executable(
      'vtn_bindgen',

@@ -838,7 +838,6 @@ if get_option('mesa-clc') == 'system'
 else
   with_clc = get_option('mesa-clc') != 'auto' or \
              with_microsoft_clc or with_drivers_clc or \
-             with_gallium_iris or with_intel_vk or \
              with_gallium_asahi or with_asahi_vk or \
              with_gallium_rusticl
 endif
