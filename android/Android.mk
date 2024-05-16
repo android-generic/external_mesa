@@ -47,7 +47,7 @@ MESA_VK_LIB_SUFFIX_nouveau := nouveau
 include $(CLEAR_VARS)
 
 LOCAL_SHARED_LIBRARIES := libc libdl libdrm libm liblog libcutils libz libc++ libnativewindow libsync libhardware
-LOCAL_STATIC_LIBRARIES := libexpat libarect libelf
+LOCAL_STATIC_LIBRARIES := libexpat libarect libelf libzstd
 LOCAL_HEADER_LIBRARIES := libnativebase_headers
 MESON_GEN_PKGCONFIGS := log cutils expat hardware libdrm:$(LIBDRM_VERSION) nativewindow sync zlib:1.2.11 libelf
 LOCAL_CFLAGS += $(BOARD_MESA3D_CFLAGS)
