@@ -1077,6 +1077,12 @@ anv_format_supports_usage(
        */
    }
 
+   if (usage_flags & VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR) {
+      if (!(format_feature_flags & VK_FORMAT_FEATURE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR)) {
+         return false;
+      }
+   }
+
    return true;
 }
 
@@ -1463,6 +1469,10 @@ anv_get_image_format_properties(
          goto unsupported;
       }
    }
+
+   if ((info->usage & VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR) &&
+       !devinfo->has_coarse_pixel_primitive_and_cb)
+      goto unsupported;
 
    /* From the bspec section entitled "Surface Layout and Tiling",
     * Gfx9 has a 256 GB limitation and Gfx11+ has a 16 TB limitation.

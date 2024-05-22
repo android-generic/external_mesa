@@ -196,9 +196,9 @@ static void radeon_vcn_enc_h264_get_cropping_param(struct radeon_encoder *enc,
       enc->enc_pic.crop_bottom = pic->seq.enc_frame_crop_bottom_offset;
    } else {
       enc->enc_pic.crop_left = 0;
-      enc->enc_pic.crop_right = (align(enc->base.width, 16) - enc->base.width) / 2;
+      enc->enc_pic.crop_right = 0;
       enc->enc_pic.crop_top = 0;
-      enc->enc_pic.crop_bottom = (align(enc->base.height, 16) - enc->base.height) / 2;
+      enc->enc_pic.crop_bottom = 0;
    }
 }
 
@@ -238,7 +238,6 @@ static void radeon_vcn_enc_h264_get_rc_param(struct radeon_encoder *enc,
    uint32_t frame_rate_den, frame_rate_num;
 
    enc->enc_pic.num_temporal_layers = pic->seq.num_temporal_layers ? pic->seq.num_temporal_layers : 1;
-   enc->enc_pic.temporal_id = 0;
    for (int i = 0; i < enc->enc_pic.num_temporal_layers; i++) {
       enc->enc_pic.rc_layer_init[i].target_bit_rate = pic->rate_ctrl[i].target_bitrate;
       enc->enc_pic.rc_layer_init[i].peak_bit_rate = pic->rate_ctrl[i].peak_bitrate;
@@ -446,9 +445,9 @@ static void radeon_vcn_enc_hevc_get_cropping_param(struct radeon_encoder *enc,
       enc->enc_pic.crop_bottom = pic->seq.conf_win_bottom_offset;
    } else {
       enc->enc_pic.crop_left = 0;
-      enc->enc_pic.crop_right = (align(enc->base.width, 16) - enc->base.width) / 2;
+      enc->enc_pic.crop_right = 0;
       enc->enc_pic.crop_top = 0;
-      enc->enc_pic.crop_bottom = (align(enc->base.height, 16) - enc->base.height) / 2;
+      enc->enc_pic.crop_bottom = 0;
    }
 }
 
@@ -1119,7 +1118,7 @@ static void radeon_enc_begin_frame(struct pipe_video_codec *encoder,
       enc->si = CALLOC_STRUCT(rvid_buffer);
       if (!enc->si ||
           !enc->stream_handle ||
-          !si_vid_create_buffer(enc->screen, enc->si, 128 * 1024, PIPE_USAGE_STAGING)) {
+          !si_vid_create_buffer(enc->screen, enc->si, 128 * 1024, PIPE_USAGE_DEFAULT)) {
          RVID_ERR("Can't create session buffer.\n");
          goto error;
       }

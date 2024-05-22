@@ -81,10 +81,12 @@ static void radeon_enc_session_init(struct radeon_encoder *enc)
       enc->enc_pic.session_init.aligned_picture_width = align(enc->base.width, 64);
    }
    enc->enc_pic.session_init.aligned_picture_height = align(enc->base.height, 16);
+
    enc->enc_pic.session_init.padding_width =
-      enc->enc_pic.session_init.aligned_picture_width - enc->base.width;
+      (enc->enc_pic.crop_left + enc->enc_pic.crop_right) * 2;
    enc->enc_pic.session_init.padding_height =
-      enc->enc_pic.session_init.aligned_picture_height - enc->base.height;
+      (enc->enc_pic.crop_top + enc->enc_pic.crop_bottom) * 2;
+
    enc->enc_pic.session_init.display_remote = 0;
    enc->enc_pic.session_init.pre_encode_mode = enc->enc_pic.quality_modes.pre_encode_mode;
    enc->enc_pic.session_init.pre_encode_chroma_enabled = !!(enc->enc_pic.quality_modes.pre_encode_mode);
@@ -114,8 +116,6 @@ static void radeon_enc_layer_control(struct radeon_encoder *enc)
 
 static void radeon_enc_layer_select(struct radeon_encoder *enc)
 {
-   enc->enc_pic.layer_sel.temporal_layer_index = enc->enc_pic.temporal_id;
-
    RADEON_ENC_BEGIN(enc->cmd.layer_select);
    RADEON_ENC_CS(enc->enc_pic.layer_sel.temporal_layer_index);
    RADEON_ENC_END();
@@ -183,7 +183,7 @@ static void radeon_enc_rc_session_init(struct radeon_encoder *enc)
 
 static void radeon_enc_rc_layer_init(struct radeon_encoder *enc)
 {
-   unsigned int i = enc->enc_pic.temporal_id;
+   unsigned int i = enc->enc_pic.layer_sel.temporal_layer_index;
    RADEON_ENC_BEGIN(enc->cmd.rc_layer_init);
    RADEON_ENC_CS(enc->enc_pic.rc_layer_init[i].target_bit_rate);
    RADEON_ENC_CS(enc->enc_pic.rc_layer_init[i].peak_bit_rate);
@@ -221,7 +221,9 @@ static void radeon_enc_deblocking_filter_hevc(struct radeon_encoder *enc)
 
 static void radeon_enc_quality_params(struct radeon_encoder *enc)
 {
-   enc->enc_pic.quality_params.vbaq_mode = enc->enc_pic.quality_modes.vbaq_mode;
+   enc->enc_pic.quality_params.vbaq_mode =
+      enc->enc_pic.rc_session_init.rate_control_method != RENCODE_RATE_CONTROL_METHOD_NONE ?
+      enc->enc_pic.quality_modes.vbaq_mode : 0;
    enc->enc_pic.quality_params.scene_change_sensitivity = 0;
    enc->enc_pic.quality_params.scene_change_min_idr_interval = 0;
    enc->enc_pic.quality_params.two_pass_search_center_map_mode =
@@ -779,7 +781,12 @@ static void radeon_enc_nalu_vps(struct radeon_encoder *enc)
    radeon_enc_code_fixed_bits(enc, 0x0, 2);
    radeon_enc_code_fixed_bits(enc, enc->enc_pic.general_tier_flag, 1);
    radeon_enc_code_fixed_bits(enc, enc->enc_pic.general_profile_idc, 5);
-   radeon_enc_code_fixed_bits(enc, 0x60000000, 32);
+
+   if (enc->enc_pic.general_profile_idc == 2)
+      radeon_enc_code_fixed_bits(enc, 0x20000000, 32);
+   else
+      radeon_enc_code_fixed_bits(enc, 0x60000000, 32);
+
    radeon_enc_code_fixed_bits(enc, 0xb0000000, 32);
    radeon_enc_code_fixed_bits(enc, 0x0, 16);
    radeon_enc_code_fixed_bits(enc, enc->enc_pic.general_level_idc, 8);
@@ -1350,7 +1357,7 @@ static void begin(struct radeon_encoder *enc)
 
    i = 0;
    do {
-      enc->enc_pic.temporal_id = i;
+      enc->enc_pic.layer_sel.temporal_layer_index = i;
       enc->layer_select(enc);
       enc->rc_layer_init(enc);
       enc->layer_select(enc);
@@ -1402,7 +1409,7 @@ static void encode(struct radeon_encoder *enc)
    if (enc->need_rate_control) {
       i = 0;
       do {
-         enc->enc_pic.temporal_id = i;
+         enc->enc_pic.layer_sel.temporal_layer_index = i;
          enc->layer_select(enc);
          enc->rc_layer_init(enc);
       } while (++i < enc->enc_pic.num_temporal_layers);

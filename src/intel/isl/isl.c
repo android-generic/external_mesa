@@ -175,6 +175,8 @@ isl_device_setup_mocs(struct isl_device *dev)
          dev->mocs.external = 5 << 1;
          /* UC */
          dev->mocs.uncached = 1 << 1;
+         dev->mocs.blitter_dst = 1 << 1;
+         dev->mocs.blitter_src = 1 << 1;
       } else {
          /* TC=1/LLC Only, LeCC=1/UC, LRUM=0, L3CC=3/WB */
          dev->mocs.external = 61 << 1;
@@ -185,6 +187,10 @@ isl_device_setup_mocs(struct isl_device *dev)
 
          /* L1 - HDC:L1 + L3 + LLC */
          dev->mocs.l1_hdc_l3_llc = 48 << 1;
+
+         /* Uncached */
+         dev->mocs.blitter_dst = 3 << 1;
+         dev->mocs.blitter_src = 3 << 1;
       }
       /* Protected is just an additional flag. */
       dev->mocs.protected_mask = 1 << 0;
@@ -267,6 +273,12 @@ isl_mocs(const struct isl_device *dev, isl_surf_usage_flags_t usage,
    uint32_t mask = (usage & ISL_SURF_USAGE_PROTECTED_BIT) ?
       dev->mocs.protected_mask : 0;
 
+   if (usage & ISL_SURF_USAGE_BLITTER_SRC_BIT)
+      return dev->mocs.blitter_src | mask;
+
+   if (usage & ISL_SURF_USAGE_BLITTER_DST_BIT)
+      return dev->mocs.blitter_dst | mask;
+
    if (external)
       return dev->mocs.external | mask;
 
@@ -279,7 +291,7 @@ isl_mocs(const struct isl_device *dev, isl_surf_usage_flags_t usage,
          return dev->mocs.internal | mask;
 
       if (usage & ISL_SURF_USAGE_CPB_BIT)
-         return dev->mocs.internal;
+         return dev->mocs.internal | mask;
 
       /* Using L1:HDC for storage buffers breaks Vulkan memory model
        * tests that use shader atomics.  This isn't likely to work out,
@@ -4058,6 +4070,13 @@ isl_swizzle_supports_rendering(const struct intel_device_info *devinfo,
        *
        *    "For Render Target, this field MUST be programmed to
        *    value = SCS_ALPHA."
+       *
+       * Bspec 57023: RENDER_SURFACE_STATE:: Shader Channel Select Red
+       *
+       *    "Render Target messages do not support swapping of colors with
+       *    alpha. The Red, Green, or Blue Shader Channel Selects do not
+       *    support SCS_ALPHA. The Shader Channel Select Alpha does not support
+       *    SCS_RED, SCS_GREEN, or SCS_BLUE."
        */
       return (swizzle.r == ISL_CHANNEL_SELECT_RED ||
               swizzle.r == ISL_CHANNEL_SELECT_GREEN ||

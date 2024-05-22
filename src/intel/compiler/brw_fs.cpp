@@ -1195,7 +1195,8 @@ fs_visitor::import_uniforms(fs_visitor *v)
 }
 
 enum brw_barycentric_mode
-brw_barycentric_mode(nir_intrinsic_instr *intr)
+brw_barycentric_mode(const struct brw_wm_prog_key *key,
+                     nir_intrinsic_instr *intr)
 {
    const glsl_interp_mode mode =
       (enum glsl_interp_mode) nir_intrinsic_interp_mode(intr);
@@ -1207,7 +1208,13 @@ brw_barycentric_mode(nir_intrinsic_instr *intr)
    switch (intr->intrinsic) {
    case nir_intrinsic_load_barycentric_pixel:
    case nir_intrinsic_load_barycentric_at_offset:
-      bary = BRW_BARYCENTRIC_PERSPECTIVE_PIXEL;
+      /* When per sample interpolation is dynamic, assume sample
+       * interpolation. We'll dynamically remap things so that the FS thread
+       * payload is not affected.
+       */
+      bary = key->persample_interp == BRW_SOMETIMES ?
+             BRW_BARYCENTRIC_PERSPECTIVE_SAMPLE :
+             BRW_BARYCENTRIC_PERSPECTIVE_PIXEL;
       break;
    case nir_intrinsic_load_barycentric_centroid:
       bary = BRW_BARYCENTRIC_PERSPECTIVE_CENTROID;
@@ -3049,10 +3056,9 @@ fs_visitor::opt_split_sends()
 
    foreach_block_and_inst(block, fs_inst, send, cfg) {
       if (send->opcode != SHADER_OPCODE_SEND ||
-          send->mlen <= reg_unit(devinfo) || send->ex_mlen > 0)
+          send->mlen <= reg_unit(devinfo) || send->ex_mlen > 0 ||
+          send->src[2].file != VGRF)
          continue;
-
-      assert(send->src[2].file == VGRF);
 
       /* Currently don't split sends that reuse a previously used payload. */
       fs_inst *lp = (fs_inst *) send->prev;
@@ -4473,7 +4479,8 @@ fs_visitor::lower_sub_sat()
           */
          if (inst->exec_size == 8 && inst->src[0].type != BRW_REGISTER_TYPE_Q &&
              inst->src[0].type != BRW_REGISTER_TYPE_UQ) {
-            fs_reg acc(ARF, BRW_ARF_ACCUMULATOR, inst->src[1].type);
+            fs_reg acc = retype(brw_acc_reg(inst->exec_size),
+                                inst->src[1].type);
 
             ibld.MOV(acc, inst->src[1]);
             fs_inst *add = ibld.ADD(inst->dst, acc, inst->src[0]);
@@ -5473,7 +5480,8 @@ fs_visitor::lower_simd_width()
           */
          const unsigned max_width = MAX2(inst->exec_size, lower_width);
 
-         const fs_builder bld = fs_builder(this).at_end();
+         const fs_builder bld =
+            fs_builder(this, MAX2(max_width, this->dispatch_width)).at_end();
          const fs_builder ibld = bld.at(block, inst)
                                     .exec_all(inst->force_writemask_all)
                                     .group(max_width, inst->group / max_width);
@@ -7100,6 +7108,9 @@ fs_visitor::run_fs(bool allow_spilling, bool do_rep_send)
    payload_ = new fs_thread_payload(*this, source_depth_to_render_target,
                                     runtime_check_aads_emit);
 
+   if (nir->info.ray_queries > 0)
+      limit_dispatch_width(16, "SIMD32 not supported with ray queries.\n");
+
    if (do_rep_send) {
       assert(dispatch_width == 16);
       emit_repclear_shader();
@@ -7336,6 +7347,7 @@ is_used_in_not_interp_frag_coord(nir_def *def)
  */
 static unsigned
 brw_compute_barycentric_interp_modes(const struct intel_device_info *devinfo,
+                                     const struct brw_wm_prog_key *key,
                                      const nir_shader *shader)
 {
    unsigned barycentric_interp_modes = 0;
@@ -7364,7 +7376,7 @@ brw_compute_barycentric_interp_modes(const struct intel_device_info *devinfo,
 
             nir_intrinsic_op bary_op = intrin->intrinsic;
             enum brw_barycentric_mode bary =
-               brw_barycentric_mode(intrin);
+               brw_barycentric_mode(key, intrin);
 
             barycentric_interp_modes |= 1 << bary;
 
@@ -7573,7 +7585,7 @@ brw_nir_populate_wm_prog_data(nir_shader *shader,
    prog_data->inner_coverage = shader->info.fs.inner_coverage;
 
    prog_data->barycentric_interp_modes =
-      brw_compute_barycentric_interp_modes(devinfo, shader);
+      brw_compute_barycentric_interp_modes(devinfo, key, shader);
 
    /* From the BDW PRM documentation for 3DSTATE_WM:
     *
@@ -7766,9 +7778,6 @@ brw_compile_fs(const struct brw_compiler *compiler,
       v8->limit_dispatch_width(16, "SIMD32 not supported with coarse"
                                " pixel shading.\n");
    }
-
-   if (nir->info.ray_queries > 0 && v8)
-      v8->limit_dispatch_width(16, "SIMD32 with ray queries.\n");
 
    if (!has_spilled &&
        (!v8 || v8->max_dispatch_width >= 16) &&

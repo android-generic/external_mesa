@@ -594,8 +594,16 @@ build_res_index(nir_builder *b,
       }
 
    const uint32_t desc_bti = state->set[set].binding[binding].surface_offset;
-   assert(bind_layout->descriptor_surface_stride % 8 == 0);
-   const uint32_t desc_stride = bind_layout->descriptor_surface_stride / 8;
+   /* We don't care about the stride field for inline uniforms (see
+    * build_desc_addr_for_res_index), but for anything else we should be
+    * aligned to 8 bytes because we store a multiple of 8 in the packed info
+    * to be able to encode a stride up to 2040 (8 * 255).
+    */
+   assert(bind_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK ||
+          bind_layout->descriptor_surface_stride % 8 == 0);
+   const uint32_t desc_stride =
+      bind_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK ? 0 :
+      bind_layout->descriptor_surface_stride / 8;
 
       nir_def *packed =
          nir_ior_imm(b,
@@ -1975,6 +1983,34 @@ add_push_entry(struct anv_pipeline_push_map *push_map,
    };
 }
 
+static bool
+binding_should_use_surface_binding_table(const struct apply_pipeline_layout_state *state,
+                                         const struct anv_descriptor_set_binding_layout *binding)
+{
+   if ((binding->data & ANV_DESCRIPTOR_BTI_SURFACE_STATE) == 0)
+      return false;
+
+   if (state->pdevice->always_use_bindless &&
+       (binding->data & ANV_DESCRIPTOR_SURFACE))
+      return false;
+
+   return true;
+}
+
+static bool
+binding_should_use_sampler_binding_table(const struct apply_pipeline_layout_state *state,
+                                         const struct anv_descriptor_set_binding_layout *binding)
+{
+   if ((binding->data & ANV_DESCRIPTOR_BTI_SAMPLER_STATE) == 0)
+      return false;
+
+   if (state->pdevice->always_use_bindless &&
+       (binding->data & ANV_DESCRIPTOR_SAMPLER))
+      return false;
+
+   return true;
+}
+
 void
 anv_nir_apply_pipeline_layout(nir_shader *shader,
                               const struct anv_physical_device *pdevice,
@@ -2146,7 +2182,7 @@ anv_nir_apply_pipeline_layout(nir_shader *shader,
       state.set[set].binding[b].surface_offset = BINDLESS_OFFSET;
       state.set[set].binding[b].sampler_offset = BINDLESS_OFFSET;
 
-      if (binding->data & ANV_DESCRIPTOR_BTI_SURFACE_STATE) {
+      if (binding_should_use_surface_binding_table(&state, binding)) {
          if (map->surface_count + array_size * array_multiplier > MAX_BINDING_TABLE_SIZE ||
              anv_descriptor_requires_bindless(pdevice, binding, false) ||
              brw_shader_stage_requires_bindless_resources(shader->info.stage)) {
@@ -2177,7 +2213,7 @@ anv_nir_apply_pipeline_layout(nir_shader *shader,
          assert(map->surface_count <= MAX_BINDING_TABLE_SIZE);
       }
 
-      if (binding->data & ANV_DESCRIPTOR_BTI_SAMPLER_STATE) {
+      if (binding_should_use_sampler_binding_table(&state, binding)) {
          if (map->sampler_count + array_size * array_multiplier > MAX_SAMPLER_TABLE_SIZE ||
              anv_descriptor_requires_bindless(pdevice, binding, true) ||
              brw_shader_stage_requires_bindless_resources(shader->info.stage)) {

@@ -1137,7 +1137,7 @@ struct zink_gfx_program {
    uint32_t last_variant_hash;
 
    uint32_t last_finalized_hash[2][4]; //[dynamic, renderpass][primtype idx]
-   VkPipeline last_pipeline[2][4]; //[dynamic, renderpass][primtype idx]
+   struct zink_gfx_pipeline_cache_entry *last_pipeline[2][4]; //[dynamic, renderpass][primtype idx]
 
    struct zink_gfx_lib_cache *libs;
 };
@@ -1519,7 +1519,7 @@ struct zink_screen {
    bool renderdoc_capture_all;
 #endif
 
-   struct vk_dispatch_table vk;
+   struct vk_uncompacted_dispatch_table vk;
 
    void (*buffer_barrier)(struct zink_context *ctx, struct zink_resource *res, VkAccessFlags flags, VkPipelineStageFlags pipeline);
    void (*image_barrier)(struct zink_context *ctx, struct zink_resource *res, VkImageLayout new_layout, VkAccessFlags flags, VkPipelineStageFlags pipeline);

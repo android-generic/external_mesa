@@ -137,7 +137,7 @@ zink_context_destroy(struct pipe_context *pctx)
       simple_mtx_lock((&ctx->program_lock[i]));
       hash_table_foreach(&ctx->program_cache[i], entry) {
          struct zink_program *pg = entry->data;
-         util_queue_fence_wait(&pg->cache_fence);
+         zink_program_finish(ctx, pg);
          pg->removed = true;
       }
       simple_mtx_unlock((&ctx->program_lock[i]));
@@ -187,21 +187,31 @@ zink_context_destroy(struct pipe_context *pctx)
          screen->free_batch_states = ctx->batch_states;
          screen->last_free_batch_state = screen->free_batch_states;
       }
-      while (screen->last_free_batch_state->next)
-         screen->last_free_batch_state = screen->last_free_batch_state->next;
    }
+   while (screen->last_free_batch_state && screen->last_free_batch_state->next)
+      screen->last_free_batch_state = screen->last_free_batch_state->next;
    if (ctx->free_batch_states) {
       if (screen->free_batch_states)
          screen->last_free_batch_state->next = ctx->free_batch_states;
-      else
+      else {
          screen->free_batch_states = ctx->free_batch_states;
-      screen->last_free_batch_state = ctx->last_free_batch_state;
+         screen->last_free_batch_state = ctx->last_free_batch_state;
+      }
    }
-   simple_mtx_unlock(&screen->free_batch_states_lock);
+   while (screen->last_free_batch_state && screen->last_free_batch_state->next)
+      screen->last_free_batch_state = screen->last_free_batch_state->next;
    if (ctx->batch.state) {
       zink_clear_batch_state(ctx, ctx->batch.state);
-      zink_batch_state_destroy(screen, ctx->batch.state);
+      if (screen->free_batch_states)
+         screen->last_free_batch_state->next = ctx->batch.state;
+      else {
+         screen->free_batch_states = ctx->batch.state;
+         screen->last_free_batch_state = screen->free_batch_states;
+      }
    }
+   while (screen->last_free_batch_state && screen->last_free_batch_state->next)
+      screen->last_free_batch_state = screen->last_free_batch_state->next;
+   simple_mtx_unlock(&screen->free_batch_states_lock);
 
    for (unsigned i = 0; i < 2; i++) {
       util_idalloc_fini(&ctx->di.bindless[i].tex_slots);
@@ -1937,9 +1947,6 @@ zink_set_shader_images(struct pipe_context *pctx,
                   /* ref already added by create */
                   a->buffer_view = bv;
                }
-               if (zink_resource_access_is_write(access))
-                  res->obj->unordered_write = false;
-               res->obj->unordered_read = false;
             } else {
                /* image rebind: get updated surface and unref old one */
                struct zink_surface *surface = create_image_surface(ctx, b, is_compute);
@@ -1959,6 +1966,9 @@ zink_set_shader_images(struct pipe_context *pctx,
                                          res->gfx_barrier);
             zink_batch_resource_usage_set(&ctx->batch, res,
                                           zink_resource_access_is_write(access), true);
+            if (zink_resource_access_is_write(access))
+               res->obj->unordered_write = false;
+            res->obj->unordered_read = false;
          } else {
             finalize_image_bind(ctx, res, is_compute);
             zink_batch_resource_usage_set(&ctx->batch, res,
@@ -2837,6 +2847,29 @@ begin_rendering(struct zink_context *ctx)
                ctx->dynamic_fb.attachments[PIPE_MAX_COLOR_BUFS+1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             }
          }
+      }
+      if (changed_size || changed_layout)
+         ctx->rp_changed = true;
+      ctx->rp_loadop_changed = false;
+      ctx->rp_layout_changed = false;
+   }
+   /* always assemble clear_buffers mask:
+    * if a scissored clear must be triggered during glFlush,
+    * the renderpass metadata may be unchanged (e.g., LOAD from previous rp),
+    * but the buffer mask must still be returned
+    */
+   if (ctx->clears_enabled) {
+      for (int i = 0; i < ctx->fb_state.nr_cbufs; i++) {
+         /* these are no-ops */
+         if (!ctx->fb_state.cbufs[i] || !zink_fb_clear_enabled(ctx, i))
+            continue;
+         /* these need actual clear calls inside the rp */
+         if (zink_fb_clear_needs_explicit(&ctx->fb_clears[i]))
+            clear_buffers |= (PIPE_CLEAR_COLOR0 << i);
+      }
+      if (ctx->fb_state.zsbuf && zink_fb_clear_enabled(ctx, PIPE_MAX_COLOR_BUFS)) {
+         struct zink_framebuffer_clear *fb_clear = &ctx->fb_clears[PIPE_MAX_COLOR_BUFS];
+         struct zink_framebuffer_clear_data *clear = zink_fb_clear_element(fb_clear, 0);
          if (zink_fb_clear_needs_explicit(fb_clear)) {
             for (int j = !zink_fb_clear_element_needs_explicit(clear);
                  (clear_buffers & PIPE_CLEAR_DEPTHSTENCIL) != PIPE_CLEAR_DEPTHSTENCIL && j < zink_fb_clear_count(fb_clear);
@@ -2844,10 +2877,6 @@ begin_rendering(struct zink_context *ctx)
                clear_buffers |= zink_fb_clear_element(fb_clear, j)->zs.bits;
          }
       }
-      if (changed_size || changed_layout)
-         ctx->rp_changed = true;
-      ctx->rp_loadop_changed = false;
-      ctx->rp_layout_changed = false;
    }
 
    if (!ctx->rp_changed && ctx->batch.in_rp)
@@ -2878,10 +2907,11 @@ begin_rendering(struct zink_context *ctx)
    if (has_swapchain) {
       ASSERTED struct zink_resource *res = zink_resource(ctx->fb_state.cbufs[0]->texture);
       zink_render_fixup_swapchain(ctx);
-      assert(ctx->dynamic_fb.info.renderArea.extent.width <= res->base.b.width0);
-      assert(ctx->dynamic_fb.info.renderArea.extent.height <= res->base.b.height0);
-      assert(ctx->fb_state.width <= res->base.b.width0);
-      assert(ctx->fb_state.height <= res->base.b.height0);
+      /* clamp for late swapchain resize */
+      if (res->base.b.width0 < ctx->dynamic_fb.info.renderArea.extent.width)
+         ctx->dynamic_fb.info.renderArea.extent.width = res->base.b.width0;
+      if (res->base.b.height0 < ctx->dynamic_fb.info.renderArea.extent.height)
+         ctx->dynamic_fb.info.renderArea.extent.height = res->base.b.height0;
    }
    if (ctx->fb_state.zsbuf && zsbuf_used) {
       struct zink_surface *surf = zink_csurface(ctx->fb_state.zsbuf);
@@ -3803,7 +3833,6 @@ zink_flush(struct pipe_context *pctx,
    struct zink_batch *batch = &ctx->batch;
    struct zink_fence *fence = NULL;
    struct zink_screen *screen = zink_screen(ctx->base.screen);
-   unsigned submit_count = 0;
    VkSemaphore export_sem = VK_NULL_HANDLE;
 
    /* triggering clears will force has_work */
@@ -3864,8 +3893,7 @@ zink_flush(struct pipe_context *pctx,
       }
    }
 
-   /* TODO: if swapchains gain timeline semaphore semantics, `flags` can be eliminated and no-op fence can return timeline id */
-   if (!batch->has_work && flags) {
+   if (!batch->has_work) {
        if (pfence) {
           /* reuse last fence */
           fence = ctx->last_fence;
@@ -3882,7 +3910,6 @@ zink_flush(struct pipe_context *pctx,
          tc_driver_internal_flush_notify(ctx->tc);
    } else {
       fence = &batch->state->fence;
-      submit_count = batch->state->usage.submit_count;
       if (deferred && !(flags & PIPE_FLUSH_FENCE_FD) && pfence)
          deferred_fence = true;
       else
@@ -3906,7 +3933,7 @@ zink_flush(struct pipe_context *pctx,
       mfence->fence = fence;
       mfence->sem = export_sem;
       if (fence) {
-         mfence->submit_count = submit_count;
+         mfence->submit_count = zink_batch_state(fence)->usage.submit_count;
          util_dynarray_append(&fence->mfences, struct zink_tc_fence *, mfence);
       }
       if (export_sem) {
@@ -4120,7 +4147,7 @@ zink_flush_resource(struct pipe_context *pctx,
    struct zink_context *ctx = zink_context(pctx);
    struct zink_resource *res = zink_resource(pres);
    if (res->obj->dt) {
-      if (zink_kopper_acquired(res->obj->dt, res->obj->dt_idx)) {
+      if (zink_kopper_acquired(res->obj->dt, res->obj->dt_idx) && (!ctx->clears_enabled || !res->fb_bind_count)) {
          zink_batch_no_rp_safe(ctx);
          zink_kopper_readback_update(ctx, res);
          zink_screen(ctx->base.screen)->image_barrier(ctx, res, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, 0, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);

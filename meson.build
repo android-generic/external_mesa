@@ -603,7 +603,7 @@ vdpau = get_option('gallium-vdpau') \
   .require(with_platform_x11, error_message : 'VDPAU state tracker requires X11 support.') \
   .require(_vdpau_drivers.contains(true), error_message : 'VDPAU state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau, d3d12 (with option gallium-d3d12-video, virgl).') 
 
-dep_vdpau = dependency('vdpau', version : '>= 1.1', required : vdpau)
+dep_vdpau = dependency('vdpau', version : '>= 1.4', required : vdpau)
 if dep_vdpau.found()
   dep_vdpau = dep_vdpau.partial_dependency(compile_args : true)
   pre_args += '-DHAVE_ST_VDPAU'
@@ -813,7 +813,6 @@ if _opencl != 'disabled'
     error('The Clover OpenCL state tracker requires rtti')
   endif
 
-  with_clc = true
   with_gallium_opencl = true
   with_opencl_icd = _opencl == 'icd'
 else
@@ -838,7 +837,7 @@ if with_gallium_rusticl
 endif
 
 dep_clc = null_dep
-if with_clc
+if with_gallium_opencl or with_clc
   dep_clc = dependency('libclc')
 endif
 
@@ -1524,11 +1523,6 @@ if with_any_intel and ['x86', 'x86_64'].contains(host_machine.cpu_family())
   pre_args += '-DSUPPORT_INTEL_INTEGRATED_GPUS'
 endif
 
-if get_option('intel-xe-kmd').enabled()
-  pre_args += '-DINTEL_XE_KMD_SUPPORTED'
-endif
-
-
 if with_gallium_i915 and host_machine.cpu_family().startswith('x86') == false
   error('Intel "i915" Gallium driver requires x86 or x86_64 CPU family')
 endif
@@ -1723,7 +1717,7 @@ if with_clc
   # all-targets is needed to support static linking LLVM build with multiple targets.
   # windowsdriver is needded with LLVM>=15 and frontendhlsl is needed with LLVM>=16,
   # but we don't know what LLVM version we are using yet
-  llvm_optional_modules += ['all-targets', 'windowsdriver', 'frontendhlsl']
+  llvm_optional_modules += ['all-targets', 'windowsdriver', 'frontendhlsl', 'frontenddriver']
 endif
 draw_with_llvm = get_option('draw-use-llvm')
 if draw_with_llvm
@@ -1866,6 +1860,9 @@ if with_clc
     endif
     if dep_llvm.version().version_compare('>= 16.0')
       clang_modules += 'clangASTMatchers'
+    endif
+    if dep_llvm.version().version_compare('>= 18.0')
+      clang_modules += 'clangAPINotes'
     endif
 
     dep_clang = []

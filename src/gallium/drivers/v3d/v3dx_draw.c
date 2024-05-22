@@ -709,6 +709,9 @@ v3d_emit_gl_shader_state(struct v3d_context *v3d,
         }
 
         bool cs_loaded_any = false;
+        const bool cs_uses_builtins = v3d->prog.cs->prog_data.vs->uses_iid ||
+                                      v3d->prog.cs->prog_data.vs->uses_biid ||
+                                      v3d->prog.cs->prog_data.vs->uses_vid;
         for (int i = 0; i < vtx->num_elements; i++) {
                 struct pipe_vertex_element *elem = &vtx->pipe[i];
                 struct pipe_vertex_buffer *vb =
@@ -738,11 +741,18 @@ v3d_emit_gl_shader_state(struct v3d_context *v3d,
                          * inputs.  (Since CS is just dead-code-elimination
                          * compared to VS, we can't have CS loading but not
                          * VS).
+                         *
+                         * GFXH-1602: first attribute must be active if using
+                         * builtins.
                          */
                         if (v3d->prog.cs->prog_data.vs->vattr_sizes[i])
                                 cs_loaded_any = true;
-                        if (i == vtx->num_elements - 1 && !cs_loaded_any) {
+                        if (i == 0 && cs_uses_builtins && !cs_loaded_any) {
                                 attr.number_of_values_read_by_coordinate_shader = 1;
+                                cs_loaded_any = true;
+                        } else if (i == vtx->num_elements - 1 && !cs_loaded_any) {
+                                attr.number_of_values_read_by_coordinate_shader = 1;
+                                cs_loaded_any = true;
                         }
                         attr.maximum_index = 0xffffff;
                 }
@@ -1390,7 +1400,7 @@ v3d_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
                 v3d->compute_shared_memory =
                         v3d_bo_alloc(v3d->screen,
                                      v3d->prog.compute->prog_data.compute->shared_size *
-                                     wgs_per_sg,
+                                     num_wgs,
                                      "shared_vars");
         }
 

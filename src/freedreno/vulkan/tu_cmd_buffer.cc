@@ -187,6 +187,10 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
             .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,
       ));
    }
+   if (CHIP >= A7XX && (flushes & TU_CMD_FLAG_CCHE_INVALIDATE) &&
+       /* Invalidating UCHE seems to also invalidate CCHE */
+       !(flushes & TU_CMD_FLAG_CACHE_INVALIDATE))
+      tu_cs_emit_pkt7(cs, CP_CCHE_INVALIDATE, 0);
    if (flushes & TU_CMD_FLAG_WAIT_MEM_WRITES)
       tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
    if (flushes & TU_CMD_FLAG_WAIT_FOR_IDLE)
@@ -2093,7 +2097,7 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
       memset(&cmd_buffer->descriptors[i].push_set, 0, sizeof(cmd_buffer->descriptors[i].push_set));
       cmd_buffer->descriptors[i].push_set.base.type = VK_OBJECT_TYPE_DESCRIPTOR_SET;
       cmd_buffer->descriptors[i].max_sets_bound = 0;
-      cmd_buffer->descriptors[i].dynamic_bound = 0;
+      cmd_buffer->descriptors[i].max_dynamic_offset_size = 0;
    }
 
    u_trace_fini(&cmd_buffer->trace);
@@ -2385,12 +2389,12 @@ tu6_emit_descriptor_sets(struct tu_cmd_buffer *cmd,
          cmd->state.desc_sets =
             tu_cs_draw_state(&cmd->sub_cs, &state_cs,
                              4 + 4 * descriptors_state->max_sets_bound +
-                             (descriptors_state->dynamic_bound ? 6 : 0));
+                             (descriptors_state->max_dynamic_offset_size ? 6 : 0));
       } else {
          cmd->state.desc_sets =
             tu_cs_draw_state(&cmd->sub_cs, &state_cs,
                              3 + 2 * descriptors_state->max_sets_bound +
-                             (descriptors_state->dynamic_bound ? 3 : 0));
+                             (descriptors_state->max_dynamic_offset_size ? 3 : 0));
       }
       cs = &state_cs;
    } else {
@@ -2410,7 +2414,7 @@ tu6_emit_descriptor_sets(struct tu_cmd_buffer *cmd,
    }
 
    /* Dynamic descriptors get the reserved descriptor set. */
-   if (descriptors_state->dynamic_bound) {
+   if (descriptors_state->max_dynamic_offset_size) {
       int reserved_set_idx = cmd->device->physical_device->reserved_set_idx;
       assert(reserved_set_idx >= 0); /* reserved set must be bound */
 
@@ -2561,22 +2565,26 @@ tu_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
    assert(dyn_idx == dynamicOffsetCount);
 
    if (dynamic_offset_offset) {
+      descriptors_state->max_dynamic_offset_size =
+         MAX2(descriptors_state->max_dynamic_offset_size, dynamic_offset_offset);
+
       /* allocate and fill out dynamic descriptor set */
       struct tu_cs_memory dynamic_desc_set;
       int reserved_set_idx = cmd->device->physical_device->reserved_set_idx;
-      VkResult result = tu_cs_alloc(&cmd->sub_cs,
-                                    dynamic_offset_offset / (4 * A6XX_TEX_CONST_DWORDS),
-                                    A6XX_TEX_CONST_DWORDS, &dynamic_desc_set);
+      VkResult result =
+         tu_cs_alloc(&cmd->sub_cs,
+                     descriptors_state->max_dynamic_offset_size /
+                     (4 * A6XX_TEX_CONST_DWORDS),
+                     A6XX_TEX_CONST_DWORDS, &dynamic_desc_set);
       if (result != VK_SUCCESS) {
          vk_command_buffer_set_error(&cmd->vk, result);
          return;
       }
 
       memcpy(dynamic_desc_set.map, descriptors_state->dynamic_descriptors,
-             dynamic_offset_offset);
+             descriptors_state->max_dynamic_offset_size);
       assert(reserved_set_idx >= 0); /* reserved set must be bound */
       descriptors_state->set_iova[reserved_set_idx] = dynamic_desc_set.iova | BINDLESS_DESCRIPTOR_64B;
-      descriptors_state->dynamic_bound = true;
    }
 
    tu_dirty_desc_sets(cmd, pipelineBindPoint);
@@ -3054,6 +3062,17 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
    tu_bind_gs(cmd, pipeline->shaders[MESA_SHADER_GEOMETRY]);
    tu_bind_fs(cmd, pipeline->shaders[MESA_SHADER_FRAGMENT]);
 
+   /* We precompile static state and count it as dynamic, so we have to
+    * manually clear bitset that tells which dynamic state is set, in order to
+    * make sure that future dynamic state will be emitted. The issue is that
+    * framework remembers only a past REAL dynamic state and compares a new
+    * dynamic state against it, and not against our static state masquaraded
+    * as dynamic.
+    */
+   BITSET_ANDNOT(cmd->vk.dynamic_graphics_state.set,
+                 cmd->vk.dynamic_graphics_state.set,
+                 pipeline->static_state_mask);
+
    vk_cmd_set_dynamic_graphics_state(&cmd->vk,
                                      &gfx_pipeline->dynamic_state);
    cmd->state.program = pipeline->program;
@@ -3231,6 +3250,13 @@ tu_flush_for_access(struct tu_cache_state *cache,
       flush_bits |= TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE;
    }
 
+   /* There are multiple incoherent copies of CCHE, so any read through it may
+    * require invalidating it and we cannot optimize away invalidates.
+    */
+   if (dst_mask & TU_ACCESS_CCHE_READ) {
+      flush_bits |= TU_CMD_FLAG_CCHE_INVALIDATE;
+   }
+
 #undef DST_INCOHERENT_FLUSH
 
    cache->flush_bits |= flush_bits;
@@ -3332,12 +3358,13 @@ vk2tu_access(VkAccessFlags2 flags, VkPipelineStageFlags2 stages, bool image_only
                        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
                        VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
                        SHADER_STAGES))
-       mask |= TU_ACCESS_UCHE_READ;
+       mask |= TU_ACCESS_UCHE_READ | TU_ACCESS_CCHE_READ;
 
    if (gfx_read_access(flags, stages,
                        VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT,
                        SHADER_STAGES)) {
-      mask |= TU_ACCESS_UCHE_READ | TU_ACCESS_BINDLESS_DESCRIPTOR_READ;
+      mask |= TU_ACCESS_UCHE_READ | TU_ACCESS_BINDLESS_DESCRIPTOR_READ |
+              TU_ACCESS_CCHE_READ;
    }
 
    if (gfx_write_access(flags, stages,

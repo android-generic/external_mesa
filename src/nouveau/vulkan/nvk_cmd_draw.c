@@ -62,27 +62,19 @@ nvk_mme_set_priv_reg(struct mme_builder *b)
    mme_mthd(b, NV9097_SET_FALCON04);
    mme_emit(b, mme_load(b));
 
-   mme_if(b, ieq, s26, mme_imm(2)) {
-      struct mme_value loop_cond = mme_mov(b, mme_zero());
-      mme_while(b, ine, loop_cond, mme_imm(1)) {
-         mme_state_to(b, loop_cond, NV9097_SET_MME_SHADOW_SCRATCH(0));
-         mme_mthd(b, NV9097_NO_OPERATION);
-         mme_emit(b, mme_zero());
-      };
-   }
-
-   mme_if(b, ine, s26, mme_imm(2)) {
-      mme_loop(b, mme_imm(10)) {
-         mme_mthd(b, NV9097_NO_OPERATION);
-         mme_emit(b, mme_zero());
-      }
-   }
+   struct mme_value loop_cond = mme_mov(b, mme_zero());
+   mme_while(b, ine, loop_cond, mme_imm(1)) {
+      mme_state_to(b, loop_cond, NV9097_SET_MME_SHADOW_SCRATCH(0));
+      mme_mthd(b, NV9097_NO_OPERATION);
+      mme_emit(b, mme_zero());
+   };
 }
 
 VkResult
 nvk_queue_init_context_draw_state(struct nvk_queue *queue)
 {
    struct nvk_device *dev = nvk_queue_device(queue);
+   struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    uint32_t push_data[2048];
    struct nv_push push;
@@ -138,12 +130,68 @@ nvk_queue_init_context_draw_state(struct nvk_queue *queue)
     * For generations with firmware support for our `SET_PRIV_REG` mme method
     * we simply use that. On older generations we'll let the kernel do it.
     * Starting with GSP we have to do it via the firmware anyway.
+    *
+    * This clears bit 3 of gr_gpcs_tpcs_sm_disp_ctrl
     */
    if (dev->pdev->info.cls_eng3d >= MAXWELL_B) {
-      unsigned reg = dev->pdev->info.cls_eng3d >= VOLTA_A ? 0x419ba4 : 0x419f78;
+      unsigned reg = pdev->info.cls_eng3d >= VOLTA_A ? 0x419ba4 : 0x419f78;
       P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_SET_PRIV_REG));
       P_INLINE_DATA(p, 0);
       P_INLINE_DATA(p, BITFIELD_BIT(3));
+      P_INLINE_DATA(p, reg);
+   }
+
+   /* Disable Out Of Range Address exceptions
+    *
+    * From the SPH documentation:
+    *
+    *    "The SPH fields StoreReqStart and StoreReqEnd set a range of
+    *    attributes whose corresponding Odmap values of ST or ST_LAST are
+    *    treated as ST_REQ. Normally, for an attribute whose Omap bit is TRUE
+    *    and Odmap value is ST, when the shader writes data to this output, it
+    *    can not count on being able to read it back, since the next
+    *    downstream shader might have its Imap bit FALSE, thereby causing the
+    *    Bmap bit to be FALSE. By including a ST type of attribute in the
+    *    range of StoreReqStart and StoreReqEnd, the attribute’s Odmap value
+    *    is treated as ST_REQ, so an Omap bit being TRUE causes the Bmap bit
+    *    to be TRUE. This guarantees the shader program can output the value
+    *    and then read it back later. This will save register space."
+    *
+    * It's unclear exactly what's going on but this seems to imply that the
+    * hardware actually ANDs the output mask of one shader stage together with
+    * the input mask of the subsequent shader stage to determine which values
+    * are actually used.
+    *
+    * In the case when we have an empty fragment shader, it seems the hardware
+    * doesn't allocate any output memory for final geometry stage at all and
+    * so any writes to outputs from the final shader stage generates an Out Of
+    * Range Address exception.  We could fix this by eliminating unused
+    * outputs via cross-stage linking but that won't work in the case of
+    * VK_EXT_shader_object and VK_EXT_graphics_pipeline_library fast-link.
+    * Instead, the easiest solution is to just disable the exception.
+    *
+    * NOTE (Faith):
+    *
+    *    This above analysis is 100% conjecture on my part based on a creative
+    *    reading of the SPH docs and what I saw when trying to run certain
+    *    OpenGL CTS tests on NVK + Zink.  Without access to NVIDIA HW
+    *    engineers, have no way of verifying this analysis.
+    *
+    *    The CTS test in question is:
+    *
+    *    KHR-GL46.tessellation_shader.tessellation_control_to_tessellation_evaluation.gl_tessLevel
+    *
+    * This should also prevent any issues with array overruns on I/O arrays.
+    * Before, they would get an exception and kill the context whereas now
+    * they should gently get ignored.
+    *
+    * This clears bit 14 of gr_gpcs_tpcs_sms_hww_warp_esr_report_mask
+    */
+   if (dev->pdev->info.cls_eng3d >= MAXWELL_B) {
+      unsigned reg = pdev->info.cls_eng3d >= VOLTA_A ? 0x419ea8 : 0x419e44;
+      P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_SET_PRIV_REG));
+      P_INLINE_DATA(p, 0);
+      P_INLINE_DATA(p, BITFIELD_BIT(14));
       P_INLINE_DATA(p, reg);
    }
 
@@ -917,7 +965,9 @@ nvk_CmdEndRendering(VkCommandBuffer commandBuffer)
 
    if (need_resolve) {
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
-      P_IMMD(p, NV9097, WAIT_FOR_IDLE, 0);
+      P_IMMD(p, NVA097, INVALIDATE_TEXTURE_DATA_CACHE, {
+         .lines = LINES_ALL,
+      });
 
       nvk_meta_resolve_rendering(cmd, &vk_render);
    }
@@ -3170,44 +3220,60 @@ nvk_CmdBeginConditionalRenderingEXT(VkCommandBuffer commandBuffer,
    bool inverted = pConditionalRenderingBegin->flags &
       VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT;
 
-   if (addr & 0x3f || buffer->is_local) {
-      uint64_t tmp_addr;
-      VkResult result = nvk_cmd_buffer_cond_render_alloc(cmd, &tmp_addr);
-      if (result != VK_SUCCESS) {
-         vk_command_buffer_set_error(&cmd->vk, result);
-         return;
-      }
-
-      struct nv_push *p = nvk_cmd_buffer_push(cmd, 12);
-      P_MTHD(p, NV90B5, OFFSET_IN_UPPER);
-      P_NV90B5_OFFSET_IN_UPPER(p, addr >> 32);
-      P_NV90B5_OFFSET_IN_LOWER(p, addr & 0xffffffff);
-      P_NV90B5_OFFSET_OUT_UPPER(p, tmp_addr >> 32);
-      P_NV90B5_OFFSET_OUT_LOWER(p, tmp_addr & 0xffffffff);
-      P_NV90B5_PITCH_IN(p, 4);
-      P_NV90B5_PITCH_OUT(p, 4);
-      P_NV90B5_LINE_LENGTH_IN(p, 4);
-      P_NV90B5_LINE_COUNT(p, 1);
-
-      P_IMMD(p, NV90B5, LAUNCH_DMA, {
-            .data_transfer_type = DATA_TRANSFER_TYPE_PIPELINED,
-            .multi_line_enable = MULTI_LINE_ENABLE_TRUE,
-            .flush_enable = FLUSH_ENABLE_TRUE,
-            .src_memory_layout = SRC_MEMORY_LAYOUT_PITCH,
-            .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
-         });
-      addr = tmp_addr;
+   /* From the Vulkan 1.3.280 spec:
+    *
+    *    "If the 32-bit value at offset in buffer memory is zero,
+    *     then the rendering commands are discarded,
+    *     otherwise they are executed as normal."
+    *
+    * The hardware compare a 64-bit value, as such we are required to copy it.
+    */
+   uint64_t tmp_addr;
+   VkResult result = nvk_cmd_buffer_cond_render_alloc(cmd, &tmp_addr);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd->vk, result);
+      return;
    }
 
-   struct nv_push *p = nvk_cmd_buffer_push(cmd, 12);
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 26);
+
+   P_MTHD(p, NV90B5, OFFSET_IN_UPPER);
+   P_NV90B5_OFFSET_IN_UPPER(p, addr >> 32);
+   P_NV90B5_OFFSET_IN_LOWER(p, addr & 0xffffffff);
+   P_NV90B5_OFFSET_OUT_UPPER(p, tmp_addr >> 32);
+   P_NV90B5_OFFSET_OUT_LOWER(p, tmp_addr & 0xffffffff);
+   P_NV90B5_PITCH_IN(p, 4);
+   P_NV90B5_PITCH_OUT(p, 4);
+   P_NV90B5_LINE_LENGTH_IN(p, 4);
+   P_NV90B5_LINE_COUNT(p, 1);
+
+   P_IMMD(p, NV90B5, SET_REMAP_COMPONENTS, {
+      .dst_x = DST_X_SRC_X,
+      .dst_y = DST_Y_SRC_X,
+      .dst_z = DST_Z_NO_WRITE,
+      .dst_w = DST_W_NO_WRITE,
+      .component_size = COMPONENT_SIZE_ONE,
+      .num_src_components = NUM_SRC_COMPONENTS_ONE,
+      .num_dst_components = NUM_DST_COMPONENTS_TWO,
+   });
+
+   P_IMMD(p, NV90B5, LAUNCH_DMA, {
+      .data_transfer_type = DATA_TRANSFER_TYPE_PIPELINED,
+      .multi_line_enable = MULTI_LINE_ENABLE_TRUE,
+      .flush_enable = FLUSH_ENABLE_TRUE,
+      .src_memory_layout = SRC_MEMORY_LAYOUT_PITCH,
+      .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
+      .remap_enable = REMAP_ENABLE_TRUE,
+   });
+
    P_MTHD(p, NV9097, SET_RENDER_ENABLE_A);
-   P_NV9097_SET_RENDER_ENABLE_A(p, addr >> 32);
-   P_NV9097_SET_RENDER_ENABLE_B(p, addr & 0xfffffff0);
+   P_NV9097_SET_RENDER_ENABLE_A(p, tmp_addr >> 32);
+   P_NV9097_SET_RENDER_ENABLE_B(p, tmp_addr & 0xfffffff0);
    P_NV9097_SET_RENDER_ENABLE_C(p, inverted ? MODE_RENDER_IF_EQUAL : MODE_RENDER_IF_NOT_EQUAL);
 
    P_MTHD(p, NV90C0, SET_RENDER_ENABLE_A);
-   P_NV90C0_SET_RENDER_ENABLE_A(p, addr >> 32);
-   P_NV90C0_SET_RENDER_ENABLE_B(p, addr & 0xfffffff0);
+   P_NV90C0_SET_RENDER_ENABLE_A(p, tmp_addr >> 32);
+   P_NV90C0_SET_RENDER_ENABLE_B(p, tmp_addr & 0xfffffff0);
    P_NV90C0_SET_RENDER_ENABLE_C(p, inverted ? MODE_RENDER_IF_EQUAL : MODE_RENDER_IF_NOT_EQUAL);
 }
 

@@ -47,7 +47,8 @@ void add_subdword_operand(ra_ctx& ctx, aco_ptr<Instruction>& instr, unsigned idx
                           RegClass rc);
 std::pair<unsigned, unsigned>
 get_subdword_definition_info(Program* program, const aco_ptr<Instruction>& instr, RegClass rc);
-void add_subdword_definition(Program* program, aco_ptr<Instruction>& instr, PhysReg reg);
+void add_subdword_definition(Program* program, aco_ptr<Instruction>& instr, PhysReg reg,
+                             bool allow_16bit_write);
 
 struct assignment {
    PhysReg reg;
@@ -62,7 +63,7 @@ struct assignment {
    };
    uint32_t affinity = 0;
    assignment() = default;
-   assignment(PhysReg reg_, RegClass rc_) : reg(reg_), rc(rc_), assigned(-1) {}
+   assignment(PhysReg reg_, RegClass rc_) : reg(reg_), rc(rc_) { assigned = true; }
    void set(const Definition& def)
    {
       assigned = true;
@@ -96,9 +97,9 @@ struct ra_ctx {
          renames(program->blocks.size()), policy(policy_)
    {
       pseudo_dummy.reset(
-         create_instruction<Instruction>(aco_opcode::p_parallelcopy, Format::PSEUDO, 0, 0));
+         create_instruction<Pseudo_instruction>(aco_opcode::p_parallelcopy, Format::PSEUDO, 0, 0));
       phi_dummy.reset(
-         create_instruction<Instruction>(aco_opcode::p_linear_phi, Format::PSEUDO, 0, 0));
+         create_instruction<Pseudo_instruction>(aco_opcode::p_linear_phi, Format::PSEUDO, 0, 0));
       sgpr_limit = get_addr_sgpr_from_waves(program, program->min_waves);
       vgpr_limit = get_addr_vgpr_from_waves(program, program->min_waves);
    }
@@ -678,7 +679,8 @@ get_subdword_definition_info(Program* program, const aco_ptr<Instruction>& instr
 }
 
 void
-add_subdword_definition(Program* program, aco_ptr<Instruction>& instr, PhysReg reg)
+add_subdword_definition(Program* program, aco_ptr<Instruction>& instr, PhysReg reg,
+                        bool allow_16bit_write)
 {
    if (instr->isPseudo())
       return;
@@ -687,7 +689,7 @@ add_subdword_definition(Program* program, aco_ptr<Instruction>& instr, PhysReg r
       amd_gfx_level gfx_level = program->gfx_level;
       assert(instr->definitions[0].bytes() <= 2);
 
-      if (reg.byte() == 0 && instr_is_16bit(gfx_level, instr->opcode))
+      if (reg.byte() == 0 && allow_16bit_write && instr_is_16bit(gfx_level, instr->opcode))
          return;
 
       /* use SDWA */
@@ -695,6 +697,8 @@ add_subdword_definition(Program* program, aco_ptr<Instruction>& instr, PhysReg r
          convert_to_SDWA(gfx_level, instr);
          return;
       }
+
+      assert(allow_16bit_write);
 
       if (instr->opcode == aco_opcode::v_fma_mixlo_f16) {
          instr->opcode = aco_opcode::v_fma_mixhi_f16;
@@ -838,7 +842,7 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file,
       assert(ctx.assignments.size() == ctx.program->peekAllocationId());
 
       /* check if we moved an operand */
-      bool first = true;
+      bool first[2] = {true, true};
       bool fill = true;
       for (unsigned i = 0; i < instr->operands.size(); i++) {
          Operand& op = instr->operands[i];
@@ -846,25 +850,31 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file,
             continue;
          if (op.tempId() == copy.first.tempId()) {
             /* only rename precolored operands if the copy-location matches */
-            if ((flags & rename_precolored_ops) && op.isFixed() &&
-                op.physReg() != copy.second.physReg())
+            bool omit_renaming = (flags & rename_precolored_ops) && op.isFixed() &&
+                                 op.physReg() != copy.second.physReg();
+
+            /* Omit renaming in some cases for p_create_vector in order to avoid
+             * unnecessary shuffle code. */
+            if (!(flags & rename_not_killed_ops) && !op.isKillBeforeDef()) {
+               omit_renaming = true;
+               for (std::pair<Operand, Definition>& pc : parallelcopies) {
+                  PhysReg def_reg = pc.second.physReg();
+                  omit_renaming &= def_reg > copy.first.physReg()
+                                      ? (copy.first.physReg() + copy.first.size() <= def_reg.reg())
+                                      : (def_reg + pc.second.size() <= copy.first.physReg().reg());
+               }
+            }
+
+            /* Fix the kill flags */
+            if (first[omit_renaming])
+               op.setFirstKill(omit_renaming || op.isKill());
+            else
+               op.setKill(omit_renaming || op.isKill());
+            first[omit_renaming] = false;
+
+            if (omit_renaming)
                continue;
 
-            bool omit_renaming = !(flags & rename_not_killed_ops) && !op.isKillBeforeDef();
-            for (std::pair<Operand, Definition>& pc : parallelcopies) {
-               PhysReg def_reg = pc.second.physReg();
-               omit_renaming &= def_reg > copy.first.physReg()
-                                   ? (copy.first.physReg() + copy.first.size() <= def_reg.reg())
-                                   : (def_reg + pc.second.size() <= copy.first.physReg().reg());
-            }
-            if (omit_renaming) {
-               if (first)
-                  op.setFirstKill(true);
-               else
-                  op.setKill(true);
-               first = false;
-               continue;
-            }
             op.setTemp(copy.second.getTemp());
             op.setFixed(copy.second.physReg());
 
@@ -1913,6 +1923,7 @@ handle_pseudo(ra_ctx& ctx, const RegisterFile& reg_file, Instruction* instr)
    if (!needs_scratch_reg)
       return;
 
+   instr->pseudo().needs_scratch_reg = true;
    instr->pseudo().tmp_in_scc = reg_file[scc];
 
    int reg = ctx.max_used_sgpr;
@@ -1936,19 +1947,6 @@ bool
 operand_can_use_reg(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr, unsigned idx, PhysReg reg,
                     RegClass rc)
 {
-   bool is_writelane = instr->opcode == aco_opcode::v_writelane_b32 ||
-                       instr->opcode == aco_opcode::v_writelane_b32_e64;
-   if (gfx_level <= GFX9 && is_writelane && idx <= 1) {
-      /* v_writelane_b32 can take two sgprs but only if one is m0. */
-      bool is_other_sgpr =
-         instr->operands[!idx].isTemp() &&
-         (!instr->operands[!idx].isFixed() || instr->operands[!idx].physReg() != m0);
-      if (is_other_sgpr && instr->operands[!idx].tempId() != instr->operands[idx].tempId()) {
-         instr->operands[idx].setFixed(m0);
-         return reg == m0;
-      }
-   }
-
    if (reg.byte()) {
       unsigned stride = get_subdword_operand_stride(gfx_level, instr, idx, rc);
       if (reg.byte() % stride)
@@ -2844,6 +2842,18 @@ register_allocation(Program* program, std::vector<IDSet>& live_out_per_block, ra
                operand.isFixed() && ctx.assignments[operand.tempId()].reg != operand.physReg();
          }
 
+         bool is_writelane = instr->opcode == aco_opcode::v_writelane_b32 ||
+                             instr->opcode == aco_opcode::v_writelane_b32_e64;
+         if (program->gfx_level <= GFX9 && is_writelane && instr->operands[0].isTemp() &&
+             instr->operands[1].isTemp()) {
+            /* v_writelane_b32 can take two sgprs but only if one is m0. */
+            if (ctx.assignments[instr->operands[0].tempId()].reg != m0 &&
+                ctx.assignments[instr->operands[1].tempId()].reg != m0) {
+               instr->operands[0].setFixed(m0);
+               fixed = true;
+            }
+         }
+
          if (fixed)
             handle_fixed_operands(ctx, register_file, parallelcopy, instr);
 
@@ -2979,7 +2989,8 @@ register_allocation(Program* program, std::vector<IDSet>& live_out_per_block, ra
                   PhysReg reg = get_reg(ctx, register_file, tmp, parallelcopy, instr);
                   definition->setFixed(reg);
                   if (reg.byte() || register_file.test(reg, 4)) {
-                     add_subdword_definition(program, instr, reg);
+                     bool allow_16bit_write = reg.byte() % 2 == 0 && !register_file.test(reg, 2);
+                     add_subdword_definition(program, instr, reg, allow_16bit_write);
                      definition = &instr->definitions[i]; /* add_subdword_definition can invalidate
                                                              the reference */
                   }
@@ -3068,6 +3079,7 @@ register_allocation(Program* program, std::vector<IDSet>& live_out_per_block, ra
 
                handle_pseudo(ctx, tmp_file, pc.get());
             } else {
+               pc->needs_scratch_reg = sgpr_operands_alias_defs || linear_vgpr;
                pc->tmp_in_scc = false;
             }
 

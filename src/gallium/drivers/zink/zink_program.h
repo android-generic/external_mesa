@@ -133,6 +133,8 @@ uint32_t hash_gfx_input_dynamic(const void *key);
 
 void
 zink_gfx_program_compile_queue(struct zink_context *ctx, struct zink_gfx_pipeline_cache_entry *pc_entry);
+void
+zink_program_finish(struct zink_context *ctx, struct zink_program *pg);
 
 static inline unsigned
 get_primtype_idx(enum mesa_prim mode)
@@ -413,6 +415,21 @@ zink_can_use_pipeline_libs(const struct zink_context *ctx)
           /* TODO: is sample shading even possible to handle with GPL? */
           !ctx->gfx_stages[MESA_SHADER_FRAGMENT]->info.fs.uses_sample_shading &&
           !zink_get_fs_base_key(ctx)->fbfetch_ms &&
+          !ctx->gfx_pipeline_state.force_persample_interp &&
+          !ctx->gfx_pipeline_state.min_samples &&
+          !ctx->is_generated_gs_bound;
+}
+
+/* stricter requirements */
+ALWAYS_INLINE static bool
+zink_can_use_shader_objects(const struct zink_context *ctx)
+{
+   return
+          /* TODO: if there's ever a dynamic render extension with input attachments */
+          !ctx->gfx_pipeline_state.render_pass &&
+          ZINK_SHADER_KEY_OPTIMAL_IS_DEFAULT(ctx->gfx_pipeline_state.optimal_key) &&
+          /* TODO: is sample shading even possible to handle with GPL? */
+          !ctx->gfx_stages[MESA_SHADER_FRAGMENT]->info.fs.uses_sample_shading &&
           !ctx->gfx_pipeline_state.force_persample_interp &&
           !ctx->gfx_pipeline_state.min_samples &&
           !ctx->is_generated_gs_bound;

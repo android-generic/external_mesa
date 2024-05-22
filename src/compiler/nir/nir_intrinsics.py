@@ -1714,6 +1714,9 @@ store("tlb_sample_color_v3d", [1], [BASE, COMPONENT, SRC_TYPE], [])
 # the target framebuffer
 intrinsic("load_fb_layers_v3d", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# V3D-specific intrinsic to load W coordinate from the fragment shader payload
+intrinsic("load_fep_w_v3d", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Load a bindless sampler handle mapping a binding table sampler.
 intrinsic("load_sampler_handle_agx", [1], 1, [],
           flags=[CAN_ELIMINATE, CAN_REORDER],
@@ -2022,11 +2025,15 @@ system_value("leaf_procedural_intel", 1, bit_sizes=[1])
 system_value("btd_shader_type_intel", 1)
 system_value("ray_query_global_intel", 1, bit_sizes=[64])
 
-# Source 0: A matrix (type specified by SRC_TYPE)
-# Source 1: B matrix (type specified by SRC_TYPE)
-# Source 2: Accumulator matrix (type specified by DEST_TYPE)
+# Source 0: Accumulator matrix (type specified by DEST_TYPE)
+# Source 1: A matrix (type specified by SRC_TYPE)
+# Source 2: B matrix (type specified by SRC_TYPE)
 #
 # The matrix parameters are the slices owned by the invocation.
+#
+# The accumulator is source 0 because that is the source the intrinsic
+# infrastructure in NIR uses to determine the number of components in the
+# result.
 intrinsic("dpas_intel", dest_comp=0, src_comp=[0, 0, 0],
           indices=[DEST_TYPE, SRC_TYPE, SATURATE, CMAT_SIGNED_MASK, SYSTOLIC_DEPTH, REPEAT_COUNT],
           flags=[CAN_ELIMINATE])

@@ -6052,7 +6052,9 @@ batch_emit_fast_color_dummy_blit(struct iris_batch *batch)
 #if GFX_VERx10 >= 125
    iris_emit_cmd(batch, GENX(XY_FAST_COLOR_BLT), blt) {
       blt.DestinationBaseAddress = batch->screen->workaround_address;
-      blt.DestinationMOCS = batch->screen->isl_dev.mocs.blitter_dst;
+      blt.DestinationMOCS = iris_mocs(batch->screen->workaround_address.bo,
+                                      &batch->screen->isl_dev,
+                                      ISL_SURF_USAGE_BLITTER_DST_BIT);
       blt.DestinationPitch = 63;
       blt.DestinationX2 = 1;
       blt.DestinationY2 = 4;
@@ -7135,7 +7137,12 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       }
    }
 
+#if GFX_VERx10 >= 125
+   /* This is only used on >= gfx125 for dynamic 3DSTATE_TE emission
+    * related workarounds.
+    */
    bool program_needs_wa_14015055625 = false;
+#endif
 
 #if INTEL_WA_14015055625_GFX_VER
    /* Check if FS stage will use primitive ID overrides for Wa_14015055625. */
@@ -7239,16 +7246,14 @@ iris_upload_dirty_render_state(struct iris_context *ice,
                             GENX(3DSTATE_PS_length));
             iris_emit_merge(batch, shader_psx, psx_state,
                             GENX(3DSTATE_PS_EXTRA_length));
-         } else if (stage == MESA_SHADER_TESS_EVAL &&
-                    intel_needs_workaround(batch->screen->devinfo, 14015055625) &&
-                    !program_needs_wa_14015055625) {
-            /* This program doesn't require Wa_14015055625, so we can enable
-             * a Tessellation Distribution Mode.
-             */
 #if GFX_VERx10 >= 125
+         } else if (stage == MESA_SHADER_TESS_EVAL) {
             uint32_t te_state[GENX(3DSTATE_TE_length)] = { 0 };
             iris_pack_command(GENX(3DSTATE_TE), te_state, te) {
-               if (intel_needs_workaround(batch->screen->devinfo, 22012699309))
+               if (intel_needs_workaround(screen->devinfo, 14015055625) &&
+                   program_needs_wa_14015055625)
+                  te.TessellationDistributionMode = TEDMODE_OFF;
+               else if (intel_needs_workaround(screen->devinfo, 22012699309))
                   te.TessellationDistributionMode = TEDMODE_RR_STRICT;
                else
                   te.TessellationDistributionMode = TEDMODE_RR_FREE;
@@ -7273,7 +7278,13 @@ iris_upload_dirty_render_state(struct iris_context *ice,
             switch (stage) {
             case MESA_SHADER_VERTEX:    MERGE_SCRATCH_ADDR(3DSTATE_VS); break;
             case MESA_SHADER_TESS_CTRL: MERGE_SCRATCH_ADDR(3DSTATE_HS); break;
-            case MESA_SHADER_TESS_EVAL: MERGE_SCRATCH_ADDR(3DSTATE_DS); break;
+            case MESA_SHADER_TESS_EVAL: {
+               uint32_t *shader_ds = (uint32_t *) shader->derived_data;
+               uint32_t *shader_te = shader_ds + GENX(3DSTATE_DS_length);
+               iris_batch_emit(batch, shader_te, 4 * GENX(3DSTATE_TE_length));
+               MERGE_SCRATCH_ADDR(3DSTATE_DS);
+               break;
+            }
             case MESA_SHADER_GEOMETRY:  MERGE_SCRATCH_ADDR(3DSTATE_GS); break;
             }
          } else {
@@ -9526,10 +9537,12 @@ iris_emit_raw_pipe_control(struct iris_batch *batch,
    /* "GPGPU specific workarounds" (both post-sync and flush) ------------ */
 
    if (IS_COMPUTE_PIPELINE(batch)) {
-      if ((GFX_VER == 9 || GFX_VER == 11) &&
-          (flags & PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE)) {
-         /* Project: SKL, ICL / Argument: Tex Invalidate
-          * "Requires stall bit ([20] of DW) set for all GPGPU Workloads."
+      if (GFX_VER >= 9 && (flags & PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE)) {
+         /* SKL PRMs, Volume 7: 3D-Media-GPGPU, Programming Restrictions for
+          * PIPE_CONTROL, Flush Types:
+          *   "Requires stall bit ([20] of DW) set for all GPGPU Workloads."
+          * For newer platforms this is documented in the PIPE_CONTROL
+          * instruction page.
           */
          flags |= PIPE_CONTROL_CS_STALL;
       }

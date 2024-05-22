@@ -68,7 +68,9 @@ static void radeon_enc_op_preset(struct radeon_encoder *enc)
 
 static void radeon_enc_quality_params(struct radeon_encoder *enc)
 {
-   enc->enc_pic.quality_params.vbaq_mode = enc->enc_pic.quality_modes.vbaq_mode;
+   enc->enc_pic.quality_params.vbaq_mode =
+      enc->enc_pic.rc_session_init.rate_control_method != RENCODE_RATE_CONTROL_METHOD_NONE ?
+      enc->enc_pic.quality_modes.vbaq_mode : 0;
    enc->enc_pic.quality_params.scene_change_sensitivity = 0;
    enc->enc_pic.quality_params.scene_change_min_idr_interval = 0;
    enc->enc_pic.quality_params.two_pass_search_center_map_mode =
@@ -515,7 +517,7 @@ static void encode(struct radeon_encoder *enc)
    if (enc->need_rate_control) {
       i = 0;
       do {
-         enc->enc_pic.temporal_id = i;
+         enc->enc_pic.layer_sel.temporal_layer_index = i;
          enc->layer_select(enc);
          enc->rc_layer_init(enc);
       } while (++i < enc->enc_pic.num_temporal_layers);

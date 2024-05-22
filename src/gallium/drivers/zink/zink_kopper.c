@@ -561,6 +561,8 @@ kopper_acquire(struct zink_screen *screen, struct zink_resource *res, uint64_t t
    if (cdt->swapchain->images[res->obj->dt_idx].readback)
       zink_resource(cdt->swapchain->images[res->obj->dt_idx].readback)->valid = false;
    res->obj->image = cdt->swapchain->images[res->obj->dt_idx].image;
+   if (!cdt->age_locked)
+      zink_kopper_update_last_written(res);
    cdt->swapchain->images[res->obj->dt_idx].acquired = false;
    if (!cdt->swapchain->images[res->obj->dt_idx].init) {
       /* swapchain images are initially in the UNDEFINED layout */
@@ -792,7 +794,7 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res)
    cpi->res = res;
    cpi->swapchain = cdt->swapchain;
    cpi->indefinite_acquire = res->obj->indefinite_acquire;
-   res->obj->last_dt_idx = cpi->image = res->obj->dt_idx;
+   cpi->image = res->obj->dt_idx;
    cpi->info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
    cpi->info.pNext = NULL;
    cpi->info.waitSemaphoreCount = 1;
@@ -812,11 +814,13 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res)
     *  * Any other color buffers' ages are incremented by 1 if
     *    their age was previously greater than 0.
     */
-   for (int i = 0; i < cdt->swapchain->num_images; i++) {
-       if (i == res->obj->dt_idx)
-           cdt->swapchain->images[i].age = 1;
-       else if (cdt->swapchain->images[i].age > 0)
-           cdt->swapchain->images[i].age += 1;
+   if (!cdt->age_locked) {
+      for (int i = 0; i < cdt->swapchain->num_images; i++) {
+            if (i == res->obj->dt_idx)
+               cdt->swapchain->images[i].age = 1;
+            else if (cdt->swapchain->images[i].age > 0)
+               cdt->swapchain->images[i].age += 1;
+      }
    }
    if (util_queue_is_initialized(&screen->flush_queue)) {
       p_atomic_inc(&cpi->swapchain->async_presents);
@@ -830,6 +834,12 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res)
    res->obj->indefinite_acquire = false;
    cdt->swapchain->images[res->obj->dt_idx].acquired = false;
    res->obj->dt_idx = UINT32_MAX;
+}
+
+void
+zink_kopper_update_last_written(struct zink_resource *res)
+{
+   res->obj->last_dt_idx = res->obj->dt_idx;
 }
 
 static void
@@ -873,14 +883,30 @@ zink_kopper_acquire_readback(struct zink_context *ctx, struct zink_resource *res
    if (++cdt->readback_counter >= ZINK_READBACK_THRESHOLD)
       kopper_ensure_readback(screen, res);
    while (res->obj->dt_idx != last_dt_idx) {
-      if (res->obj->dt_idx != UINT32_MAX && !zink_kopper_present_readback(ctx, res))
-         break;
+      cdt->age_locked = true;
+      if (res->obj->dt_idx != UINT32_MAX) {
+         if (!zink_kopper_present_readback(ctx, res))
+            break;
+      } else if (util_queue_is_initialized(&screen->flush_queue)) {
+         /* AcquireNextImageKHR and QueuePresentKHR both access the swapchain, and
+          * if res->obj->dt_idx == UINT32_MAX then zink_kopper_present_readback is
+          * not called and we don't wait for the cdt->swapchain->present_fence.
+          * Still, a kopper_present might have been called in another thread, like
+          * e.g. with spec@!opengl 1.1@read-front, so we have to wait until the
+          * last call to QueuePresentKHR is finished to avoid an
+          *    UNASSIGNED-Threading-MultipleThreads-Write
+          * validation error that indicats a race condition when accessing the swapchain.
+          */
+         util_queue_fence_wait(&cdt->swapchain->present_fence);
+      }
+      cdt->age_locked = true;
       do {
          ret = kopper_acquire(screen, res, 0);
       } while (!is_swapchain_kill(ret) && (ret == VK_NOT_READY || ret == VK_TIMEOUT));
       if (is_swapchain_kill(ret)) {
          kill_swapchain(ctx, res);
          *readback = NULL;
+         cdt->age_locked = false;
          return false;
       }
    }
@@ -936,6 +962,10 @@ zink_kopper_present_readback(struct zink_context *ctx, struct zink_resource *res
    simple_mtx_lock(&screen->semaphores_lock);
    util_dynarray_append(&screen->semaphores, VkSemaphore, acquire);
    simple_mtx_unlock(&screen->semaphores_lock);
+
+   struct kopper_displaytarget *cdt = res->obj->dt;
+   cdt->age_locked = false;
+
    return zink_screen_handle_vkresult(screen, error);
 }
 
@@ -1042,8 +1072,13 @@ zink_kopper_set_swap_interval(struct pipe_screen *pscreen, struct pipe_resource 
 
    zink_kopper_set_present_mode_for_interval(cdt, interval);
 
-   if (old_present_mode != cdt->present_mode)
-      update_swapchain(screen, cdt, cdt->caps.currentExtent.width, cdt->caps.currentExtent.height);
+   if (old_present_mode == cdt->present_mode)
+      return;
+   VkResult ret = update_swapchain(screen, cdt, cdt->caps.currentExtent.width, cdt->caps.currentExtent.height);
+   if (ret == VK_SUCCESS)
+      return;
+   cdt->present_mode = old_present_mode;
+   mesa_loge("zink: failed to set swap interval!");
 }
 
 int

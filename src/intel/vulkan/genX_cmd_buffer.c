@@ -2928,6 +2928,16 @@ genX(batch_emit_pipe_control_write)(struct anv_batch *batch,
       };
    }
 
+   /* SKL PRMs, Volume 7: 3D-Media-GPGPU, Programming Restrictions for
+    * PIPE_CONTROL, Flush Types:
+    *   "Requires stall bit ([20] of DW) set for all GPGPU Workloads."
+    * For newer platforms this is documented in the PIPE_CONTROL instruction
+    * page.
+    */
+   if (current_pipeline == GPGPU &&
+       (bits & ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT))
+      bits |= ANV_PIPE_CS_STALL_BIT;
+
 #if INTEL_NEEDS_WA_1409600907
    /* Wa_1409600907: "PIPE_CONTROL with Depth Stall Enable bit must
     * be set with any PIPE_CONTROL with Depth Flush Enable bit set.
@@ -3333,6 +3343,10 @@ anv_use_generated_draws(const struct anv_cmd_buffer *cmd_buffer, uint32_t count)
    const struct anv_graphics_pipeline *pipeline =
       anv_pipeline_to_graphics(cmd_buffer->state.gfx.base.pipeline);
 
+   /* We cannot generate readable commands in protected mode. */
+   if (cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT)
+      return false;
+
    /* Limit generated draws to pipelines without HS stage. This makes things
     * simpler for implementing Wa_1306463417, Wa_16011107343.
     */
@@ -3341,6 +3355,33 @@ anv_use_generated_draws(const struct anv_cmd_buffer *cmd_buffer, uint32_t count)
       return false;
 
    return count >= device->physical->instance->generated_indirect_threshold;
+}
+
+static void
+genX(cmd_buffer_set_protected_memory)(struct anv_cmd_buffer *cmd_buffer,
+                                      bool enabled)
+{
+#if GFX_VER >= 12
+   if (enabled) {
+      anv_batch_emit(&cmd_buffer->batch, GENX(MI_SET_APPID), appid) {
+         /* Default value for single session. */
+         appid.ProtectedMemoryApplicationID = cmd_buffer->device->protected_session_id;
+         appid.ProtectedMemoryApplicationIDType = DISPLAY_APP;
+      }
+   }
+   anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
+      pc.PipeControlFlushEnable = true;
+      pc.DCFlushEnable = true;
+      pc.RenderTargetCacheFlushEnable = true;
+      pc.CommandStreamerStallEnable = true;
+      if (enabled)
+         pc.ProtectedMemoryEnable = true;
+      else
+         pc.ProtectedMemoryDisable = true;
+   }
+#else
+   unreachable("Protected content not supported");
+#endif
 }
 
 VkResult
@@ -3417,19 +3458,8 @@ genX(BeginCommandBuffer)(
 
 #if GFX_VER >= 12
    if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
-       cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT) {
-      anv_batch_emit(&cmd_buffer->batch, GENX(MI_SET_APPID), appid) {
-         /* Default value for single session. */
-         appid.ProtectedMemoryApplicationID = cmd_buffer->device->protected_session_id;
-         appid.ProtectedMemoryApplicationIDType = DISPLAY_APP;
-      }
-      anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
-         pc.CommandStreamerStallEnable = true;
-         pc.DCFlushEnable = true;
-         pc.RenderTargetCacheFlushEnable = true;
-         pc.ProtectedMemoryEnable = true;
-      }
-   }
+       cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT)
+      genX(cmd_buffer_set_protected_memory)(cmd_buffer, true);
 #endif
 
    genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
@@ -3643,14 +3673,8 @@ end_command_buffer(struct anv_cmd_buffer *cmd_buffer)
 
 #if GFX_VER >= 12
    if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
-       cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT) {
-      anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
-         pc.CommandStreamerStallEnable = true;
-         pc.DCFlushEnable = true;
-         pc.RenderTargetCacheFlushEnable = true;
-         pc.ProtectedMemoryDisable = true;
-      }
-   }
+       cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT)
+      genX(cmd_buffer_set_protected_memory)(cmd_buffer, false);
 #endif
 
    trace_intel_end_cmd_buffer(&cmd_buffer->trace, cmd_buffer->vk.level);
@@ -4072,6 +4096,7 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
           * tile cache flush to make sure any previous write is not going to
           * create WaW hazards.
           */
+         pipe_bits |= ANV_PIPE_DATA_CACHE_FLUSH_BIT;
          pipe_bits |= ANV_PIPE_TILE_CACHE_FLUSH_BIT;
          break;
       case VK_ACCESS_2_SHADER_STORAGE_READ_BIT:
@@ -4393,7 +4418,8 @@ cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
       /* There's no way of knowing if this memory barrier is related to sparse
        * buffers! This is pretty horrible.
        */
-      if (device->using_sparse && mask_is_write(src_flags))
+      if (mask_is_write(src_flags) &&
+          p_atomic_read(&device->num_sparse_resources) > 0)
          apply_sparse_flushes = true;
    }
 
@@ -5240,7 +5266,8 @@ emit_indirect_draws(struct anv_cmd_buffer *cmd_buffer,
    UNUSED const struct intel_device_info *devinfo = cmd_buffer->device->info;
    UNUSED const bool aligned_stride =
       (indirect_data_stride == 0 ||
-       indirect_data_stride == sizeof(VkDrawIndirectCommand));
+       (!indexed && indirect_data_stride == sizeof(VkDrawIndirectCommand)) ||
+       (indexed && indirect_data_stride == sizeof(VkDrawIndexedIndirectCommand)));
    UNUSED const bool execute_indirect_supported =
       execute_indirect_draw_supported(cmd_buffer);
 
@@ -5289,7 +5316,7 @@ emit_indirect_draws(struct anv_cmd_buffer *cmd_buffer,
 #if GFX_VERx10 >= 125
          genX(emit_breakpoint)(&cmd_buffer->batch, cmd_buffer->device, true);
          anv_batch_emit(&cmd_buffer->batch, GENX(EXECUTE_INDIRECT_DRAW), ind) {
-            ind.ArgumentFormat             = DRAW;
+            ind.ArgumentFormat             = indexed ? DRAWINDEXED : DRAW;
             ind.TBIMREnabled               = cmd_buffer->state.gfx.dyn_state.use_tbimr;
             ind.PredicateEnable            =
                cmd_buffer->state.conditional_render_enabled;
@@ -8249,86 +8276,6 @@ cmd_buffer_mark_attachment_written(struct anv_cmd_buffer *cmd_buffer,
    }
 }
 
-static enum blorp_filter
-vk_to_blorp_resolve_mode(VkResolveModeFlagBits vk_mode)
-{
-   switch (vk_mode) {
-   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
-      return BLORP_FILTER_SAMPLE_0;
-   case VK_RESOLVE_MODE_AVERAGE_BIT:
-      return BLORP_FILTER_AVERAGE;
-   case VK_RESOLVE_MODE_MIN_BIT:
-      return BLORP_FILTER_MIN_SAMPLE;
-   case VK_RESOLVE_MODE_MAX_BIT:
-      return BLORP_FILTER_MAX_SAMPLE;
-   default:
-      return BLORP_FILTER_NONE;
-   }
-}
-
-static void
-cmd_buffer_resolve_msaa_attachment(struct anv_cmd_buffer *cmd_buffer,
-                                   const struct anv_attachment *att,
-                                   VkImageLayout layout,
-                                   VkImageAspectFlagBits aspect)
-{
-   struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
-   const struct anv_image_view *src_iview = att->iview;
-   const struct anv_image_view *dst_iview = att->resolve_iview;
-
-   enum isl_aux_usage src_aux_usage =
-      anv_layout_to_aux_usage(cmd_buffer->device->info,
-                              src_iview->image, aspect,
-                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                              layout,
-                              cmd_buffer->queue_family->queueFlags);
-
-   enum isl_aux_usage dst_aux_usage =
-      anv_layout_to_aux_usage(cmd_buffer->device->info,
-                              dst_iview->image, aspect,
-                              VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                              att->resolve_layout,
-                              cmd_buffer->queue_family->queueFlags);
-
-   enum blorp_filter filter = vk_to_blorp_resolve_mode(att->resolve_mode);
-
-   const VkRect2D render_area = gfx->render_area;
-   if (gfx->view_mask == 0) {
-      anv_image_msaa_resolve(cmd_buffer,
-                             src_iview->image, src_aux_usage,
-                             src_iview->planes[0].isl.base_level,
-                             src_iview->planes[0].isl.base_array_layer,
-                             dst_iview->image, dst_aux_usage,
-                             dst_iview->planes[0].isl.base_level,
-                             dst_iview->planes[0].isl.base_array_layer,
-                             aspect,
-                             render_area.offset.x, render_area.offset.y,
-                             render_area.offset.x, render_area.offset.y,
-                             render_area.extent.width,
-                             render_area.extent.height,
-                             gfx->layer_count, filter);
-   } else {
-      uint32_t res_view_mask = gfx->view_mask;
-      while (res_view_mask) {
-         int i = u_bit_scan(&res_view_mask);
-
-         anv_image_msaa_resolve(cmd_buffer,
-                                src_iview->image, src_aux_usage,
-                                src_iview->planes[0].isl.base_level,
-                                src_iview->planes[0].isl.base_array_layer + i,
-                                dst_iview->image, dst_aux_usage,
-                                dst_iview->planes[0].isl.base_level,
-                                dst_iview->planes[0].isl.base_array_layer + i,
-                                aspect,
-                                render_area.offset.x, render_area.offset.y,
-                                render_area.offset.x, render_area.offset.y,
-                                render_area.extent.width,
-                                render_area.extent.height,
-                                1, filter);
-      }
-   }
-}
-
 void genX(CmdEndRendering)(
     VkCommandBuffer                             commandBuffer)
 {
@@ -8370,8 +8317,9 @@ void genX(CmdEndRendering)(
                                 "MSAA resolve");
    }
 
-   if (gfx->depth_att.resolve_mode != VK_RESOLVE_MODE_NONE ||
-       gfx->stencil_att.resolve_mode != VK_RESOLVE_MODE_NONE) {
+   if (!(gfx->rendering_flags & VK_RENDERING_SUSPENDING_BIT) &&
+       (gfx->depth_att.resolve_mode != VK_RESOLVE_MODE_NONE ||
+        gfx->stencil_att.resolve_mode != VK_RESOLVE_MODE_NONE)) {
       /* We are about to do some MSAA resolves.  We need to flush so that the
        * result of writes to the MSAA depth attachments show up in the sampler
        * when we blit to the single-sampled resolve target.
@@ -8388,8 +8336,8 @@ void genX(CmdEndRendering)(
           (gfx->rendering_flags & VK_RENDERING_SUSPENDING_BIT))
          continue;
 
-      cmd_buffer_resolve_msaa_attachment(cmd_buffer, att, att->layout,
-                                         VK_IMAGE_ASPECT_COLOR_BIT);
+      anv_attachment_msaa_resolve(cmd_buffer, att, att->layout,
+                                  VK_IMAGE_ASPECT_COLOR_BIT);
    }
 
    if (gfx->depth_att.resolve_mode != VK_RESOLVE_MODE_NONE &&
@@ -8407,9 +8355,9 @@ void genX(CmdEndRendering)(
                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                               false /* will_full_fast_clear */);
 
-      cmd_buffer_resolve_msaa_attachment(cmd_buffer, &gfx->depth_att,
-                                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                         VK_IMAGE_ASPECT_DEPTH_BIT);
+      anv_attachment_msaa_resolve(cmd_buffer, &gfx->depth_att,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  VK_IMAGE_ASPECT_DEPTH_BIT);
 
       /* Transition the source back to the original layout.  This seems a bit
        * inefficient but, since HiZ resolves aren't destructive, going from
@@ -8425,9 +8373,9 @@ void genX(CmdEndRendering)(
 
    if (gfx->stencil_att.resolve_mode != VK_RESOLVE_MODE_NONE &&
        !(gfx->rendering_flags & VK_RENDERING_SUSPENDING_BIT)) {
-      cmd_buffer_resolve_msaa_attachment(cmd_buffer, &gfx->stencil_att,
-                                         gfx->stencil_att.layout,
-                                         VK_IMAGE_ASPECT_STENCIL_BIT);
+      anv_attachment_msaa_resolve(cmd_buffer, &gfx->stencil_att,
+                                  gfx->stencil_att.layout,
+                                  VK_IMAGE_ASPECT_STENCIL_BIT);
    }
 
 

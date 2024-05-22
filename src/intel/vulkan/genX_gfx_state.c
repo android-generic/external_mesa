@@ -68,7 +68,7 @@ static const uint32_t genX(vk_to_intel_blend_op)[] = {
 static void
 genX(streamout_prologue)(struct anv_cmd_buffer *cmd_buffer)
 {
-#if GFX_VERx10 >= 120
+#if INTEL_WA_16013994831_GFX_VER
    /* Wa_16013994831 - Disable preemption during streamout, enable back
     * again if XFB not used by the current pipeline.
     *
@@ -290,6 +290,15 @@ genX(rasterization_mode)(VkPolygonMode raster_mode,
       *api_mode = DX101;
       *msaa_rasterization_enable = true;
    }
+}
+
+static bool
+is_src1_blend_factor(enum GENX(3D_Color_Buffer_Blend_Factor) factor)
+{
+   return factor == BLENDFACTOR_SRC1_COLOR ||
+          factor == BLENDFACTOR_SRC1_ALPHA ||
+          factor == BLENDFACTOR_INV_SRC1_COLOR ||
+          factor == BLENDFACTOR_INV_SRC1_ALPHA;
 }
 
 #if GFX_VERx10 == 125
@@ -998,6 +1007,16 @@ genX(cmd_buffer_flush_gfx_runtime_state)(struct anv_cmd_buffer *cmd_buffer)
                dyn->cb.attachments[i].dst_alpha_blend_factor];
          }
 
+         /* Replace and Src1 value by 1.0 if dual source blending is not
+          * enabled.
+          */
+         if (wm_prog_data && !wm_prog_data->dual_src_blend) {
+            if (is_src1_blend_factor(SourceBlendFactor))
+               SourceBlendFactor = BLENDFACTOR_ONE;
+            if (is_src1_blend_factor(DestinationBlendFactor))
+               DestinationBlendFactor = BLENDFACTOR_ONE;
+         }
+
          if (instance->intel_enable_wa_14018912822 &&
              intel_needs_workaround(cmd_buffer->device->info, 14018912822) &&
              pipeline->rasterization_samples > 1) {
@@ -1028,7 +1047,7 @@ genX(cmd_buffer_flush_gfx_runtime_state)(struct anv_cmd_buffer *cmd_buffer)
       SET(PS_BLEND, ps_blend.ColorBufferBlendEnable, GET(blend.rts[0].ColorBufferBlendEnable));
       SET(PS_BLEND, ps_blend.SourceAlphaBlendFactor, GET(blend.rts[0].SourceAlphaBlendFactor));
       SET(PS_BLEND, ps_blend.DestinationAlphaBlendFactor, gfx->alpha_blend_zero ?
-                                                          BLENDFACTOR_CONST_COLOR :
+                                                          BLENDFACTOR_CONST_ALPHA :
                                                           GET(blend.rts[0].DestinationAlphaBlendFactor));
       SET(PS_BLEND, ps_blend.SourceBlendFactor, GET(blend.rts[0].SourceBlendFactor));
       SET(PS_BLEND, ps_blend.DestinationBlendFactor, gfx->color_blend_zero ?
@@ -1189,12 +1208,12 @@ genX(cmd_buffer_flush_gfx_runtime_state)(struct anv_cmd_buffer *cmd_buffer)
        * number of viewport programmed previously was larger than what we need
        * now, no need to reemit we can just keep the old programmed values.
        */
-      if (BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_SF_CLIP) ||
+      if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_SF_CLIP) ||
           hw_state->vp_sf_clip.count < dyn->vp.viewport_count) {
          hw_state->vp_sf_clip.count = dyn->vp.viewport_count;
          BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_SF_CLIP);
       }
-      if (BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_CC) ||
+      if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_CC) ||
           hw_state->vp_cc.count < dyn->vp.viewport_count) {
          hw_state->vp_cc.count = dyn->vp.viewport_count;
          BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_CC);
@@ -1260,7 +1279,7 @@ genX(cmd_buffer_flush_gfx_runtime_state)(struct anv_cmd_buffer *cmd_buffer)
        * number of viewport programmed previously was larger than what we need
        * now, no need to reemit we can just keep the old programmed values.
        */
-      if (BITSET_SET(hw_state->dirty, ANV_GFX_STATE_SCISSOR) ||
+      if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_SCISSOR) ||
           hw_state->scissor.count < dyn->vp.scissor_count) {
          hw_state->scissor.count = dyn->vp.scissor_count;
          BITSET_SET(hw_state->dirty, ANV_GFX_STATE_SCISSOR);

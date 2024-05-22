@@ -944,9 +944,10 @@ get_properties_1_1(const struct anv_physical_device *pdevice,
    p->maxMultiviewViewCount      = 16;
    p->maxMultiviewInstanceIndex  = UINT32_MAX / 16;
    /* Our protected implementation is a memory encryption mechanism, it
-    * doesn't page fault.
+    * shouldn't page fault, but it hangs the HW so in terms of user visibility
+    * it's similar to a fault.
     */
-   p->protectedNoFault           = true;
+   p->protectedNoFault           = false;
    /* This value doesn't matter for us today as our per-stage descriptors are
     * the real limit.
     */
@@ -2165,6 +2166,14 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
       goto fail_fd;
    }
 
+   /* Disable Wa_16013994831 on Gfx12.0 because we found other cases where we
+    * need to always disable preemption :
+    *    - https://gitlab.freedesktop.org/mesa/mesa/-/issues/5963
+    *    - https://gitlab.freedesktop.org/mesa/mesa/-/issues/5662
+    */
+   if (devinfo.verx10 == 120)
+      BITSET_CLEAR(devinfo.workarounds, INTEL_WA_16013994831);
+
    if (!devinfo.has_context_isolation) {
       result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
                          "Vulkan requires context isolation for %s", devinfo.name);
@@ -2231,7 +2240,7 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
       device->flush_astc_ldr_void_extent_denorms =
          device->has_astc_ldr && !device->emu_astc_ldr;
    }
-   device->disable_fcv = intel_device_info_is_mtl(&device->info) ||
+   device->disable_fcv = device->info.verx10 >= 125 ||
                          instance->disable_fcv;
 
    result = anv_physical_device_init_heaps(device, fd);
@@ -3699,8 +3708,7 @@ VkResult anv_CreateDevice(
    pthread_mutex_destroy(&device->mutex);
  fail_vmas:
    util_vma_heap_finish(&device->vma_trtt);
-   if (!device->physical->indirect_descriptors)
-      util_vma_heap_finish(&device->vma_samplers);
+   util_vma_heap_finish(&device->vma_samplers);
    util_vma_heap_finish(&device->vma_desc);
    util_vma_heap_finish(&device->vma_hi);
    util_vma_heap_finish(&device->vma_lo);
@@ -3815,8 +3823,7 @@ void anv_DestroyDevice(
    anv_bo_cache_finish(&device->bo_cache);
 
    util_vma_heap_finish(&device->vma_trtt);
-   if (!device->physical->indirect_descriptors)
-      util_vma_heap_finish(&device->vma_samplers);
+   util_vma_heap_finish(&device->vma_samplers);
    util_vma_heap_finish(&device->vma_desc);
    util_vma_heap_finish(&device->vma_hi);
    util_vma_heap_finish(&device->vma_lo);
@@ -4057,7 +4064,7 @@ VkResult anv_AllocateMemory(
    if (mem->vk.alloc_flags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
       alloc_flags |= ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS;
 
-   if (mem->vk.alloc_flags & VK_MEMORY_PROPERTY_PROTECTED_BIT)
+   if (mem_type->propertyFlags & VK_MEMORY_PROPERTY_PROTECTED_BIT)
       alloc_flags |= ANV_BO_ALLOC_PROTECTED;
 
    /* For now, always allocated AUX-TT aligned memory, regardless of dedicated
