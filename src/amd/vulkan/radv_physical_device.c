@@ -1301,7 +1301,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdevice)
    struct vk_properties *p = &pdevice->vk.properties;
 
    /* Vulkan 1.1 */
-   strcpy(p->deviceName, pdevice->marketing_name);
+   strcpy(p->deviceName, (strlen(pdevice->instance->drirc.force_vk_devicename) > 0) ?
+            pdevice->instance->drirc.force_vk_devicename : pdevice->marketing_name);
    memcpy(p->pipelineCacheUUID, pdevice->cache_uuid, VK_UUID_SIZE);
 
    memcpy(p->deviceUUID, pdevice->device_uuid, VK_UUID_SIZE);

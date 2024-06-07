@@ -78,6 +78,7 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_VK_WSI_FORCE_BGRA8_UNORM_FIRST(false)
       DRI_CONF_VK_WSI_FORCE_SWAPCHAIN_TO_CURRENT_EXTENT(false)
       DRI_CONF_LIMIT_TRIG_INPUT_RANGE(false)
+      DRI_CONF_FORCE_VK_DEVICENAME()
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_QUALITY
@@ -1336,6 +1337,8 @@ anv_init_dri_options(struct anv_instance *instance)
             driQueryOptionb(&instance->dri_options, "no_16bit");
     instance->report_vk_1_3 =
             driQueryOptionb(&instance->dri_options, "hasvk_report_vk_1_3_version");
+    instance->force_vk_devicename =
+            driQueryOptionstr(&instance->dri_options, "force_vk_devicename");
 }
 
 VkResult anv_CreateInstance(
@@ -1586,7 +1589,8 @@ void anv_GetPhysicalDeviceProperties(
    };
 
    snprintf(pProperties->deviceName, sizeof(pProperties->deviceName),
-            "%s", pdevice->info.name);
+            "%s", (strlen(pdevice->instance->force_vk_devicename) > 0) ?
+            pdevice->instance->force_vk_devicename : pdevice->info.name);
    memcpy(pProperties->pipelineCacheUUID,
           pdevice->pipeline_cache_uuid, VK_UUID_SIZE);
 }
