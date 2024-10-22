@@ -131,7 +131,7 @@ endif
 
 gbm_backends_path = get_option('gbm-backends-path')
 if gbm_backends_path == ''
-  gbm_backends_path = join_paths(get_option('prefix'), get_option('libdir'), 'gbm')
+  gbm_backends_path = join_paths(get_option('prefix'), get_option('libdir'))
 endif
 
 with_opengl = get_option('opengl')
