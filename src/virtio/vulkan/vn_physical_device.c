@@ -2200,6 +2200,9 @@ vn_image_init_format_from_cache(
                      .combinedImageSamplerDescriptorCount;
                break;
             }
+            case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_USAGE_ANDROID:
+               /* no-op here since handled outside the cache */
+               break;
             default:
                unreachable("unexpected format props pNext");
             }
@@ -2274,6 +2277,9 @@ vn_image_store_format_in_cache(
                *((struct VkSamplerYcbcrConversionImageFormatProperties *)src);
             break;
          }
+         case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_USAGE_ANDROID:
+            /* no-op here since handled outside the cache */
+            break;
          default:
             unreachable("unexpected format props pNext");
          }
