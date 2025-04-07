@@ -86,3 +86,7 @@ files_lib_vulkan_enc = files(
   'gfxstream_vk_private.cpp',
   'GfxStreamVulkanConnection.cpp',
 )
+
+if with_platform_android
+  files_lib_vulkan_enc += files('AndroidHardwareBuffer.cpp')
+endif

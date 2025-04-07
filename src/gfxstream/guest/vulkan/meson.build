@@ -9,6 +9,10 @@ files_lib_vulkan_gfxstream = files(
   'gfxstream_vk_wsi.cpp'
 )
 
+if with_platform_android
+   files_lib_vulkan_gfxstream += files('gfxstream_vk_android.cpp')
+endif
+
 gfxstream_vk_wsi_args = []
 if with_platform_x11
    gfxstream_vk_wsi_args += '-DGFXSTREAM_VK_X11'
@@ -27,9 +31,9 @@ lib_vulkan_gfxstream = shared_library(
                          inc_vulkan_enc, inc_platform_virtgpu,
                          inc_gfxstream_vk_stubs, inc_goldfish_address_space,
                          inc_include, inc_src, inc_aemu,
-                         inc_platform_virtgpu, inc_connection_manager],
+                         inc_platform_virtgpu, inc_connection_manager] + (with_platform_android ? [inc_android_headers] : []),
    link_with: [libgfxstream_vk_stubs, libvulkan_wsi, libplatform_virtgpu,
-               libconnection_manager, libaemu],
+               libconnection_manager, libaemu] + (with_platform_android ? [libgfxstream_android] : []),
    link_args: [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections],
    link_depends: vulkan_icd_link_depends,
    dependencies: [dep_libdrm, idep_vulkan_wsi_headers,

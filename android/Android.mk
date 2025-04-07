@@ -43,6 +43,7 @@ MESA_VK_LIB_SUFFIX_panfrost := panfrost
 MESA_VK_LIB_SUFFIX_virtio := virtio
 MESA_VK_LIB_SUFFIX_swrast := lvp
 MESA_VK_LIB_SUFFIX_nouveau := nouveau
+MESA_VK_LIB_SUFFIX_gfxstream := gfxstream
 
 include $(CLEAR_VARS)
 
@@ -126,6 +127,10 @@ LIBVA_VERSION_MINOR := $(shell sed -n -e 's/va_api_minor_version *= *//p' $(LIBV
 MESON_GEN_PKGCONFIGS += libva:$(LIBVA_VERSION_MAJOR).$(LIBVA_VERSION_MINOR)
 LOCAL_SHARED_LIBRARIES += libva
 LOCAL_HEADER_LIBRARIES += libva_headers
+endif
+
+ifneq ($(filter gfxstream,$(BOARD_MESA3D_VULKAN_DRIVERS)),)
+LOCAL_HEADER_LIBRARIES += libgralloc_cb.ranchu minigbm_headers
 endif
 
 __MY_SHARED_LIBRARIES := $(LOCAL_SHARED_LIBRARIES)

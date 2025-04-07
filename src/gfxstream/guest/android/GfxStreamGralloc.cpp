@@ -12,13 +12,13 @@
 
 #include "GrallocGoldfish.h"
 #include "GrallocMinigbm.h"
-#include "android-base/properties.h"
+#include <cutils/properties.h>
 
 namespace gfxstream {
 
 Gralloc* createPlatformGralloc(int32_t descriptor) {
-    const std::string value = android::base::GetProperty("ro.hardware.gralloc", "");
-    if (value == "minigbm") {
+    char def_value[PROPERTY_VALUE_MAX] = "minigbm";
+    if (property_get("ro.hardware.gralloc", def_value, NULL) > 0) {
         auto gralloc = new MinigbmGralloc(descriptor);
         return gralloc;
     }
