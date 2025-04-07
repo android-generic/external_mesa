@@ -18,7 +18,9 @@ namespace gfxstream {
 
 Gralloc* createPlatformGralloc(int32_t descriptor) {
     char def_value[PROPERTY_VALUE_MAX] = "minigbm";
-    if (property_get("ro.hardware.gralloc", def_value, NULL) > 0) {
+    char def_value2[PROPERTY_VALUE_MAX] = "minigbm_arcvm";
+    if (property_get("ro.hardware.gralloc", def_value, NULL) > 0 ||
+     property_get("ro.hardware.gralloc", def_value2, NULL) > 0) {
         auto gralloc = new MinigbmGralloc(descriptor);
         return gralloc;
     }
