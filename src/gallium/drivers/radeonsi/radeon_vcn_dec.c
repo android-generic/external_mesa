@@ -76,10 +76,16 @@ static rvcn_dec_message_avc_t get_h264_msg(struct radeon_decoder *dec,
    result.level = dec->base.level;
 
    result.sps_info_flags = 0;
-   result.sps_info_flags |= pic->pps->sps->direct_8x8_inference_flag << 0;
-   result.sps_info_flags |= pic->pps->sps->mb_adaptive_frame_field_flag << 1;
-   result.sps_info_flags |= pic->pps->sps->frame_mbs_only_flag << 2;
-   result.sps_info_flags |= pic->pps->sps->delta_pic_order_always_zero_flag << 3;
+   result.sps_info_flags |= pic->pps->sps->direct_8x8_inference_flag
+                            << RDECODE_SPS_INFO_H264_DIRECT_8X8_INFERENCE_FLAG_SHIFT;
+   result.sps_info_flags |= pic->pps->sps->mb_adaptive_frame_field_flag
+                            << RDECODE_SPS_INFO_H264_MB_ADAPTIVE_FRAME_FIELD_FLAG_SHIFT;
+   result.sps_info_flags |= pic->pps->sps->frame_mbs_only_flag
+                            << RDECODE_SPS_INFO_H264_FRAME_MBS_ONLY_FLAG_SHIFT;
+   result.sps_info_flags |= pic->pps->sps->delta_pic_order_always_zero_flag
+                            << RDECODE_SPS_INFO_H264_DELTA_PIC_ORDER_ALWAYS_ZERO_FLAG_SHIFT;
+   result.sps_info_flags |= pic->pps->sps->gaps_in_frame_num_value_allowed_flag
+                            << RDECODE_SPS_INFO_H264_GAPS_IN_FRAME_NUM_VALUE_ALLOWED_FLAG_SHIFT;
    result.sps_info_flags |= ((dec->dpb_type >= DPB_DYNAMIC_TIER_2) ? 0 : 1)
                               << RDECODE_SPS_INFO_H264_EXTENSION_SUPPORT_FLAG_SHIFT;
 
@@ -709,6 +715,7 @@ static rvcn_dec_message_av1_t get_av1_msg(struct radeon_decoder *dec,
                                           struct pipe_video_buffer *target,
                                           struct pipe_av1_picture_desc *pic)
 {
+   struct si_screen *sscreen = (struct si_screen *)dec->screen;
    rvcn_dec_message_av1_t result;
    unsigned i, j, num_refs = 0, valid_ref = UINT32_MAX;
    uint16_t tile_count = pic->picture_parameter.tile_cols * pic->picture_parameter.tile_rows;
@@ -1086,6 +1093,8 @@ static rvcn_dec_message_av1_t get_av1_msg(struct radeon_decoder *dec,
          dec->ref_codec.bufs[dec->ref_codec.num_refs++].index = result.curr_pic_idx;
       }
    }
+
+   result.av1_intrabc_workaround = sscreen->info.family == CHIP_GFX1153;
 
    return result;
 }
@@ -1776,13 +1785,13 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
    decode->dt_surf_tile_config = 0;
    decode->dt_uv_surf_tile_config = 0;
 
-   decode->dt_luma_top_offset = luma->surface.u.gfx9.surf_offset;
-   decode->dt_chroma_top_offset = chroma->surface.u.gfx9.surf_offset;
+   decode->dt_luma_top_offset = luma->surface.u.gfx9.surf_offset | (luma->surface.tile_swizzle << 8);
+   decode->dt_chroma_top_offset = chroma->surface.u.gfx9.surf_offset| (chroma->surface.tile_swizzle << 8);
    if (decode->dt_field_mode) {
       decode->dt_luma_bottom_offset =
-         luma->surface.u.gfx9.surf_offset + luma->surface.u.gfx9.surf_slice_size;
+         decode->dt_luma_top_offset + luma->surface.u.gfx9.surf_slice_size;
       decode->dt_chroma_bottom_offset =
-         chroma->surface.u.gfx9.surf_offset + chroma->surface.u.gfx9.surf_slice_size;
+         decode->dt_chroma_top_offset + chroma->surface.u.gfx9.surf_slice_size;
    } else {
       decode->dt_luma_bottom_offset = decode->dt_luma_top_offset;
       decode->dt_chroma_bottom_offset = decode->dt_chroma_top_offset;

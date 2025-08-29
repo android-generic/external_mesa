@@ -91,7 +91,7 @@ st_get_sampler_views(struct st_context *st,
                      enum pipe_shader_type shader_stage,
                      const struct gl_program *prog,
                      struct pipe_sampler_view **sampler_views,
-                     unsigned *num_owned_views)
+                     unsigned *extra_sampler_views)
 {
    struct pipe_context *pipe = st->pipe;
    const GLuint old_max = st->state.num_sampler_views[shader_stage];
@@ -100,7 +100,7 @@ st_get_sampler_views(struct st_context *st,
    GLbitfield free_slots = ~prog->SamplersUsed;
    GLbitfield external_samplers_used = prog->ExternalSamplersUsed;
    GLuint unit;
-   *num_owned_views = 0;
+   *extra_sampler_views = 0;
 
    if (samplers_used == 0x0 && old_max == 0)
       return 0;
@@ -187,6 +187,7 @@ st_get_sampler_views(struct st_context *st,
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          break;
       case PIPE_FORMAT_NV12:
          if (stObj->pt->format == PIPE_FORMAT_R8_G8B8_420_UNORM)
@@ -199,6 +200,7 @@ st_get_sampler_views(struct st_context *st,
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          break;
       case PIPE_FORMAT_NV21:
          if (stObj->pt->format == PIPE_FORMAT_R8_B8G8_420_UNORM)
@@ -211,6 +213,7 @@ st_get_sampler_views(struct st_context *st,
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          break;
       case PIPE_FORMAT_P010:
       case PIPE_FORMAT_P012:
@@ -222,6 +225,7 @@ st_get_sampler_views(struct st_context *st,
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          break;
       case PIPE_FORMAT_IYUV:
          if (stObj->pt->format == PIPE_FORMAT_R8_G8_B8_420_UNORM ||
@@ -234,9 +238,11 @@ st_get_sampler_views(struct st_context *st,
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          break;
       case PIPE_FORMAT_YUYV:
       case PIPE_FORMAT_YVYU:
@@ -252,6 +258,7 @@ st_get_sampler_views(struct st_context *st,
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          break;
       case PIPE_FORMAT_UYVY:
       case PIPE_FORMAT_VYUY:
@@ -267,6 +274,7 @@ st_get_sampler_views(struct st_context *st,
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          break;
       case PIPE_FORMAT_Y210:
       case PIPE_FORMAT_Y212:
@@ -278,13 +286,11 @@ st_get_sampler_views(struct st_context *st,
          extra = u_bit_scan(&free_slots);
          sampler_views[extra] =
                pipe->create_sampler_view(pipe, stObj->pt->next, &tmpl);
+         (*extra_sampler_views) |= 1 << extra;
          break;
       default:
          break;
       }
-
-      if (extra)
-         (*num_owned_views) = extra;
 
       num_textures = MAX2(num_textures, extra + 1);
    }
@@ -299,9 +305,9 @@ update_textures(struct st_context *st,
 {
    struct pipe_sampler_view *sampler_views[PIPE_MAX_SAMPLERS];
    struct pipe_context *pipe = st->pipe;
-   unsigned num_owned_views = 0;
+   unsigned extra_sampler_views = 0;
    unsigned num_textures =
-      st_get_sampler_views(st, shader_stage, prog, sampler_views, &num_owned_views);
+      st_get_sampler_views(st, shader_stage, prog, sampler_views, &extra_sampler_views);
 
    unsigned old_num_textures = st->state.num_sampler_views[shader_stage];
    unsigned num_unbind = old_num_textures > num_textures ?
@@ -313,9 +319,9 @@ update_textures(struct st_context *st,
 
    /* release YUV views back to driver */
    if (pipe->sampler_view_release) {
-      unsigned base_idx = num_textures - num_owned_views;
-      for (unsigned i = 0; i < num_owned_views; i++)
-         pipe->sampler_view_release(pipe, sampler_views[base_idx + i]);
+      u_foreach_bit (i, extra_sampler_views) {
+         pipe->sampler_view_release(pipe, sampler_views[i]);
+      }
    }
 }
 

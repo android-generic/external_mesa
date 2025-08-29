@@ -532,7 +532,8 @@ anv_get_format(const struct anv_physical_device *device, VkFormat vk_format)
 
    const struct anv_format *format =
       &anv_formats[ext_number].formats[enum_offset];
-   if (format->planes[0].isl_format == ISL_FORMAT_UNSUPPORTED)
+   if (format->planes[0].isl_format == ISL_FORMAT_UNSUPPORTED &&
+       format->planes[0].vbo_format == ISL_FORMAT_UNSUPPORTED)
       return NULL;
 
    /* This format is only available if custom border colors without format is
@@ -645,7 +646,8 @@ anv_get_image_format_features2(const struct anv_physical_device *physical_device
                             VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
                             VK_IMAGE_CREATE_SPARSE_ALIASED_BIT)) != 0;
 
-   if (anv_format == NULL)
+   if (anv_format == NULL ||
+       anv_format->planes[0].isl_format == ISL_FORMAT_UNSUPPORTED)
       return 0;
 
    assert((isl_mod_info != NULL) ==
@@ -659,17 +661,19 @@ anv_get_image_format_features2(const struct anv_physical_device *physical_device
    if (anv_is_compressed_format_emulated(physical_device, vk_format)) {
       assert(isl_format_is_compressed(anv_format->planes[0].isl_format));
 
-      /* require optimal tiling so that we can decompress on upload */
-      if (vk_tiling != VK_IMAGE_TILING_OPTIMAL)
-         return 0;
-
-      /* required features for compressed formats */
-      flags |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
-               VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
-               VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
-               VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
-               VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
-
+      /* Require optimal tiling so that we can decompress on upload */
+      if (vk_tiling == VK_IMAGE_TILING_OPTIMAL) {
+         /* Required features for compressed formats */
+         flags |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+                  VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
+                  VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                  VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+                  VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
+      } else if (vk_tiling == VK_IMAGE_TILING_LINEAR) {
+         /* Images used for transfers */
+         flags |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+                  VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
+      }
       return flags;
    }
 
@@ -1329,7 +1333,7 @@ anv_formats_are_compatible(
       isl_format_get_layout(img_view_isl_fmt0);
    const enum isl_format img_isl_fmt0 =
       anv_get_format_plane(physical_device,
-                           img_view_fmt->vk_format, 0, tiling).isl_format;
+                           img_fmt->vk_format, 0, tiling).isl_format;
    const struct isl_format_layout *img_fmt0_layout =
       isl_format_get_layout(img_isl_fmt0);
 

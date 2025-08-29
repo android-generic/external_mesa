@@ -1684,12 +1684,19 @@ get_intrinsic_uub(struct analysis_state *state, struct uub_query q, uint32_t *re
    case nir_intrinsic_inclusive_scan:
    case nir_intrinsic_exclusive_scan: {
       nir_op op = nir_intrinsic_reduction_op(intrin);
+      unsigned bit_size = q.scalar.def->bit_size;
+      bool exclusive = intrin->intrinsic == nir_intrinsic_exclusive_scan;
+
       if (op == nir_op_umin || op == nir_op_umax || op == nir_op_imin || op == nir_op_imax) {
          if (!q.head.pushed_queries) {
             push_uub_query(state, nir_get_scalar(intrin->src[0].ssa, q.scalar.comp));
             return;
          } else {
             *result = src[0];
+            if (exclusive) {
+               uint32_t identity = nir_const_value_as_uint(nir_alu_binop_identity(op, bit_size), bit_size);
+               *result = MAX2(*result, identity);
+            }
          }
       }
       break;
@@ -1840,11 +1847,13 @@ get_alu_uub(struct analysis_state *state, struct uub_query q, uint32_t *result, 
       uint32_t src1 = MIN2(src[1], q.scalar.def->bit_size - 1u);
       if (util_last_bit64(src[0]) + src1 <= q.scalar.def->bit_size) /* check overflow */
          *result = src[0] << src1;
+      *result = MIN2(*result, max);
       break;
    }
    case nir_op_imul:
       if (src[0] == 0 || (src[0] * src[1]) / src[0] == src[1]) /* check overflow */
          *result = src[0] * src[1];
+      *result = MIN2(*result, max);
       break;
    case nir_op_ushr: {
       nir_scalar src1_scalar = nir_scalar_chase_alu_src(q.scalar, 1);
@@ -1867,6 +1876,7 @@ get_alu_uub(struct analysis_state *state, struct uub_query q, uint32_t *result, 
    case nir_op_iadd:
       if (src[0] + src[1] >= src[0]) /* check overflow */
          *result = src[0] + src[1];
+      *result = MIN2(*result, max);
       break;
    case nir_op_umod:
       *result = src[1] ? src[1] - 1 : 0;

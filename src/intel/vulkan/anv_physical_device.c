@@ -453,6 +453,7 @@ get_features(const struct anv_physical_device *pdevice,
       .sparseResidency8Samples                  = has_sparse_or_fake &&
                                                   pdevice->info.verx10 != 125,
       .sparseResidency16Samples                 = has_sparse_or_fake &&
+                                                  pdevice->info.ver < 30 &&
                                                   pdevice->info.verx10 != 125,
       .variableMultisampleRate                  = true,
       .inheritedQueries                         = true,
@@ -1567,7 +1568,11 @@ get_properties(const struct anv_physical_device *pdevice,
 
       /* Storing a 64bit address */
       props->bufferCaptureReplayDescriptorDataSize = 8;
-      props->imageCaptureReplayDescriptorDataSize = 8;
+      /* 4 64bit addresses for the worst case (multiplanar disjoint +
+       * private binding)
+       */
+      props->imageCaptureReplayDescriptorDataSize =
+         sizeof(struct anv_image_opaque_capture_data);
       /* Offset inside the reserved border color pool */
       props->samplerCaptureReplayDescriptorDataSize = 4;
 

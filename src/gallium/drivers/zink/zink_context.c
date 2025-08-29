@@ -2276,7 +2276,7 @@ zink_set_sampler_views(struct pipe_context *pctx,
 
          struct zink_resource *res = b ? zink_resource(b->base.texture) : NULL;
          if (b && b->base.texture) {
-            if (!a || zink_resource(a->base.texture) != res) {
+            if (!a || zink_resource(a->base.texture) != res || a->import2d != b->import2d) {
                if (a)
                   unbind_samplerview(ctx, shader_type, start_slot + i);
                bind_samplerview_resource_stage(ctx, res, shader_type);
@@ -4577,6 +4577,7 @@ rebind_ubo(struct zink_context *ctx, gl_shader_stage shader, unsigned slot)
    if (res) {
       res->obj->unordered_read = false;
       res->obj->access |= VK_ACCESS_SHADER_READ_BIT;
+      res->obj->access_stage |= mesa_to_vk_shader_stage(shader);
    }
    ctx->invalidate_descriptor_state(ctx, shader, ZINK_DESCRIPTOR_TYPE_UBO, slot, 1);
    return res;
@@ -4599,6 +4600,7 @@ rebind_ssbo(struct zink_context *ctx, gl_shader_stage shader, unsigned slot)
    if (res) {
       res->obj->unordered_read = false;
       res->obj->access |= VK_ACCESS_SHADER_READ_BIT;
+      res->obj->access_stage |= mesa_to_vk_shader_stage(shader);
       if (ctx->writable_ssbos[shader] & BITFIELD_BIT(slot)) {
          res->obj->unordered_write = false;
          res->obj->access |= VK_ACCESS_SHADER_WRITE_BIT;
@@ -4625,6 +4627,7 @@ rebind_tbo(struct zink_context *ctx, gl_shader_stage shader, unsigned slot)
    if (res) {
       res->obj->unordered_read = false;
       res->obj->access |= VK_ACCESS_SHADER_READ_BIT;
+      res->obj->access_stage |= mesa_to_vk_shader_stage(shader);
    }
    ctx->invalidate_descriptor_state(ctx, shader, ZINK_DESCRIPTOR_TYPE_SAMPLER_VIEW, slot, 1);
    return res;
@@ -4654,6 +4657,7 @@ rebind_ibo(struct zink_context *ctx, gl_shader_stage shader, unsigned slot)
    if (res) {
       res->obj->unordered_read = false;
       res->obj->access |= VK_ACCESS_SHADER_READ_BIT;
+      res->obj->access_stage |= mesa_to_vk_shader_stage(shader);
       if (image_view->base.access & PIPE_IMAGE_ACCESS_WRITE) {
          res->obj->unordered_write = false;
          res->obj->access |= VK_ACCESS_SHADER_WRITE_BIT;
@@ -5295,7 +5299,8 @@ zink_context_replace_buffer_storage(struct pipe_context *pctx, struct pipe_resou
       num_rebinds = d->bind_count[0] + d->bind_count[1];
       rebind_mask = 0;
    }
-   if (num_rebinds && rebind_buffer(ctx, d, rebind_mask, num_rebinds) < num_rebinds)
+   unsigned rebind_count = num_rebinds ? rebind_buffer(ctx, d, rebind_mask, num_rebinds) : 0;
+   if (rebind_count != d->bind_count[0] + d->bind_count[1])
       ctx->buffer_rebind_counter = p_atomic_inc_return(&screen->buffer_rebind_counter);
 }
 

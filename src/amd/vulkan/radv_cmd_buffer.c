@@ -1264,7 +1264,7 @@ radv_emit_sample_locations(struct radv_cmd_buffer *cmd_buffer)
    radeon_emit(centroid_priority);
    radeon_emit(centroid_priority >> 32);
 
-   if (pdev->info.gfx_level >= GFX7) {
+   if (pdev->info.gfx_level >= GFX7 && pdev->info.gfx_level < GFX12) {
       /* The exclusion bits can be set to improve rasterization efficiency if no sample lies on the pixel boundary
        * (-8 sample offset).
        */
@@ -3005,34 +3005,6 @@ radv_emit_graphics_pipeline(struct radv_cmd_buffer *cmd_buffer)
 
    if (cmd_buffer->state.emitted_graphics_pipeline == pipeline)
       return;
-
-   if (cmd_buffer->state.emitted_graphics_pipeline) {
-      if (radv_rast_prim_is_points_or_lines(cmd_buffer->state.emitted_graphics_pipeline->rast_prim) !=
-          radv_rast_prim_is_points_or_lines(pipeline->rast_prim))
-         cmd_buffer->state.dirty |= RADV_CMD_DIRTY_GUARDBAND;
-
-      if (cmd_buffer->state.emitted_graphics_pipeline->rast_prim != pipeline->rast_prim) {
-         cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_PRIMITIVE_TOPOLOGY;
-
-         if (radv_rast_prim_is_line(cmd_buffer->state.emitted_graphics_pipeline->rast_prim) !=
-             radv_rast_prim_is_line(pipeline->rast_prim))
-            cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_RASTERIZATION_SAMPLES;
-      }
-
-      if (cmd_buffer->state.emitted_graphics_pipeline->ms.min_sample_shading != pipeline->ms.min_sample_shading ||
-          cmd_buffer->state.emitted_graphics_pipeline->uses_out_of_order_rast != pipeline->uses_out_of_order_rast ||
-          cmd_buffer->state.emitted_graphics_pipeline->uses_vrs_attachment != pipeline->uses_vrs_attachment)
-         cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_RASTERIZATION_SAMPLES;
-
-      if (cmd_buffer->state.emitted_graphics_pipeline->ms.sample_shading_enable != pipeline->ms.sample_shading_enable) {
-         cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_RASTERIZATION_SAMPLES;
-         if (pdev->info.gfx_level >= GFX10_3)
-            cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_FRAGMENT_SHADING_RATE;
-      }
-
-      if (cmd_buffer->state.emitted_graphics_pipeline->db_render_control != pipeline->db_render_control)
-         cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FRAMEBUFFER;
-   }
 
    radv_emit_graphics_shaders(cmd_buffer);
 
@@ -5400,7 +5372,7 @@ lookup_ps_epilog(struct radv_cmd_buffer *cmd_buffer)
       state.color_attachment_formats[i] = render->color_att[i].format;
    }
 
-   for (unsigned i = 0; i < MAX_RTS; i++) {
+   for (unsigned i = 0; i < render->color_att_count; i++) {
       VkBlendOp eqRGB = d->vk.cb.attachments[i].color_blend_op;
       VkBlendFactor srcRGB = d->vk.cb.attachments[i].src_color_blend_factor;
       VkBlendFactor dstRGB = d->vk.cb.attachments[i].dst_color_blend_factor;
@@ -5452,6 +5424,14 @@ lookup_ps_epilog(struct radv_cmd_buffer *cmd_buffer)
    }
 
    struct radv_ps_epilog_key key = radv_generate_ps_epilog_key(device, &state);
+
+   /* Adjust the remapping for alpha-to-coverage without any color attachment and dual-source
+    * blending to make sure colors written aren't cleared.
+    */
+   if (!state.color_attachment_count && state.need_src_alpha)
+      color_remap[0] = 0;
+   if (state.mrt0_is_dual_src)
+      color_remap[1] = 1;
 
    /* Determine the actual colors written if outputs are remapped. */
    uint32_t colors_written = 0;
@@ -6110,44 +6090,6 @@ radv_upload_graphics_shader_descriptors(struct radv_cmd_buffer *cmd_buffer)
    radv_flush_force_vrs_state(cmd_buffer);
 }
 
-struct radv_draw_info {
-   /**
-    * Number of vertices.
-    */
-   uint32_t count;
-
-   /**
-    * First instance id.
-    */
-   uint32_t first_instance;
-
-   /**
-    * Number of instances.
-    */
-   uint32_t instance_count;
-
-   /**
-    * Whether it's an indexed draw.
-    */
-   bool indexed;
-
-   /**
-    * Indirect draw parameters.
-    */
-   uint64_t indirect_va;
-   uint32_t stride;
-
-   /**
-    * Draw count parameters VA.
-    */
-   uint64_t count_va;
-
-   /**
-    * Stream output parameters VA.
-    */
-   uint64_t strmout_va;
-};
-
 struct radv_prim_vertex_count {
    uint8_t min;
    uint8_t incr;
@@ -6615,12 +6557,16 @@ radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 
 
    if (src_flags & VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) {
       flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_CB;
+      if (!image_is_coherent)
+         flush_bits |= RADV_CMD_FLAG_INV_L2;
       if (has_CB_meta)
          flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_CB_META;
    }
 
    if (src_flags & VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) {
       flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_DB;
+      if (!image_is_coherent)
+         flush_bits |= RADV_CMD_FLAG_INV_L2;
       if (has_DB_meta)
          flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_DB_META;
    }
@@ -7455,9 +7401,22 @@ radv_bind_vs_input_state(struct radv_cmd_buffer *cmd_buffer, const struct radv_g
 static void
 radv_bind_multisample_state(struct radv_cmd_buffer *cmd_buffer, const struct radv_multisample_state *ms)
 {
+   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
+   if (cmd_buffer->state.ms.sample_shading_enable != ms->sample_shading_enable) {
+      cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_RASTERIZATION_SAMPLES;
+      if (pdev->info.gfx_level >= GFX10_3)
+         cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_FRAGMENT_SHADING_RATE;
+   }
+
    if (ms->sample_shading_enable) {
       cmd_buffer->state.ms.sample_shading_enable = true;
-      cmd_buffer->state.ms.min_sample_shading = ms->min_sample_shading;
+
+      if (cmd_buffer->state.ms.min_sample_shading != ms->min_sample_shading) {
+         cmd_buffer->state.ms.min_sample_shading = ms->min_sample_shading;
+         cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_RASTERIZATION_SAMPLES;
+      }
    }
 }
 
@@ -7968,15 +7927,35 @@ radv_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeline
 
       radv_bind_custom_blend_mode(cmd_buffer, graphics_pipeline->custom_blend_mode);
 
-      cmd_buffer->state.db_render_control = graphics_pipeline->db_render_control;
+      if (cmd_buffer->state.db_render_control != graphics_pipeline->db_render_control) {
+         cmd_buffer->state.db_render_control = graphics_pipeline->db_render_control;
+         cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FRAMEBUFFER;
+      }
 
-      cmd_buffer->state.rast_prim = graphics_pipeline->rast_prim;
+      if (cmd_buffer->state.rast_prim != graphics_pipeline->rast_prim) {
+         cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_PRIMITIVE_TOPOLOGY;
+
+         if (radv_rast_prim_is_points_or_lines(cmd_buffer->state.rast_prim) !=
+             radv_rast_prim_is_points_or_lines(graphics_pipeline->rast_prim))
+            cmd_buffer->state.dirty |= RADV_CMD_DIRTY_GUARDBAND;
+
+         if (radv_rast_prim_is_line(cmd_buffer->state.rast_prim) !=
+             radv_rast_prim_is_line(graphics_pipeline->rast_prim))
+            cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_RASTERIZATION_SAMPLES;
+
+         cmd_buffer->state.rast_prim = graphics_pipeline->rast_prim;
+      }
+
+      if (cmd_buffer->state.uses_out_of_order_rast != graphics_pipeline->uses_out_of_order_rast ||
+          cmd_buffer->state.uses_vrs_attachment != graphics_pipeline->uses_vrs_attachment) {
+         cmd_buffer->state.uses_out_of_order_rast = graphics_pipeline->uses_out_of_order_rast;
+         cmd_buffer->state.uses_vrs_attachment = graphics_pipeline->uses_vrs_attachment;
+         cmd_buffer->state.dirty_dynamic |= RADV_DYNAMIC_RASTERIZATION_SAMPLES;
+      }
 
       cmd_buffer->state.ia_multi_vgt_param = graphics_pipeline->ia_multi_vgt_param;
 
-      cmd_buffer->state.uses_out_of_order_rast = graphics_pipeline->uses_out_of_order_rast;
       cmd_buffer->state.uses_vrs = graphics_pipeline->uses_vrs;
-      cmd_buffer->state.uses_vrs_attachment = graphics_pipeline->uses_vrs_attachment;
       cmd_buffer->state.uses_vrs_coarse_shading = graphics_pipeline->uses_vrs_coarse_shading;
       break;
    }
@@ -8851,8 +8830,12 @@ radv_handle_color_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, uint32_t in
    if (!(image->vk.usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
       return;
 
-   if (!radv_layout_dcc_compressed(device, image, att->iview->vk.base_mip_level, att->layout,
-                                   radv_image_queue_family_mask(att->iview->image, cmd_buffer->qf, cmd_buffer->qf)))
+   const uint32_t queue_mask = radv_image_queue_family_mask(att->iview->image, cmd_buffer->qf, cmd_buffer->qf);
+   const bool is_dcc_compressed =
+      radv_layout_dcc_compressed(device, image, att->iview->vk.base_mip_level, att->layout, queue_mask);
+   const enum radv_fmask_compression fmask_comp = radv_layout_fmask_compression(device, image, att->layout, queue_mask);
+
+   if (!is_dcc_compressed && fmask_comp == RADV_FMASK_COMPRESSION_NONE)
       return;
 
    const uint32_t color_att_idx = d->vk.cal.color_map[index];
@@ -11545,7 +11528,7 @@ radv_before_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info
    }
 
    if (!dgc)
-      radv_describe_draw(cmd_buffer);
+      radv_describe_draw(cmd_buffer, info);
    if (likely(!info->indirect_va)) {
       struct radv_cmd_state *state = &cmd_buffer->state;
       struct radeon_cmdbuf *cs = cmd_buffer->cs;
@@ -11611,7 +11594,7 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
       radv_flush_constants(cmd_buffer, pc_stages, VK_PIPELINE_BIND_POINT_GRAPHICS);
 
    if (!dgc)
-      radv_describe_draw(cmd_buffer);
+      radv_describe_draw(cmd_buffer, info);
    if (likely(!info->indirect_va)) {
       struct radv_cmd_state *state = &cmd_buffer->state;
       if (unlikely(state->last_num_instances != 1)) {
@@ -13410,10 +13393,28 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
                          sample_locs_info->sampleLocationsCount);
          }
 
+         uint32_t src_qf_index = dep_info->pImageMemoryBarriers[i].srcQueueFamilyIndex;
+         uint32_t dst_qf_index = dep_info->pImageMemoryBarriers[i].dstQueueFamilyIndex;
+
+         /* The src and dst queue family indices may contrain arbitrary values
+          * that should be ignored if they are equal. For example, see
+          * VUID-VkBufferMemoryBarrier-buffer-09095 (Vulkan spec 1.4.313).
+          *
+          *   If buffer was created with a sharing mode of
+          *   VK_SHARING_MODE_EXCLUSIVE, and srcQueueFamilyIndex and
+          *   dstQueueFamilyIndex are not equal, srcQueueFamilyIndex must be
+          *   VK_QUEUE_FAMILY_EXTERNAL, VK_QUEUE_FAMILY_FOREIGN_EXT, or a valid
+          *   queue family
+          */
+         if (src_qf_index == dst_qf_index)
+         {
+            src_qf_index = VK_QUEUE_FAMILY_IGNORED;
+            dst_qf_index = VK_QUEUE_FAMILY_IGNORED;
+         }
+
          radv_handle_image_transition(
             cmd_buffer, image, dep_info->pImageMemoryBarriers[i].oldLayout, dep_info->pImageMemoryBarriers[i].newLayout,
-            dep_info->pImageMemoryBarriers[i].srcQueueFamilyIndex,
-            dep_info->pImageMemoryBarriers[i].dstQueueFamilyIndex, &dep_info->pImageMemoryBarriers[i].subresourceRange,
+            src_qf_index, dst_qf_index, &dep_info->pImageMemoryBarriers[i].subresourceRange,
             sample_locs_info ? &sample_locations : NULL);
       }
    }
