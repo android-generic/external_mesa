@@ -332,6 +332,7 @@ pvr_get_driver_build_sha(uint8_t sha_out[const static BUILD_ID_EXPECTED_HASH_LEN
 static const driOptionDescription pvr_dri_options[] = {
    DRI_CONF_SECTION_DEBUG
       DRI_CONF_FORCE_VK_VENDOR()
+      DRI_CONF_FORCE_VK_DEVICENAME()
    DRI_CONF_SECTION_END
 };
 
@@ -353,6 +354,8 @@ static void pvr_init_dri_options(struct pvr_instance *instance)
 
    instance->force_vk_vendor =
       driQueryOptioni(&instance->dri_options, "force_vk_vendor");
+   instance->force_vk_devicename =
+      driQueryOptionstr(&instance->dri_options, "force_vk_devicename");
 }
 
 VkResult pvr_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
