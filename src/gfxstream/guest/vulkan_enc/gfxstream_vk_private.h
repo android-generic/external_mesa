@@ -69,6 +69,7 @@ struct gfxstream_vk_instance {
    struct driOptionCache dri_options;
    struct driOptionCache available_dri_options;
    uint32_t force_vk_vendor;
+   char *force_vk_devicename;
 };
 
 struct gfxstream_vk_physical_device {

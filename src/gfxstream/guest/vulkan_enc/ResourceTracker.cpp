@@ -2248,7 +2248,8 @@ void ResourceTracker::on_vkGetPhysicalDeviceProperties2(void* context,
         memcpy(device_name + VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 5, "...)", 4);
         device_name_len = VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1;
     }
-    memcpy(pProperties->properties.deviceName, device_name, device_name_len + 1);
+    memcpy(pProperties->properties.deviceName, (strlen(physicalDevice->instance->force_vk_devicename) > 0) ?
+            physicalDevice->instance->force_vk_devicename : device_name, device_name_len + 1);
 
     VkPhysicalDeviceDrmPropertiesEXT* drmProps =
         vk_find_struct(pProperties, PHYSICAL_DEVICE_DRM_PROPERTIES_EXT);
