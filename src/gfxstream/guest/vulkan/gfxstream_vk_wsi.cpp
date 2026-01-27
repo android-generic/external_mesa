@@ -19,7 +19,8 @@ VkResult gfxstream_vk_wsi_init(struct gfxstream_vk_physical_device* physical_dev
     const struct wsi_device_options options = {.sw_device = false};
     result = wsi_device_init(
         &physical_device->wsi_device, gfxstream_vk_physical_device_to_handle(physical_device),
-        gfxstream_vk_wsi_proc_addr, &physical_device->instance->vk.alloc, -1, NULL, &options);
+        gfxstream_vk_wsi_proc_addr, &physical_device->instance->vk.alloc, -1, 
+                                    &physical_device->instance->dri_options, &options);
     if (result != VK_SUCCESS) return result;
 
     // Allow guest-side modifier code paths

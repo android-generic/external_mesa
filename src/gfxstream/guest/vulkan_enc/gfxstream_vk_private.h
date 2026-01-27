@@ -56,6 +56,7 @@
 #include "vk_queue.h"
 #include "vk_semaphore.h"
 #include "vulkan/wsi/wsi_common.h"
+#include "util/xmlconfig.h"
 
 #define GFXSTREAM_DEFAULT_ALIGN 8
 
@@ -64,6 +65,10 @@ struct gfxstream_vk_instance {
     uint32_t api_version;
     bool init_failed;
     VkInstance internal_object;
+
+   struct driOptionCache dri_options;
+   struct driOptionCache available_dri_options;
+   uint32_t force_vk_vendor;
 };
 
 struct gfxstream_vk_physical_device {

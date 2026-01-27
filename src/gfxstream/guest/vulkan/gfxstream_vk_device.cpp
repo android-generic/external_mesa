@@ -14,6 +14,7 @@
 #include "gfxstream_vk_entrypoints.h"
 #include "gfxstream_vk_private.h"
 #include "util/detect_os.h"
+#include "util/driconf.h"
 #include "util/perf/cpu_trace.h"
 #include "vk_sync_dummy.h"
 #include "vk_util.h"
@@ -334,6 +335,24 @@ static struct vk_instance_extension_table* get_instance_extensions() {
 
 }  // namespace
 
+static const driOptionDescription gfxstream_vk_dri_options[] = {
+   DRI_CONF_SECTION_DEBUG
+      DRI_CONF_FORCE_VK_VENDOR()
+   DRI_CONF_SECTION_END
+};
+
+static void
+gfxstream_vk_init_dri_options(struct gfxstream_vk_instance *instance)
+{
+   driParseOptionInfo(&instance->available_dri_options, gfxstream_vk_dri_options, ARRAY_SIZE(gfxstream_vk_dri_options));
+   driParseConfigFiles(&instance->dri_options, &instance->available_dri_options, 0, "gfxstream", NULL, NULL,
+                       instance->vk.app_info.app_name, instance->vk.app_info.app_version,
+                       instance->vk.app_info.engine_name, instance->vk.app_info.engine_version);
+
+   instance->force_vk_vendor =
+      driQueryOptioni(&instance->dri_options, "force_vk_vendor");
+}
+
 VkResult gfxstream_vk_CreateInstance(const VkInstanceCreateInfo* pCreateInfo,
                                      const VkAllocationCallbacks* pAllocator,
                                      VkInstance* pInstance) {
@@ -367,6 +386,8 @@ VkResult gfxstream_vk_CreateInstance(const VkInstanceCreateInfo* pCreateInfo,
         vk_free(pAllocator, instance);
         return vk_error(NULL, result);
     }
+
+    gfxstream_vk_init_dri_options(instance);
 
     // Note: Do not support try_create_for_drm. virtio_gpu DRM device opened in
     // init_renderer above, which can still enumerate multiple physical devices on the host.
@@ -410,6 +431,9 @@ void gfxstream_vk_DestroyInstance(VkInstance _instance, const VkAllocationCallba
         auto vkEnc = gfxstream::vk::ResourceTracker::getThreadLocalEncoder();
         vkEnc->vkDestroyInstance(instance->internal_object, pAllocator, true /* do lock */);
     }
+
+    driDestroyOptionCache(&instance->dri_options);
+    driDestroyOptionInfo(&instance->available_dri_options);
 
     vk_instance_finish(&instance->vk);
     vk_free(&instance->vk.alloc, instance);

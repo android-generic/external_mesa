@@ -2236,6 +2236,10 @@ void ResourceTracker::on_vkGetPhysicalDeviceProperties2(void* context,
                  "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
     }
 
+    if (physicalDevice->instance->force_vk_vendor) {
+         pProperties->properties.vendorID = instance->force_vk_vendor;
+    }
+
     const char* transport_name = instance ? "Virtio-GPU GFXStream" : "Goldfish GFXStream";
     char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
     int device_name_len = snprintf(device_name, sizeof(device_name), "%s (%s)",
