@@ -2891,7 +2891,7 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
 
       VkOffset2D min = {
          scissor.offset.x / frag_area.width + offset.x,
-         scissor.offset.y / frag_area.width + offset.y,
+         scissor.offset.y / frag_area.height + offset.y,
       };
       VkOffset2D max = {
          DIV_ROUND_UP(scissor.offset.x + scissor.extent.width, frag_area.width) + offset.x,
@@ -3556,7 +3556,6 @@ static const enum mesa_vk_dynamic_graphics_state tu_ds_state[] = {
    MESA_VK_DYNAMIC_DS_STENCIL_COMPARE_MASK,
    MESA_VK_DYNAMIC_DS_STENCIL_WRITE_MASK,
    MESA_VK_DYNAMIC_DS_STENCIL_REFERENCE,
-   MESA_VK_DYNAMIC_DS_DEPTH_BOUNDS_TEST_BOUNDS,
 };
 
 template <chip CHIP>
@@ -3565,7 +3564,7 @@ tu6_ds_size(struct tu_device *dev,
                  const struct vk_depth_stencil_state *ds,
                  const struct vk_render_pass_state *rp)
 {
-   return 13;
+   return 10;
 }
 
 template <chip CHIP>
@@ -3615,10 +3614,6 @@ tu6_emit_ds(struct tu_cs *cs,
    tu_cs_emit_regs(cs, A6XX_RB_STENCIL_REF_CNTL(
       .ref = ds->stencil.front.reference,
       .bfref = ds->stencil.back.reference));
-
-   tu_cs_emit_regs(cs,
-                   A6XX_RB_DEPTH_BOUND_MIN(ds->depth.bounds_test.min),
-                   A6XX_RB_DEPTH_BOUND_MAX(ds->depth.bounds_test.max));
 }
 
 static const enum mesa_vk_dynamic_graphics_state tu_rb_depth_cntl_state[] = {
@@ -3626,6 +3621,7 @@ static const enum mesa_vk_dynamic_graphics_state tu_rb_depth_cntl_state[] = {
    MESA_VK_DYNAMIC_DS_DEPTH_WRITE_ENABLE,
    MESA_VK_DYNAMIC_DS_DEPTH_COMPARE_OP,
    MESA_VK_DYNAMIC_DS_DEPTH_BOUNDS_TEST_ENABLE,
+   MESA_VK_DYNAMIC_DS_DEPTH_BOUNDS_TEST_BOUNDS,
    MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE,
 };
 
@@ -3636,7 +3632,7 @@ tu6_rb_depth_cntl_size(struct tu_device *dev,
                        const struct vk_render_pass_state *rp,
                        const struct vk_rasterization_state *rs)
 {
-   return 4;
+   return 7;
 }
 
 template <chip CHIP>
@@ -3676,9 +3672,15 @@ tu6_emit_rb_depth_cntl(struct tu_cs *cs,
          .o_depth_01_clamp_en = CHIP >= A8XX,
       ));
       tu_cs_emit_regs(cs, GRAS_SU_DEPTH_CNTL(CHIP, depth_test));
+      tu_cs_emit_regs(cs,
+                      A6XX_RB_DEPTH_BOUND_MIN(ds->depth.bounds_test.min),
+                      A6XX_RB_DEPTH_BOUND_MAX(ds->depth.bounds_test.max));
    } else {
       tu_cs_emit_regs(cs, A6XX_RB_DEPTH_CNTL());
       tu_cs_emit_regs(cs, GRAS_SU_DEPTH_CNTL(CHIP));
+      tu_cs_emit_regs(cs,
+                      A6XX_RB_DEPTH_BOUND_MIN(),
+                      A6XX_RB_DEPTH_BOUND_MAX());
    }
 }
 
@@ -4676,14 +4678,6 @@ tu_pipeline_builder_init_graphics(
 
       tu_fill_render_pass_state(&rp_state, pass, subpass);
 
-      for (unsigned i = 0; i < subpass->input_count; i++) {
-         /* Input attachments stored in GMEM must be loaded with unscaled
-          * FragCoord.
-          */
-         if (subpass->input_attachments[i].patch_input_gmem)
-            builder->unscaled_input_fragcoord |= 1u << i;
-      }
-
       if (subpass->feedback_loop_color) {
          rp_flags |=
             VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
@@ -4714,7 +4708,8 @@ tu_pipeline_builder_init_graphics(
          /* Input attachments stored in GMEM must be loaded with unscaled
           * FragCoord.
           */
-         if (subpass->input_attachments[i].patch_input_gmem)
+         if (subpass->input_attachments[i].attachment != VK_ATTACHMENT_UNUSED &&
+             subpass->input_attachments[i].patch_input_gmem)
             builder->unscaled_input_fragcoord |= 1u << i;
       }
 

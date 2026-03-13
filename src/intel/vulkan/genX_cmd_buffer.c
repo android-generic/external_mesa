@@ -26,6 +26,7 @@
 
 #include "anv_private.h"
 #include "anv_measure.h"
+#include "vk_common_entrypoints.h"
 #include "vk_render_pass.h"
 #include "vk_synchronization.h"
 #include "vk_util.h"
@@ -706,19 +707,20 @@ set_image_compressed_bit(struct anv_cmd_buffer *cmd_buffer,
                    mi_imm(compressed ? UINT32_MAX : 0));
    }
 
-   /* FCV_CCS_E images are automatically fast cleared to default value at
-    * render time. In order to account for this, anv should set the the
-    * appropriate fast clear state for level0/layer0.
-    *
-    * At the moment, tracking the fast clear state for higher levels/layers is
-    * neither supported, nor do we enter a situation where it is a concern.
-    */
-   if (image->planes[plane].aux_usage == ISL_AUX_USAGE_FCV_CCS_E &&
-       base_layer == 0 && level == 0) {
+   if (compressed &&
+       image->planes[plane].aux_usage == ISL_AUX_USAGE_FCV_CCS_E) {
+      /* FCV_CCS_E images may be automatically fast cleared at render time.
+       * If the write is compressed, the fast-clear type won't be dependent on
+       * the layout. So, just pick one we know supports compression.
+       */
+      VkImageLayout layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+      enum anv_fast_clear_type render_fast_clear =
+         anv_layout_to_fast_clear_type(device->info, image, aspect, layout,
+                                       cmd_buffer->queue_family->queueFlags);
+      assert(render_fast_clear != ANV_FAST_CLEAR_NONE);
       struct anv_address fc_type_addr =
          anv_image_get_fast_clear_type_addr(device, image, aspect);
-      mi_store(&b, mi_mem32(fc_type_addr),
-                   mi_imm(ANV_FAST_CLEAR_DEFAULT_VALUE));
+      mi_store(&b, mi_mem32(fc_type_addr), mi_imm(render_fast_clear));
    }
 }
 
@@ -1284,8 +1286,11 @@ transition_color_buffer(struct anv_cmd_buffer *cmd_buffer,
          /* Ensure the raw and converted clear colors are in sync. */
          const uint32_t zero_pixel[4] = {};
          set_image_clear_color(cmd_buffer, image, aspect, zero_pixel);
-      }
-      if (base_level == 0 && base_layer == 0) {
+      } else if (base_level == 0 && base_layer == 0) {
+         /* Set the initial clear type to NONE to avoid redundant resolves.
+          * Don't apply this optimization to FCV images as they may have other
+          * levels/layers with fast-cleared blocks.
+          */
          set_image_fast_clear_state(cmd_buffer, image, aspect,
                                     ANV_FAST_CLEAR_NONE);
       }
@@ -3510,20 +3515,11 @@ aux_op_renders(enum isl_aux_op aux_op)
 static void
 add_pending_pipe_bits_for_color_aux_op(struct anv_cmd_buffer *cmd_buffer,
                                        enum isl_aux_op next_aux_op,
-                                       enum anv_pipe_bits pipe_bits)
+                                       enum anv_pipe_bits pipe_bits,
+                                       const char *reason)
 {
    const enum isl_aux_op last_aux_op = cmd_buffer->state.color_aux_op;
    assert(next_aux_op != last_aux_op);
-
-   char flush_reason[64] = {};
-   if (INTEL_DEBUG(DEBUG_PIPE_CONTROL) ||
-       u_trace_enabled(&cmd_buffer->device->ds.trace_context)) {
-      int ret = snprintf(flush_reason, sizeof(flush_reason),
-                         "color aux-op: %s -> %s",
-                         isl_aux_op_to_name(last_aux_op),
-                         isl_aux_op_to_name(next_aux_op));
-      assert(ret < sizeof(flush_reason));
-   }
 
    anv_add_pending_pipe_bits(cmd_buffer,
                              aux_op_clears(next_aux_op) ?
@@ -3531,7 +3527,7 @@ add_pending_pipe_bits_for_color_aux_op(struct anv_cmd_buffer *cmd_buffer,
                              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                              aux_op_clears(next_aux_op) ?
                              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : 0,
-                             pipe_bits, flush_reason);
+                             pipe_bits, reason);
 }
 
 void
@@ -3561,7 +3557,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        *    clear pass, to ensure correct ordering between pixels.
        */
       add_pending_pipe_bits_for_color_aux_op(
-            cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE);
+         cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE,
+         "aux color !aux->aux");
 
 #elif GFX_VERx10 == 125
       /* From the ACM Bspec 47704 (r52663), "Render Target Fast Clear":
@@ -3587,7 +3584,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
             ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
             ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
             ANV_PIPE_DATA_CACHE_FLUSH_BIT |
-            ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT);
+            ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT,
+            "aux color !aux->aux");
 
 #elif GFX_VERx10 == 120
       /* From the TGL Bspec 47704 (r52663), "Render Target Fast Clear":
@@ -3610,7 +3608,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
             ANV_PIPE_DEPTH_STALL_BIT  |
             ANV_PIPE_TILE_CACHE_FLUSH_BIT |
             ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT);
+            ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT,
+            "aux color !aux->aux");
 
 #else
       /* From the Sky Lake PRM Vol. 7, "MCS Buffer for Render Target(s)":
@@ -3638,9 +3637,9 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
       add_pending_pipe_bits_for_color_aux_op(
             cmd_buffer, next_aux_op,
             ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_END_OF_PIPE_SYNC_BIT);
+            ANV_PIPE_END_OF_PIPE_SYNC_BIT,
+            "aux color !aux->aux");
 #endif
-
    } else if (aux_op_clears(last_aux_op) && !aux_op_clears(next_aux_op)) {
 #if GFX_VERx10 >= 125
       /* From the ACM PRM Vol. 9, "Color Fast Clear Synchronization":
@@ -3652,7 +3651,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        *    RT flush = 1
        */
       add_pending_pipe_bits_for_color_aux_op(
-            cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE);
+         cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE,
+         "aux color aux->!aux");
 
 #elif GFX_VERx10 == 120
       /* From the TGL PRM Vol. 9, "Color Fast Clear Synchronization":
@@ -3673,10 +3673,11 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        * Replace the Tile Cache flush with an L3 fabric flush.
        */
       add_pending_pipe_bits_for_color_aux_op(
-            cmd_buffer, next_aux_op,
-            ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_L3_FABRIC_FLUSH_BIT |
-            ANV_PIPE_DEPTH_STALL_BIT);
+         cmd_buffer, next_aux_op,
+         ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+         ANV_PIPE_L3_FABRIC_FLUSH_BIT |
+         ANV_PIPE_DEPTH_STALL_BIT,
+         "aux color aux->!aux");
 
 #else
       /* From the Sky Lake PRM Vol. 7, "Render Target Fast Clear":
@@ -3692,9 +3693,10 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        *    synchronization.
        */
       add_pending_pipe_bits_for_color_aux_op(
-            cmd_buffer, next_aux_op,
-            ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_END_OF_PIPE_SYNC_BIT);
+         cmd_buffer, next_aux_op,
+         ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+         ANV_PIPE_END_OF_PIPE_SYNC_BIT,
+         "aux color aux->!aux");
 #endif
 
    } else if (aux_op_renders(last_aux_op) != aux_op_renders(next_aux_op)) {
@@ -3717,7 +3719,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
       add_pending_pipe_bits_for_color_aux_op(
             cmd_buffer, next_aux_op,
             ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_END_OF_PIPE_SYNC_BIT);
+            ANV_PIPE_END_OF_PIPE_SYNC_BIT,
+            "aux color render->!render");
    }
 
    if (last_aux_op != ISL_AUX_OP_FAST_CLEAR &&
@@ -3915,12 +3918,12 @@ genX(BeginCommandBuffer)(
          vk_get_command_buffer_inheritance_as_rendering_resume(cmd_buffer->vk.level,
                                                                pBeginInfo,
                                                                gcbiar_data);
+      const VkCommandBufferInheritanceRenderingInfo *inheritance_info =
+         vk_get_command_buffer_inheritance_rendering_info(cmd_buffer->vk.level,
+                                                          pBeginInfo);
       if (resume_info != NULL) {
          genX(CmdBeginRendering)(commandBuffer, resume_info);
       } else {
-         const VkCommandBufferInheritanceRenderingInfo *inheritance_info =
-            vk_get_command_buffer_inheritance_rendering_info(cmd_buffer->vk.level,
-                                                             pBeginInfo);
          assert(inheritance_info);
 
          gfx->rendering_flags = inheritance_info->flags;
@@ -3947,6 +3950,16 @@ genX(BeginCommandBuffer)(
 
          cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_RENDER_AREA |
                                         ANV_CMD_DIRTY_RENDER_TARGETS;
+      }
+
+      const VkRenderingAttachmentLocationInfo *att_loc_info =
+         inheritance_info ?
+         vk_find_struct_const(inheritance_info->pNext,
+                              RENDERING_ATTACHMENT_LOCATION_INFO) :
+         NULL;
+      if (att_loc_info != NULL) {
+         vk_common_CmdSetRenderingAttachmentLocationsKHR(
+            commandBuffer, att_loc_info);
       }
    }
 
@@ -4640,7 +4653,12 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
          }
          break;
       case VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT:
-         pipe_bits |= ANV_PIPE_STATE_CACHE_INVALIDATE_BIT;
+         /* Invalidate the state cache (when HW reads RENDER_SURFACE_STATE &
+          * SAMPLER_STATE) and the constant cache (when shaders read the
+          * descriptor buffers)
+          */
+         pipe_bits |= ANV_PIPE_STATE_CACHE_INVALIDATE_BIT |
+                      ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT;
          break;
       default:
          break; /* Nothing to do */
@@ -5478,7 +5496,11 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
     */
    bits |= ANV_PIPE_CS_STALL_BIT | ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
 
-   if (cmd_buffer->state.current_pipeline == _3D) {
+   if (cmd_buffer->state.current_pipeline == UINT32_MAX) {
+       bits |= ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+               ANV_PIPE_DEPTH_CACHE_FLUSH_BIT |
+               ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
+   } else if (cmd_buffer->state.current_pipeline == _3D) {
       bits |= ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
               ANV_PIPE_DEPTH_CACHE_FLUSH_BIT;
    } else {
@@ -5889,8 +5911,12 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
 
       info.depth_surf = &depth_surface->isl;
       info.depth_address = anv_address_physical(depth_address);
+
+      isl_surf_usage_flags_t isl_usage = ISL_SURF_USAGE_DEPTH_BIT;
+      if (anv_image_is_protected(image))
+         isl_usage |= ISL_SURF_USAGE_PROTECTED_BIT;
       info.mocs =
-         anv_mocs(device, depth_address.bo, ISL_SURF_USAGE_DEPTH_BIT);
+         anv_mocs(device, depth_address.bo, isl_usage);
 
       info.hiz_usage = gfx->depth_att.aux_usage;
       if (info.hiz_usage != ISL_AUX_USAGE_NONE) {
@@ -5927,8 +5953,12 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
 
       info.stencil_aux_usage = image->planes[stencil_plane].aux_usage;
       info.stencil_address = anv_address_physical(stencil_address);
+
+      isl_surf_usage_flags_t isl_usage = ISL_SURF_USAGE_STENCIL_BIT;
+      if (anv_image_is_protected(image))
+         isl_usage |= ISL_SURF_USAGE_PROTECTED_BIT;
       info.mocs =
-         anv_mocs(device, stencil_address.bo, ISL_SURF_USAGE_STENCIL_BIT);
+         anv_mocs(device, stencil_address.bo, isl_usage);
    }
 
    isl_emit_depth_stencil_hiz_s(&device->isl_dev, dw, &info);

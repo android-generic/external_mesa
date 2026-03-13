@@ -783,8 +783,8 @@ optimizations.extend([
 
    (('bcsel(is_only_used_as_float)', ('feq', a, 'b(is_not_zero)'), b, a), a),
    (('bcsel(is_only_used_as_float)', ('fneu', a, 'b(is_not_zero)'), a, b), a),
-   (('bcsel', ignore_exact('feq', a, 0), 0, ('fsat', ('fmul', a, 'b(is_a_number)'))), ('fsat!', ('fmul', a, b))),
-   (('bcsel', ignore_exact('fneu', a, 0), ('fsat', ('fmul', a, 'b(is_a_number)')), 0), ('fsat!', ('fmul', a, b))),
+   (('bcsel', ignore_exact('feq', a, 0), 0, ('fsat', ('fmul', a, 'b(is_a_number)'))), ('!fsat', ('fmul', a, b))),
+   (('bcsel', ignore_exact('fneu', a, 0), ('fsat', ('fmul', a, 'b(is_a_number)')), 0), ('!fsat', ('fmul', a, b))),
    (('bcsel', ignore_exact('feq', a, 0), b, ('fadd', a, 'b(is_not_zero)')), ('fadd', a, b)),
    (('bcsel', ignore_exact('fneu', a, 0), ('fadd', a, 'b(is_not_zero)'), b), ('fadd', a, b)),
 
@@ -2507,7 +2507,7 @@ optimizations.extend([
                              ('ior', ('ior', ('ilt', a, 0), ('ilt', b, 0)), ('ige', ('iadd', a, b), 0)),
                              ('iadd', a, b),
                              0x7fffffffffffffff)),
-    '(options->lower_int64_options & nir_lower_iadd_sat64) != 0', TestStatus.XFAIL),
+    '(options->lower_int64_options & nir_lower_iadd_sat64) != 0'),
 
    # int64_t sum = a - b;
    #
@@ -2936,7 +2936,7 @@ for bit_size in [8, 16, 32, 64]:
    optimizations += [
       (('iadd_sat@' + str(bit_size), a, b),
        ('bcsel', ('ige', b, 1), ('bcsel', ('ilt', ('iadd', a, b), a), intmax, ('iadd', a, b)),
-                                ('bcsel', ('ilt', a, ('iadd', a, b)), intmin, ('iadd', a, b))), 'options->lower_iadd_sat', TestStatus.XFAIL if bit_size in [8, 64] else TestStatus.PASS),
+                                ('bcsel', ('ilt', a, ('iadd', a, b)), intmin, ('iadd', a, b))), 'options->lower_iadd_sat'),
       (('isub_sat@' + str(bit_size), a, b),
        ('bcsel', ('ilt', b, 0), ('bcsel', ('ilt', ('isub', a, b), a), intmax, ('isub', a, b)),
                                 ('bcsel', ('ilt', a, ('isub', a, b)), intmin, ('isub', a, b))), 'options->lower_iadd_sat'),
@@ -3910,7 +3910,7 @@ late_optimizations.extend([
 
    # Putting this in 'optimizations' interferes with the bcsel(a, op(b, c),
    # op(b, d)) => op(b, bcsel(a, c, d)) transformations.  I do not know why.
-   (('bcsel', ('feq', ('fsqrt', 'a(is_not_negative)'), 0.0), intBitsToFloat(0x7f7fffff), ('frsq', a)),
+   (('bcsel@32', ('feq', ('fsqrt', 'a(is_a_number_not_negative)'), 0.0), intBitsToFloat(0x7f7fffff), ('frsq', a)),
     ('fmin', ('frsq', a), intBitsToFloat(0x7f7fffff))),
 
    # Things that look like DPH in the source shader may get expanded to

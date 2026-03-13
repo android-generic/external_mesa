@@ -4407,7 +4407,7 @@ brw_from_nir_emit_cs_intrinsic(nir_to_brw_state &ntb,
           */
          const unsigned num_components = nir_src_num_components(nsrc);
          const unsigned bit_size = nir_src_bit_size(nsrc);
-         const nir_const_value *nval = nir_src_as_const_value(instr->src[0]);
+         const nir_const_value *nval = nir_src_as_const_value(nsrc);
 
          assert(bit_size <= 32);
          for (unsigned j = 1; j < num_components; j++)
@@ -4875,7 +4875,7 @@ brw_from_nir_emit_task_mesh_intrinsic(nir_to_brw_state &ntb,
       UNREACHABLE("local invocation id should have been lowered earlier");
       break;
 
-   case nir_intrinsic_load_local_invocation_index:
+   case nir_intrinsic_load_local_invocation_index_intel:
       dest = retype(dest, BRW_TYPE_UD);
       bld.MOV(dest, payload.local_index);
       break;
@@ -5157,12 +5157,6 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
 
       if (opcode == BRW_OPCODE_NOP)
          break;
-
-      if (s.nir->info.shared_size > 0) {
-         assert(mesa_shader_stage_uses_workgroup(s.stage));
-      } else {
-         slm_fence = false;
-      }
 
       /* If the workgroup fits in a single HW thread, the messages for SLM are
        * processed in-order and the shader itself is already synchronized so

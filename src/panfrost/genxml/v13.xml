@@ -2247,9 +2247,9 @@
     <field name="Pre Frame 1" size="3" start="0:3" type="Pre Post Frame Shader Mode"/>
     <field name="Post Frame" size="3" start="0:6" type="Pre Post Frame Shader Mode"/>
     <field name="Downscale geometry" size="2" start="0:9" type="Downscale"/>
-    <field name="HSR Prepare Enable" size="1" start="0:11" type="bool"/>
-    <field name="HSR Prepare Interleaving Enable" size="1" start="0:12" type="bool"/>
-    <field name="HSR Prepare Filter Enable" size="1" start="0:13" type="bool"/>
+    <field name="HSR Prepass Enable" size="1" start="0:11" type="bool"/>
+    <field name="HSR Prepass Interleaving Enable" size="1" start="0:12" type="bool"/>
+    <field name="HSR Prepass Filter Enable" size="1" start="0:13" type="bool"/>
     <field name="HSR Hierarchical Optimizations Enable" size="1" start="0:14" type="bool"/>
     <field name="Internal layer index" size="8" start="0:24" type="uint"/>
     <field name="Frame argument" size="64" start="2:0" type="hex"/>
@@ -2316,7 +2316,8 @@
     <field name="MSAA" size="2" start="0:8" default="Single" type="MSAA"/>
 
     <field name="Reverse Issue Order" size="1" start="0:30" type="bool"/>
-    <!-- Note: Must be set if AFBC is enabled and effective_tile_size is not 16x16 -->
+    <!-- Must be set if either one of the effective tile size dimension is
+         smaller than the AFBC superblock dimension. -->
     <field name="Clean Pixel Write Enable" size="1" start="0:31" type="bool"/>
 
     <field name="Header" size="64" start="8:0" type="address"/>
@@ -2343,7 +2344,8 @@
     <field name="MSAA" size="2" start="0:24" default="Single" type="MSAA"/>
 
     <field name="Reverse Issue Order" size="1" start="0:30" type="bool"/>
-    <!-- Note: Must be set if AFBC is enabled and effective_tile_size is not 16x16 -->
+    <!-- Must be set if either one of the effective tile size dimension is
+         smaller than the AFBC superblock dimension. -->
     <field name="Clean Pixel Write Enable" size="1" start="0:31" type="bool"/>
 
     <field name="Header" size="64" start="12:0" type="address"/>
@@ -2443,6 +2445,8 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
+    <!-- Must be set if either one of the effective tile size dimension is
+         smaller than the AFBC superblock dimension. -->
     <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
     <field name="YUV Transform" size="1" start="2:0" type="bool"/>
     <field name="Split block" size="1" start="2:1" type="bool"/>

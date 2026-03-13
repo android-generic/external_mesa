@@ -1269,10 +1269,7 @@ emit_load_const(struct lp_build_nir_soa_context *bld,
 
    for (unsigned i = 0; i < instr->def.num_components; i++) {
      outval[i] = lp_build_const_int_vec(bld->base.gallivm, int_bld->type,
-                                        bits == 8 ? instr->value[i].u8 :
-                                        bits == 16 ? instr->value[i].u32 :
-                                        bits == 32 ? instr->value[i].u32 :
-                                                     instr->value[i].u64);
+                                        nir_const_value_as_uint(instr->value[i], bits));
    }
    for (unsigned i = instr->def.num_components; i < NIR_MAX_VEC_COMPONENTS; i++) {
       outval[i] = NULL;
@@ -2392,7 +2389,7 @@ static void emit_reduce(struct lp_build_nir_soa_context *bld, LLVMValueRef src,
       case nir_op_umax: opname = "umax"; break;
       case nir_op_fmax: opname = "fmax"; break;
       default:
-         assert(0);
+	 UNREACHABLE("Unhandled reduction operation");
       };
       snprintf(intrinsic, sizeof intrinsic, "llvm.vector.reduce.%s.v%u%s%u",
                opname,

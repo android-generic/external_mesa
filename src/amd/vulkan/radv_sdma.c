@@ -216,6 +216,7 @@ radv_sdma_get_surf(const struct radv_device *const device, const struct radv_ima
       .texel_scale = radv_sdma_get_texel_scale(image),
       .is_linear = surf->is_linear,
       .is_3d = surf->u.gfx9.resource_type == RADEON_RESOURCE_3D,
+      .is_stencil = subresource.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT,
    };
 
    const uint64_t surf_offset = (subresource.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT) ? surf->u.gfx9.zs.stencil_offset
@@ -371,6 +372,7 @@ radv_sdma_emit_copy_tiled_sub_window(const struct radv_device *device, struct ra
       .va = tiled->va,
       .format = radv_format_to_pipe_format(tiled->aspect_format),
       .bpp = tiled->bpp,
+      .is_stencil = tiled->is_stencil,
       .offset =
          {
             .x = tiled_off.x,
@@ -414,6 +416,7 @@ radv_sdma_emit_copy_t2t_sub_window(const struct radv_device *device, struct radv
       .va = src->va,
       .format = radv_format_to_pipe_format(src->aspect_format),
       .bpp = src->bpp,
+      .is_stencil = src->is_stencil,
       .offset =
          {
             .x = src_off.x,
@@ -439,6 +442,7 @@ radv_sdma_emit_copy_t2t_sub_window(const struct radv_device *device, struct radv
       .va = dst->va,
       .format = radv_format_to_pipe_format(dst->aspect_format),
       .bpp = dst->bpp,
+      .is_stencil = dst->is_stencil,
       .offset =
          {
             .x = dst_off.x,
@@ -606,18 +610,22 @@ radv_sdma_use_t2t_scanline_copy(const struct radv_device *device, const struct r
          return true;
    }
 
-   /* The two images can have a different block size,
-    * but must have the same swizzle mode.
-    */
-   if (src->micro_tile_mode != dst->micro_tile_mode)
-      return true;
-
    /* The T2T subwindow copy packet only has fields for one metadata configuration.
     * It can either compress or decompress, or copy uncompressed images, but it
     * can't copy from a compressed image to another.
     */
    if (src->is_compressed && dst->is_compressed)
       return true;
+
+   if (ver >= SDMA_7_0) {
+      /* No support for tiling format transformation at all. */
+      if (src->surf->u.gfx9.swizzle_mode != dst->surf->u.gfx9.swizzle_mode)
+         return true;
+   } else {
+      /* The two images can have a different block size, but must have the same swizzle mode. */
+      if (src->micro_tile_mode != dst->micro_tile_mode)
+         return true;
+   }
 
    const bool needs_3d_alignment = src->is_3d && (src->micro_tile_mode == RADEON_MICRO_MODE_DISPLAY ||
                                                   src->micro_tile_mode == RADEON_MICRO_MODE_STANDARD);

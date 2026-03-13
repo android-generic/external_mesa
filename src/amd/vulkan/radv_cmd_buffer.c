@@ -9550,9 +9550,9 @@ radv_handle_color_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, uint32_t in
    radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
 
    /* Force a transition to FEEDBACK_LOOP_OPTIMAL to decompress DCC. */
-   radv_handle_image_transition(cmd_buffer, att->iview->image, att->layout,
-                                VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, RADV_QUEUE_GENERAL,
-                                RADV_QUEUE_GENERAL, &range, NULL);
+   radv_handle_rendering_image_transition(
+      cmd_buffer, att->iview, render->layer_count, render->view_mask, att->layout, VK_IMAGE_LAYOUT_UNDEFINED,
+      VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, VK_IMAGE_LAYOUT_UNDEFINED, NULL);
 
    radv_describe_barrier_end(cmd_buffer);
 
@@ -9597,9 +9597,10 @@ radv_handle_depth_fbfetch_output(struct radv_cmd_buffer *cmd_buffer)
    radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
 
    /* Force a transition to FEEDBACK_LOOP_OPTIMAL to decompress HTILE. */
-   radv_handle_image_transition(cmd_buffer, att->iview->image, att->layout,
-                                VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, RADV_QUEUE_GENERAL,
-                                RADV_QUEUE_GENERAL, &range, NULL);
+   radv_handle_rendering_image_transition(cmd_buffer, att->iview, render->layer_count, render->view_mask, att->layout,
+                                          att->stencil_layout, VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
+                                          VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
+                                          render->sample_locations.count > 0 ? &render->sample_locations : NULL);
 
    radv_describe_barrier_end(cmd_buffer);
 
@@ -9642,16 +9643,19 @@ radv_CmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCou
    VK_FROM_HANDLE(radv_cmd_buffer, primary, commandBuffer);
    struct radv_device *device = radv_cmd_buffer_device(primary);
    const struct radv_physical_device *pdev = radv_device_physical(device);
+   const bool is_gfx_or_ace = primary->qf == RADV_QUEUE_GENERAL || primary->qf == RADV_QUEUE_COMPUTE;
 
    assert(commandBufferCount > 0);
 
-   radv_emit_mip_change_flush_default(primary);
+   if (is_gfx_or_ace) {
+      radv_emit_mip_change_flush_default(primary);
 
-   /* Emit pending flushes on primary prior to executing secondary */
-   radv_emit_cache_flush(primary);
+      /* Emit pending flushes on primary prior to executing secondary */
+      radv_emit_cache_flush(primary);
 
-   /* Make sure CP DMA is idle on primary prior to executing secondary. */
-   radv_cp_dma_wait_for_idle(primary);
+      /* Make sure CP DMA is idle on primary prior to executing secondary. */
+      radv_cp_dma_wait_for_idle(primary);
+   }
 
    for (uint32_t i = 0; i < commandBufferCount; i++) {
       VK_FROM_HANDLE(radv_cmd_buffer, secondary, pCmdBuffers[i]);
@@ -9694,6 +9698,9 @@ radv_CmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCou
          if (primary->state.dirty & RADV_CMD_DIRTY_FBFETCH_OUTPUT) {
             radv_handle_fbfetch_output(primary);
             primary->state.dirty &= ~RADV_CMD_DIRTY_FBFETCH_OUTPUT;
+
+            /* Emit pending flushes if a late decompression was performed. */
+            radv_emit_cache_flush(primary);
          }
 
          if (primary->state.render.active && (primary->state.dirty & RADV_CMD_DIRTY_FRAMEBUFFER)) {
@@ -9769,23 +9776,12 @@ radv_CmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCou
 
       device->ws->cs_execute_secondary(primary_cs->b, secondary_cs->b, allow_ib2);
 
-      /* When the secondary command buffer is compute only we don't
-       * need to re-emit the current graphics pipeline.
-       */
-      if (secondary->state.emitted_graphics_pipeline) {
-         primary->state.emitted_graphics_pipeline = secondary->state.emitted_graphics_pipeline;
-      }
+      primary->state.emitted_graphics_pipeline = secondary->state.emitted_graphics_pipeline;
+      primary->state.emitted_compute_pipeline = secondary->state.emitted_compute_pipeline;
+      primary->state.emitted_rt_pipeline = secondary->state.emitted_rt_pipeline;
 
-      /* When the secondary command buffer is graphics only we don't
-       * need to re-emit the current compute pipeline.
-       */
-      if (secondary->state.emitted_compute_pipeline) {
-         primary->state.emitted_compute_pipeline = secondary->state.emitted_compute_pipeline;
-      }
-
-      if (secondary->state.emitted_rt_pipeline) {
-         primary->state.emitted_rt_pipeline = secondary->state.emitted_rt_pipeline;
-      }
+      primary->state.ps_epilog = secondary->state.ps_epilog;
+      primary->state.emitted_vs_prolog = secondary->state.emitted_vs_prolog;
 
       if (secondary->state.last_ia_multi_vgt_param) {
          primary->state.last_ia_multi_vgt_param = secondary->state.last_ia_multi_vgt_param;
@@ -15174,10 +15170,19 @@ radv_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer, uint32_t firstC
 
    assert(firstCounterBuffer + counterBufferCount <= MAX_SO_BUFFERS);
 
-   if (pdev->info.gfx_level >= GFX12)
+   if (pdev->info.gfx_level >= GFX12) {
       radv_init_streamout_state(cmd_buffer);
-   else if (!pdev->use_ngg_streamout)
+
+      /* Invalidate L2 in case the buffer filled size needs to be saved because COPY_DATA isn't
+       * coherent with L2.
+       */
+      if (pdev->info.cp_sdma_ge_use_system_memory_scope) {
+         cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_L2;
+         radv_emit_cache_flush(cmd_buffer);
+      }
+   } else if (!pdev->use_ngg_streamout) {
       radv_flush_vgt_streamout(cmd_buffer);
+   }
 
    ASSERTED unsigned cdw_max = radeon_check_space(device->ws, cs->b, MAX_SO_BUFFERS * 10);
 

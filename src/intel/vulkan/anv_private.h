@@ -2533,9 +2533,6 @@ struct anv_device {
     /** List of anv_image objects with a private binding for implicit CCS */
     struct list_head                            image_private_objects;
 
-    /** List of anv_bvh_dump objects that get dumped on cmd buf completion */
-    struct list_head                            bvh_dumps;
-
     /** Memory pool for batch buffers */
     struct anv_bo_pool                          batch_bo_pool;
     /** Memory pool for utrace timestamp buffers */
@@ -2626,11 +2623,22 @@ struct anv_device {
 
     uint32_t                                    protected_session_id;
 
-    /** Pool of ray query buffers used to communicated with HW unit.
+    /** Shadow ray query BO
+     *
+     * The ray_query_bo only holds the current ray being traced. When using
+     * more than 1 ray query per thread, we cannot fit all the queries in
+     * there, so we need a another buffer to hold query data that is not
+     * currently being used by the HW for tracing, similar to a scratch space.
+     *
+     * The size of the shadow buffer depends on the number of queries per
+     * shader.
      *
      * We might need a buffer per queue family due to Wa_14022863161.
      */
-    struct anv_bo                              *ray_query_bos[2][16];
+    struct anv_bo                              *ray_query_shadow_bos[2][16];
+    /** Ray query buffer used to communicated with HW unit.
+     */
+    struct anv_bo                              *ray_query_bo[2];
 
     struct anv_shader_internal                 *rt_trampoline;
     struct anv_shader_internal                 *rt_trivial_return;
@@ -2926,7 +2934,11 @@ VkResult anv_device_wait(struct anv_device *device, struct anv_bo *bo,
 VkResult anv_device_print_init(struct anv_device *device);
 void anv_device_print_fini(struct anv_device *device);
 
-void anv_dump_bvh_to_files(struct anv_device *device);
+void anv_get_pending_bvh_dumps(struct list_head *list,
+                               uint32_t cmd_buffer_count,
+                               struct anv_cmd_buffer **cmd_buffers);
+
+void anv_dump_bvh_to_files(struct anv_device *device, struct list_head *list);
 
 void anv_wait_for_attach(void);
 
@@ -2954,12 +2966,6 @@ anv_queue_post_submit(struct anv_queue *queue, VkResult submit_result)
       if (result != VK_SUCCESS)
          result = vk_queue_set_lost(&queue->vk, "sync wait failed");
    }
-
-#if ANV_SUPPORT_RT
-   /* The recorded bvh is dumped to files upon command buffer completion */
-   if (INTEL_DEBUG_BVH_ANY)
-      anv_dump_bvh_to_files(queue->device);
-#endif
 
    return result;
 }
@@ -4237,19 +4243,10 @@ struct anv_push_constants {
     */
    uint32_t surfaces_base_offset;
 
-   /**
-    * Pointer to ray query stacks and their associated pairs of
-    * RT_DISPATCH_GLOBALS structures (see genX(setup_ray_query_globals))
+   /** Ray query globals
     *
-    * The pair of globals for each query object are stored counting up from
-    * this address in units of BRW_RT_DISPATCH_GLOBALS_ALIGN:
-    *
-    *    rq_globals = ray_query_globals + (rq * BRW_RT_DISPATCH_GLOBALS_ALIGN)
-    *
-    * The raytracing scratch area for each ray query is stored counting down
-    * from this address in units of brw_rt_ray_queries_stacks_stride(devinfo):
-    *
-    *    rq_stacks_addr = ray_query_globals - (rq * ray_queries_stacks_stride)
+    * Pointer to a couple of RT_DISPATCH_GLOBALS structures (see
+    * genX(cmd_buffer_ray_query_globals))
     */
    uint64_t ray_query_globals;
 
@@ -4752,14 +4749,9 @@ struct anv_cmd_state {
    unsigned                                     current_hash_scale;
 
    /**
-    * Number of ray query buffers allocated.
+    * A buffer used for spill/fill of ray queries.
     */
-   uint32_t                                     num_ray_query_globals;
-
-   /**
-    * Current array of RT_DISPATCH_GLOBALS for ray queries.
-    */
-   struct anv_address                           ray_query_globals;
+   struct anv_bo *                              ray_query_shadow_bo;
 
    /** Pointer to the last emitted COMPUTE_WALKER.
     *
@@ -4927,6 +4919,9 @@ struct anv_cmd_buffer {
       struct anv_video_session *vid;
       struct vk_video_session_parameters *params;
    } video;
+
+   /** List of anv_bvh_dump objects that get dumped on cmd buf completion */
+   struct list_head                            bvh_dumps;
 
    /**
     * Companion RCS command buffer to support the MSAA operations on compute

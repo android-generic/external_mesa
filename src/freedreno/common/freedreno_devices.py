@@ -942,6 +942,7 @@ a7xx_base = GPUProps(
         has_hw_multiview = True,
         has_fs_tex_prefetch = True,
         has_sampler_minmax = True,
+        has_astc_hdr = True,
 
         supports_double_threadsize = True,
 
@@ -1505,7 +1506,7 @@ a8xx_gen2_raw_magic_regs = [
         [A6XXRegs.REG_A7XX_RB_LRZ_CNTL2,      0x00000000],
         [A6XXRegs.REG_A8XX_RB_RESOLVE_CNTL_5, 0x00000001],
 
-        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AB01,   0x00000001],
+        [A6XXRegs.REG_A7XX_SP_UNKNOWN_AB01,   0x00000000],
         [A6XXRegs.REG_A7XX_SP_HLSQ_MODE_CNTL, 0x00000000],
         [A6XXRegs.REG_A8XX_SP_UNKNOWN_AB23,   0x00000000],
 

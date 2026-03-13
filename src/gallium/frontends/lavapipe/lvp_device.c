@@ -341,7 +341,7 @@ lvp_device_memory_type_for_handle_types(const struct lvp_physical_device *pdevic
       assert(!(types & ~(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
                          VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)));
 
-#ifdef HAVE_LIBDRM
+#if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
       int dmabuf_bits = DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT;
       if ((pdevice->pscreen->caps.dmabuf & dmabuf_bits) == dmabuf_bits) {
          /* If we have full dma-buf support, everything is a dma-buf */
@@ -1423,7 +1423,7 @@ lvp_physical_device_init(struct lvp_physical_device *device,
 
    device->max_images = device->pscreen->shader_caps[MESA_SHADER_FRAGMENT].max_shader_images;
    device->vk.supported_extensions = lvp_device_extensions_supported;
-#ifdef HAVE_LIBDRM
+#if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
    int dmabuf_bits = DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT;
    int supported_dmabuf_bits = device->pscreen->caps.dmabuf;
    /* if import or export is supported then EXT_external_memory_dma_buf is supported */
@@ -2457,13 +2457,15 @@ lvp_image_plane_bind(struct lvp_device *device,
                      struct lvp_image_plane *plane,
                      struct lvp_device_memory *mem,
                      VkDeviceSize memory_offset,
-                     VkDeviceSize *plane_offset)
+                     VkDeviceSize *min_plane_offset)
 {
+   VkDeviceSize plane_offset = MAX2(plane->plane_offset, *min_plane_offset);
+
    if (!device->pscreen->resource_bind_backing(device->pscreen,
                                                plane->bo,
                                                mem->pmem,
                                                0, 0,
-                                               memory_offset + *plane_offset)) {
+                                               memory_offset + plane_offset)) {
       /* This is probably caused by the texture being too large, so let's
        * report this as the *closest* allowed error-code. It's not ideal,
        * but it's unlikely that anyone will care too much.
@@ -2472,8 +2474,8 @@ lvp_image_plane_bind(struct lvp_device *device,
    }
    plane->pmem = mem->pmem;
    plane->memory_offset = memory_offset;
-   plane->plane_offset = *plane_offset;
-   *plane_offset += plane->size;
+   plane->plane_offset = plane_offset;
+   *min_plane_offset = plane_offset + plane->size;
    return VK_SUCCESS;
 }
 

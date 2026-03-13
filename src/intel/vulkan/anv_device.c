@@ -341,15 +341,21 @@ VkResult anv_CreateDevice(
    ANV_FROM_HANDLE(anv_physical_device, physical_device, physicalDevice);
    VkResult result;
    struct anv_device *device;
+   bool device_has_compute_queue = false;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
 
    /* Check requested queues and fail if we are requested to create any
     * queues with flags we don't support.
     */
-   for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++)
+   for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       if (pCreateInfo->pQueueCreateInfos[i].flags & ~VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT)
          return vk_error(physical_device, VK_ERROR_INITIALIZATION_FAILED);
+
+      const struct anv_queue_family *family =
+         &physical_device->queue.families[pCreateInfo->pQueueCreateInfos[i].queueFamilyIndex];
+      device_has_compute_queue |= family->engine_class == INTEL_ENGINE_CLASS_COMPUTE;
+   }
 
    device = vk_zalloc2(&physical_device->instance->vk.alloc, pAllocator,
                        sizeof(*device), 8,
@@ -509,7 +515,6 @@ VkResult anv_CreateDevice(
 
    list_inithead(&device->memory_objects);
    list_inithead(&device->image_private_objects);
-   list_inithead(&device->bvh_dumps);
 
    if (pthread_mutex_init(&device->mutex, NULL) != 0) {
       result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
@@ -780,9 +785,36 @@ VkResult anv_CreateDevice(
                                        device->workaround_bo->size,
                                        INTEL_DEBUG_BLOCK_TYPE_FRAME);
 
+   if (device->vk.enabled_extensions.KHR_ray_query) {
+      uint32_t ray_queries_size =
+         align(brw_rt_ray_queries_hw_stacks_size(device->info), 4096);
+
+      result = anv_device_alloc_bo(device, "ray queries",
+                                   ray_queries_size,
+                                   ANV_BO_ALLOC_INTERNAL,
+                                   0 /* explicit_address */,
+                                   &device->ray_query_bo[0]);
+      ANV_DMR_BO_ALLOC(&device->vk.base, device->ray_query_bo[0], result);
+      if (result != VK_SUCCESS)
+         goto fail_alloc_device_bo;
+
+      /* We need a separate ray query bo for CCS engine with Wa_14022863161. */
+      if (intel_needs_workaround(device->isl_dev.info, 14022863161) &&
+          device_has_compute_queue) {
+         result = anv_device_alloc_bo(device, "ray queries",
+                                      ray_queries_size,
+                                      ANV_BO_ALLOC_INTERNAL,
+                                      0 /* explicit_address */,
+                                      &device->ray_query_bo[1]);
+         ANV_DMR_BO_ALLOC(&device->vk.base, device->ray_query_bo[1], result);
+         if (result != VK_SUCCESS)
+            goto fail_ray_query_bo;
+      }
+   }
+
    result = anv_device_init_trivial_batch(device);
    if (result != VK_SUCCESS)
-      goto fail_alloc_device_bo;
+      goto fail_ray_query_bo;
 
    /* Emit the CPS states before running the initialization batch as those
     * structures are referenced.
@@ -1040,6 +1072,13 @@ VkResult anv_CreateDevice(
  fail_trivial_batch:
    ANV_DMR_BO_FREE(&device->vk.base, device->trivial_batch_bo);
    anv_device_release_bo(device, device->trivial_batch_bo);
+ fail_ray_query_bo:
+   for (unsigned i = 0; i < ARRAY_SIZE(device->ray_query_bo); i++) {
+      if (device->ray_query_bo[i]) {
+         ANV_DMR_BO_FREE(&device->vk.base, device->ray_query_bo[i]);
+         anv_device_release_bo(device, device->ray_query_bo[i]);
+      }
+   }
  fail_alloc_device_bo:
    if (device->mem_fence_bo) {
       ANV_DMR_BO_FREE(&device->vk.base, device->mem_fence_bo);
@@ -1191,12 +1230,16 @@ void anv_DestroyDevice(
    anv_scratch_pool_finish(device, &device->protected_scratch_pool);
 
    if (device->vk.enabled_extensions.KHR_ray_query) {
-      for (unsigned i = 0; i < ARRAY_SIZE(device->ray_query_bos); i++) {
-         for (unsigned j = 0; j < ARRAY_SIZE(device->ray_query_bos[0]); j++) {
-            if (device->ray_query_bos[i][j] != NULL) {
-               ANV_DMR_BO_FREE(&device->vk.base, device->ray_query_bos[i][j]);
-               anv_device_release_bo(device, device->ray_query_bos[i][j]);
+      for (unsigned i = 0; i < ARRAY_SIZE(device->ray_query_bo); i++) {
+         for (unsigned j = 0; j < ARRAY_SIZE(device->ray_query_shadow_bos[0]); j++) {
+            if (device->ray_query_shadow_bos[i][j] != NULL) {
+               ANV_DMR_BO_FREE(&device->vk.base, device->ray_query_shadow_bos[i][j]);
+               anv_device_release_bo(device, device->ray_query_shadow_bos[i][j]);
             }
+         }
+         if (device->ray_query_bo[i]) {
+            ANV_DMR_BO_FREE(&device->vk.base, device->ray_query_bo[i]);
+            anv_device_release_bo(device, device->ray_query_bo[i]);
          }
       }
    }
@@ -1522,19 +1565,18 @@ VkResult anv_AllocateMemory(
                              NULL;
    mem->dedicated_image = image;
 
+   /* If there is a dedicated image with a modifier, use that to determine
+    * compression, otherwise use the memory type.
+    */
    if (device->info->ver >= 20 && image &&
-       image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
-       isl_drm_modifier_has_aux(image->vk.drm_format_mod)) {
-      /* ISL should skip compression modifiers when no_ccs is set. */
-      assert(!INTEL_DEBUG(DEBUG_NO_CCS));
-      /* Images created with the Xe2 modifiers should be allocated into
-       * compressed memory, but we won't get such info from the memory type,
-       * refer to anv_image_is_pat_compressible(). We have to check the
-       * modifiers and enable compression if we can here.
-       */
-      alloc_flags |= ANV_BO_ALLOC_COMPRESSED;
-   } else if (mem_type->compressed && !INTEL_DEBUG(DEBUG_NO_CCS)) {
-      alloc_flags |= ANV_BO_ALLOC_COMPRESSED;
+       image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+      const bool needs_compression =
+         isl_drm_modifier_has_aux(image->vk.drm_format_mod);
+      assert(!needs_compression || !INTEL_DEBUG(DEBUG_NO_CCS));
+      alloc_flags |= needs_compression ? ANV_BO_ALLOC_COMPRESSED : 0;
+   } else {
+      alloc_flags |= (mem_type->compressed && !INTEL_DEBUG(DEBUG_NO_CCS)) ?
+                      ANV_BO_ALLOC_COMPRESSED : 0;
    }
 
    /* Anything imported or exported is EXTERNAL */

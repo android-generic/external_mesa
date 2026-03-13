@@ -597,6 +597,10 @@ anv_blorp_execute_on_companion(struct anv_cmd_buffer *cmd_buffer,
       /* Even on Xe3, no support for MSAA on BCS. */
       if (anv_cmd_buffer_is_blitter_queue(cmd_buffer))
          return true;
+
+      /* On Xe3 compute supports blits but not clear operations. */
+      if (!src_image)
+         return true;
    }
 
    if (anv_cmd_buffer_is_blitter_queue(cmd_buffer)) {
@@ -2021,7 +2025,8 @@ can_hiz_clear_att(struct anv_cmd_buffer *cmd_buffer,
     * clear the first slice of the currently configured depth/stencil view.
     */
    assert(batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL);
-   if (pRects[0].layerCount > 1 || pRects[0].baseArrayLayer > 0)
+   if (cmd_buffer->state.gfx.view_mask > 1 ||
+       pRects[0].layerCount > 1 || pRects[0].baseArrayLayer > 0)
       return false;
 
    return anv_can_hiz_clear_image(cmd_buffer, ds_att->iview->image,

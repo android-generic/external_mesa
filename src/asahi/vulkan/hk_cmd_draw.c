@@ -3212,6 +3212,9 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
 
+   if (!IS_SHADER_DIRTY(VERTEX) && !IS_SHADER_DIRTY(GEOMETRY))
+      return;
+
    /* If there's an application geometry shader, there's nothing to un/bind */
    if (gs && !gs->is_passthrough)
       return;
@@ -3221,20 +3224,17 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    uint32_t xfb_outputs = last_sw->info.xfb_info.output_count;
    bool needs_gs = xfb_outputs;
 
-   /* If we already have a matching GS configuration, we're done */
-   if ((gs != NULL) == needs_gs)
-      return;
-
    /* If we don't need a GS but we do have a passthrough, unbind it */
-   if (gs) {
-      assert(!needs_gs && gs->is_passthrough);
-      hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_GEOMETRY, NULL);
+   if (!needs_gs) {
+      if (gs != NULL) {
+         assert(gs->is_passthrough);
+         hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_GEOMETRY, NULL);
+      }
       return;
    }
 
    /* Else, we need to bind a passthrough GS */
-   size_t key_size =
-      sizeof(struct hk_passthrough_gs_key) + nir_xfb_info_size(xfb_outputs);
+   size_t key_size = hk_passthrough_gs_key_size(xfb_outputs);
    struct hk_passthrough_gs_key *key = alloca(key_size);
 
    *key = (struct hk_passthrough_gs_key){
