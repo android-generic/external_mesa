@@ -23,6 +23,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include "util/detect_os.h"
 #include <assert.h>
 
 #include <vulkan/vulkan_core.h>
@@ -259,6 +260,17 @@ static void unmap_object(uint64_t obj)
 
 /**/
 
+#if DETECT_OS_ANDROID
+#include <android/log.h>
+#define VK_CHECK(expr) \
+   do { \
+      VkResult __result = (expr); \
+      if (__result != VK_SUCCESS) { \
+         __android_log_print(ANDROID_LOG_ERROR, "MesaOverlay", "'%s' line %i failed with %s\n", \
+                 #expr, __LINE__, vk_Result_to_str(__result)); \
+      } \
+   } while (0)
+#else
 #define VK_CHECK(expr) \
    do { \
       VkResult __result = (expr); \
@@ -267,6 +279,7 @@ static void unmap_object(uint64_t obj)
                  #expr, __LINE__, vk_Result_to_str(__result)); \
       } \
    } while (0)
+#endif
 
 /**/
 
@@ -2767,3 +2780,39 @@ PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance
    if (instance_data->vtable.GetInstanceProcAddr == NULL) return NULL;
    return instance_data->vtable.GetInstanceProcAddr(instance, funcName);
 }
+
+#if DETECT_OS_ANDROID
+PUBLIC VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount, VkLayerProperties *pProperties)
+{
+   if (pPropertyCount == NULL) return VK_SUCCESS;
+   *pPropertyCount = 1;
+   if (pProperties == NULL) return VK_SUCCESS;
+   
+   strncpy(pProperties->layerName, "VK_LAYER_MESA_overlay", VK_MAX_EXTENSION_NAME_SIZE);
+   pProperties->specVersion = VK_MAKE_VERSION(1, 0, 68);
+   pProperties->implementationVersion = 1;
+   strncpy(pProperties->description, "Mesa Overlay layer", VK_MAX_DESCRIPTION_SIZE);
+   
+   return VK_SUCCESS;
+}
+
+PUBLIC VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceLayerProperties(VkPhysicalDevice physicalDevice, uint32_t *pPropertyCount, VkLayerProperties *pProperties)
+{
+   return vkEnumerateInstanceLayerProperties(pPropertyCount, pProperties);
+}
+
+PUBLIC VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
+{
+   if (pLayerName == NULL || strcmp(pLayerName, "VK_LAYER_MESA_overlay") != 0) {
+      if (pPropertyCount) *pPropertyCount = 0;
+      return VK_SUCCESS;
+   }
+   if (pPropertyCount) *pPropertyCount = 0;
+   return VK_SUCCESS;
+}
+
+PUBLIC VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
+{
+   return vkEnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
+}
+#endif
