@@ -34,6 +34,8 @@ extern "C" {
 
 #define OVERLAY_PARAMS                               \
    OVERLAY_PARAM_BOOL(device)                        \
+   OVERLAY_PARAM_BOOL(cpu)                           \
+   OVERLAY_PARAM_BOOL(cpu_task)                      \
    OVERLAY_PARAM_BOOL(format)                        \
    OVERLAY_PARAM_BOOL(fps)                           \
    OVERLAY_PARAM_BOOL(frame)                         \

@@ -57,3 +57,9 @@ install_data(
   install_dir : get_option('bindir'),
   install_mode : 'r-xr-xr-x',
 )
+
+executable(
+  'mesa_overlay_daemon',
+  'mesa_overlay_daemon.c',
+  install: true
+)
