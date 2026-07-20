@@ -23,7 +23,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include "util/detect_os.h"
 #include <assert.h>
 
 #include <vulkan/vulkan_core.h>
@@ -35,6 +34,7 @@
 
 #include "overlay_params.h"
 
+#include "util/detect_os.h"
 #include "util/u_debug.h"
 #include "util/hash_table.h"
 #include "util/list.h"
@@ -47,6 +47,12 @@
 #include "vk_enum_to_str.h"
 #include "vk_dispatch_table.h"
 #include "vk_util.h"
+
+#if DETECT_OS_ANDROID
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#endif
 
 /* Mapped from VkInstace/VkPhysicalDevice */
 struct instance_data {
@@ -193,6 +199,13 @@ struct swapchain_data {
    unsigned n_frames_since_update;
    uint64_t last_fps_update;
    double fps;
+
+   uint64_t last_cpu_total;
+   uint64_t last_cpu_idle;
+   double cpu_load;
+
+   uint64_t last_task_time;
+   double cpu_task_load;
 
    enum overlay_param_enabled stat_selector;
    double time_dividor;
@@ -821,6 +834,79 @@ static void process_control_socket(struct instance_data *instance_data)
    }
 }
 
+#if DETECT_OS_ANDROID
+static uint64_t get_cpu_times(uint64_t *idle_time) {
+   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+   if (fd < 0) return 0;
+
+   struct sockaddr_un addr;
+   memset(&addr, 0, sizeof(addr));
+   addr.sun_family = AF_UNIX;
+   strncpy(&addr.sun_path[1], "mesa_overlay_stat", sizeof(addr.sun_path) - 2);
+
+   if (connect(fd, (struct sockaddr*)&addr, sizeof(sa_family_t) + strlen("mesa_overlay_stat") + 1) < 0) {
+      close(fd);
+      return 0;
+   }
+
+   char buf[64] = {0};
+   if (read(fd, buf, sizeof(buf) - 1) <= 0) {
+      close(fd);
+      return 0;
+   }
+   close(fd);
+
+   uint64_t total = 0;
+   if (sscanf(buf, "%" PRIu64 " %" PRIu64, &total, idle_time) == 2) {
+      return total;
+   }
+   return 0;
+}
+#else
+static uint64_t get_cpu_times(uint64_t *idle_time) {
+   FILE *f = fopen("/proc/stat", "r");
+   if (!f) return 0;
+
+   char buffer[256];
+   if (!fgets(buffer, sizeof(buffer), f)) {
+      fclose(f);
+      return 0;
+   }
+   fclose(f);
+
+   uint64_t user = 0, nice = 0, system = 0, idle = 0, iowait = 0, irq = 0, softirq = 0, steal = 0;
+   if (sscanf(buffer, "cpu %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64,
+              &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) < 8) {
+      return 0;
+   }
+
+   *idle_time = idle + iowait;
+   return user + nice + system + idle + iowait + irq + softirq + steal;
+}
+#endif
+
+static uint64_t get_task_cpu_times() {
+   FILE *f = fopen("/proc/self/stat", "r");
+   if (!f) return 0;
+
+   char buffer[1024];
+   if (!fgets(buffer, sizeof(buffer), f)) {
+      fclose(f);
+      return 0;
+   }
+   fclose(f);
+
+   char *comm_end = strrchr(buffer, ')');
+   if (!comm_end) return 0;
+
+   uint64_t utime = 0, stime = 0;
+   /* Skip 11 fields: state, ppid, pgrp, session, tty_nr, tpgid, flags, minflt, cminflt, majflt, cmajflt */
+   if (sscanf(comm_end + 2, "%*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %" PRIu64 " %" PRIu64, &utime, &stime) == 2) {
+      return utime + stime;
+   }
+   return 0;
+}
+
 static void snapshot_swapchain_frame(struct swapchain_data *data)
 {
    struct device_data *device_data = data->device;
@@ -874,6 +960,31 @@ static void snapshot_swapchain_frame(struct swapchain_data *data)
       if (capture_begin ||
           elapsed >= instance_data->params.fps_sampling_period) {
          data->fps = 1000000.0f * data->n_frames_since_update / elapsed;
+
+         if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_cpu]) {
+            uint64_t cpu_idle = 0;
+            uint64_t cpu_total = get_cpu_times(&cpu_idle);
+            if (data->last_cpu_total > 0 && cpu_total > data->last_cpu_total) {
+               uint64_t totald = cpu_total - data->last_cpu_total;
+               uint64_t idled = cpu_idle - data->last_cpu_idle;
+               data->cpu_load = (double)(totald - idled) / totald * 100.0;
+            }
+            data->last_cpu_total = cpu_total;
+            data->last_cpu_idle = cpu_idle;
+         }
+
+         if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_cpu_task]) {
+            uint64_t task_time = get_task_cpu_times();
+            if (data->last_task_time > 0 && task_time > data->last_task_time) {
+               uint64_t delta_ticks = task_time - data->last_task_time;
+               double delta_seconds_cpu = (double)delta_ticks / sysconf(_SC_CLK_TCK);
+               double elapsed_seconds = elapsed / 1000000.0f;
+               long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+               data->cpu_task_load = (delta_seconds_cpu / elapsed_seconds) * 100.0 / (num_cores > 0 ? num_cores : 1);
+            }
+            data->last_task_time = task_time;
+         }
+
          if (instance_data->capture_started) {
             for (int s = 0; s < OVERLAY_PARAM_ENABLED_MAX; s++) {
                if (!instance_data->params.enabled[s])
@@ -978,6 +1089,12 @@ static void compute_swapchain_display(struct swapchain_data *data)
    if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_device])
       ImGui::Text("Device: %s", device_data->properties.deviceName);
 
+   if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_cpu])
+      ImGui::Text("CPU: %.1f%%", data->cpu_load);
+
+   if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_cpu_task])
+      ImGui::Text("CPU (Task): %.1f%%", data->cpu_task_load);
+
    if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_format]) {
       const char *format_name = vk_Format_to_str(data->format);
       format_name = format_name ? (format_name + strlen("VK_FORMAT_")) : "unknown";
@@ -1010,7 +1127,9 @@ static void compute_swapchain_display(struct swapchain_data *data)
           s == OVERLAY_PARAM_ENABLED_device ||
           s == OVERLAY_PARAM_ENABLED_format ||
           s == OVERLAY_PARAM_ENABLED_fps ||
-          s == OVERLAY_PARAM_ENABLED_frame)
+          s == OVERLAY_PARAM_ENABLED_frame ||
+          s == OVERLAY_PARAM_ENABLED_cpu ||
+          s == OVERLAY_PARAM_ENABLED_cpu_task)
          continue;
 
       char hash[40];
@@ -2787,12 +2906,12 @@ PUBLIC VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_
    if (pPropertyCount == NULL) return VK_SUCCESS;
    *pPropertyCount = 1;
    if (pProperties == NULL) return VK_SUCCESS;
-   
+
    strncpy(pProperties->layerName, "VK_LAYER_MESA_overlay", VK_MAX_EXTENSION_NAME_SIZE);
    pProperties->specVersion = VK_MAKE_VERSION(1, 0, 68);
    pProperties->implementationVersion = 1;
    strncpy(pProperties->description, "Mesa Overlay layer", VK_MAX_DESCRIPTION_SIZE);
-   
+
    return VK_SUCCESS;
 }
 
