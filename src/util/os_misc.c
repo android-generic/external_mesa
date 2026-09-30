@@ -140,6 +140,7 @@ os_log_message(const char *message)
 #if DETECT_OS_ANDROID
 #  include <ctype.h>
 #  include "c11/threads.h"
+#  include "u_atomic.h"
 
 /**
  * In Android 26+ there is no restriction on the length of the name for a
@@ -150,6 +151,41 @@ os_log_message(const char *message)
 #undef PROPERTY_KEY_MAX
 #define PROPERTY_KEY_MAX 128
 #endif /* ANDROID_API_LEVEL >= 26 */
+
+/* Highest representable chunk index, chunk indices are formatted with
+ * "%03d".
+ */
+#define OS_ANDROID_OPTION_MAX_CHUNKS 999
+
+/* Upper bound on the length of an option value that is split over several
+ * properties.
+ */
+#define OS_ANDROID_OPTION_MAX_VALUE 4096
+
+/**
+ * Report a problem with a split option value.
+ *
+ * Only the first problem is reported, since os_get_option() may be called
+ * from many places and repeatedly. The flag is set before logging because
+ * os_log_message() looks up an option itself, which must not recurse back
+ * into here.
+ */
+static void
+os_android_option_warn(const char *fmt, ...)
+{
+   static bool warned = false;
+   char msg[256];
+   va_list args;
+
+   if (p_atomic_read_relaxed(&warned))
+      return;
+   p_atomic_set(&warned, true);
+
+   va_start(args, fmt);
+   vsnprintf(msg, sizeof(msg), fmt, args);
+   va_end(args);
+   os_log_message(msg);
+}
 
 /**
  * Get an option value from android's property system, as a fallback to
@@ -170,11 +206,25 @@ os_log_message(const char *message)
  *  - MESA_EXTENSION_OVERRIDE -> mesa.extension.override
  *  - GALLIUM_HUD -> mesa.gallium.hud
  *
+ * A single property value is limited to PROPERTY_VALUE_MAX (92) bytes, which
+ * is not enough for options taking a long configuration string, such as the
+ * Mesa overlay and GalliumHUD configs. Such an option may be spread over a
+ * series of numbered properties that are concatenated back together here:
+ *
+ *  - debug.mesa.vk.layer.mesa.overlay.config.001
+ *  - debug.mesa.vk.layer.mesa.overlay.config.002
+ *  - debug.mesa.vk.layer.mesa.overlay.config.003
+ *
+ * The properties must be numbered consecutively, starting at .001: the
+ * sequence ends at the first index that is not set. If no numbered property
+ * is set, the plain (non-split) property is used instead, so that existing
+ * setups keep working unchanged.
+ *
  */
 static char *
 os_get_android_option(const char *name)
 {
-   static thread_local char os_android_option_value[PROPERTY_VALUE_MAX];
+   static thread_local char os_android_option_value[OS_ANDROID_OPTION_MAX_VALUE];
    char key[PROPERTY_KEY_MAX];
    char *p = key, *end = key + PROPERTY_KEY_MAX;
    /* add "mesa." prefix if necessary: */
@@ -191,13 +241,70 @@ os_get_android_option(const char *name)
 
    /* prefixes to search sorted by preference */
    const char *prefices[] = { "debug.", "vendor.", "" };
-   char full_key[PROPERTY_KEY_MAX];
-   int len = 0;
    for (int i = 0; i < ARRAY_SIZE(prefices); i++) {
-      strlcpy(full_key, prefices[i], PROPERTY_KEY_MAX);
-      strlcat(full_key, key, PROPERTY_KEY_MAX);
-      len = property_get(full_key, os_android_option_value, NULL);
-      if (len > 0)
+      char full_key[PROPERTY_KEY_MAX];
+      char chunk[PROPERTY_VALUE_MAX];
+      size_t base_len;
+      size_t len = 0;
+      int n = 0;
+      bool truncated = false;
+
+      strlcpy(full_key, prefices[i], sizeof(full_key));
+      strlcat(full_key, key, sizeof(full_key));
+      base_len = strlen(full_key);
+      if (base_len >= sizeof(full_key))
+         continue; /* the name doesn't even fit, nothing left to look up */
+
+      /* ".001" and ".999" have the same length, so a single check up front
+       * tells whether every chunk name will fit. If it doesn't, the split
+       * lookup is skipped silently as only the plain property can be read.
+       */
+      if (base_len + strlen(".001") < sizeof(full_key)) {
+         for (n = 1; n <= OS_ANDROID_OPTION_MAX_CHUNKS; n++) {
+            int chunk_len;
+
+            snprintf(full_key + base_len, sizeof(full_key) - base_len,
+                     ".%03d", n);
+            chunk_len = property_get(full_key, chunk, NULL);
+            if (chunk_len <= 0)
+               break; /* end of the sequence */
+
+            if (len + chunk_len + 1 > sizeof(os_android_option_value)) {
+               truncated = true;
+               break;
+            }
+            memcpy(os_android_option_value + len, chunk, chunk_len);
+            len += chunk_len;
+            os_android_option_value[len] = '\0';
+         }
+      }
+
+      if (len > 0) {
+         if (truncated) {
+            os_android_option_warn("os_get_option: split value of '%s' is "
+                                   "longer than %d bytes, truncating", name,
+                                   OS_ANDROID_OPTION_MAX_VALUE - 1);
+         } else if (n < OS_ANDROID_OPTION_MAX_CHUNKS) {
+            /* One extra probe: a chunk existing past the first index that
+             * isn't set means the sequence has a hole, which would otherwise
+             * silently truncate the value.
+             */
+            snprintf(full_key + base_len, sizeof(full_key) - base_len,
+                     ".%03d", n + 1);
+            if (property_get(full_key, chunk, NULL) > 0) {
+               snprintf(full_key + base_len, sizeof(full_key) - base_len,
+                        ".%03d", n);
+               os_android_option_warn("os_get_option: '%s' is not set, the "
+                                      "remaining chunks of '%s' are ignored",
+                                      full_key, name);
+            }
+         }
+         return os_android_option_value;
+      }
+
+      /* No split value, fall back to the plain property. */
+      full_key[base_len] = '\0';
+      if (property_get(full_key, os_android_option_value, NULL) > 0)
          return os_android_option_value;
    }
    return NULL;
