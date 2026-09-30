@@ -501,6 +501,35 @@ NOTE: Any driver that wishes to support Android system properties should replace
 any calls to ``getenv()`` with ``os_get_option()``, which automatically handles
 both environment variables and Android system properties.
 
+.. _android-long-values:
+
+Long Values
+^^^^^^^^^^^
+
+A single system property value is limited to 92 bytes, which is not enough for
+options that take a long configuration string, such as
+``VK_LAYER_MESA_OVERLAY_CONFIG`` or ``GALLIUM_HUD``. Such an option can be
+split over a series of numbered properties, which are concatenated back
+together in index order:
+
+.. code-block:: sh
+
+   $ adb shell setprop debug.mesa.gallium.hud.001 \
+       'time,primitives-generated'
+   $ adb shell setprop debug.mesa.gallium.hud.002 \
+       '+.w256.h64.x1600.y520.d.c1000fps'
+
+The numbered properties must be consecutive and start at ``.001``: the sequence
+ends at the first index that is not set, and a warning is logged if a later
+property is found. Up to 999 chunks are read, and the concatenated value is
+limited to 4095 bytes.
+
+If no numbered property is set, the plain (non-split) property is used, so
+existing setups keep working unchanged. The numbered properties take priority
+over the plain one, and the ``debug.`` / ``vendor.`` / bare prefix order still
+applies to each of them. Note that the value is only split when it comes from
+system properties: a matching environment variable always takes precedence.
+
 .. _envvars-android-app-developers:
 
 Android App Developers
